@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>串流器 · 节目单</title>
+  </head>
+  <body>
+    <div class="wrap">
+      <span class="badge">正在直播</span>
+      <h1>本地文件直播测试</h1>
+      <p>本页面由 <strong>StreamingTools</strong> 推送的 RTMP 流转码而来。</p>
+      <p class="mono">hls.js 播放 m3u8 低延迟直播流</p>
+      <video id="v" controls autoplay muted playsinline></video>
+      <p id="err" class="err"></p>
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+    <script>
+      const video = document.getElementById('v')
+      const err = document.getElementById('err')
+      const src = 'stream.m3u8'
+      if (window.Hls && window.Hls.isSupported()) {
+        const hls = new window.Hls({ lowLatencyMode: true, liveSyncDurationCount: 2 })
+        hls.loadSource(src)
+        hls.attachMedia(video)
+        hls.on(window.Hls.Events.ERROR, (_e, data) => {
+          if (data.fatal) err.textContent = '播放出错: ' + data.details
+        })
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = src
+      } else {
+        err.textContent = '此浏览器不支持 HLS 播放，请使用下方 HLS 服务器输出的地址在 VLC / PotPlayer 中打开。'
+      }
+    </script>
+    <style>
+      body { margin: 0; font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #0d1117; color: #e6edf3; display: grid; place-items: center; min-height: 100vh; }
+      .wrap { width: min(900px, 92vw); }
+      h1 { font-size: 22px; margin: 10px 0 6px; }
+      p { color: #9aa8b6; font-size: 14px; margin: 4px 0; }
+      .mono { font-family: Consolas, monospace; font-size: 12px; }
+      .badge { display: inline-block; padding: 3px 10px; border-radius: 999px; background: #f8514922; color: #ff8a80; border: 1px solid #f8514966; font-size: 12px; }
+      video { width: 100%; margin-top: 14px; background: #000; border-radius: 8px; border: 1px solid #26313d; }
+      .err { color: #ff8a80; }
+    </style>
+  </body>
+</html>

@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------- build output
+out/
+release/
+dist/
+*.tsbuildinfo
+
+# ---------------------------------------------------------------- dependencies
+node_modules/
+
+# ------------------------------------------------- test fixtures and artefacts
+# Regenerated on demand by `node .test/make-fixtures.mjs`.
+.test/*.mp4
+.test/*.flv
+.test/*.png
+.test/*.srt
+.test/*.json
+.test/*.log
+.test/*.bundle.mjs
+
+# --------------------------------------------------- optional bundled ffmpeg
+# See README: drop ffmpeg.exe/ffprobe.exe into bin/ to ship them with the app.
+bin/ffmpeg*
+bin/ffprobe*
+bin/*.zip
+
+# --------------------------------------------------------- runtime data folder
+# Written by the app inside the application directory: settings.json,
+# playlist.json, presets.json and the Cache/ subfolder.
+Data/
+
+# ------------------------------------------------------------- editor / OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.local

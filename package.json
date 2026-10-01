@@ -1,0 +1,42 @@
+{
+  "name": "rtmp-file-streamer",
+  "productName": "RTMP File Streamer",
+  "version": "1.0.0",
+  "description": "Local file to RTMP live streaming desktop app powered by FFmpeg",
+  "main": "./out/main/index.js",
+  "author": "StreamingTools",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "build": "electron-vite build",
+    "dist": "electron-vite build && electron-builder --win --x64 --dir --config electron-builder.config.cjs",
+    "test:bundles": "node .test/build-bundles.mjs",
+    "test:unit": "node .test/harness.mjs",
+    "test:engine": "node .test/run-engine-test.mjs",
+    "test:ui": "node .test/run-ui-test.mjs",
+    "test:presets": "node .test/run-preset-test.mjs",
+    "test:layout": "node .test/layout-e2e.mjs",
+    "test:datadir": "node .test/data-dir-e2e.mjs",
+    "test": "pnpm run typecheck && pnpm run build && pnpm run test:bundles && pnpm run test:unit && pnpm run test:engine && pnpm run test:ui && pnpm run test:presets"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6"
+  }
+}

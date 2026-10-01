@@ -1,0 +1,6 @@
+# Electron ships prebuilt binaries through install scripts, which pnpm blocks by
+# default. These entries let a fresh `pnpm install` fetch them.
+allowBuilds:
+  electron: true
+  esbuild: true
+  electron-winstaller: true
