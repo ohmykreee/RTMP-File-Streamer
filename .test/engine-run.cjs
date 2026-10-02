@@ -438,6 +438,19 @@ async function main() {
   )
   record('phase 2 left the engine idle', phase2Status.state === 'idle', phase2Status.state)
 
+  /*
+   * The UI keys log rows by `entry.id`. Engine entries carry their own counter
+   * while the main process uses another one for app messages, so the two streams
+   * must not be handed to React as-is: colliding keys make rows disappear and
+   * make level filtering look like it only covers part of the log. The renderer
+   * re-keys every entry, and this check proves the source really does collide
+   * (so the re-keying stays justified rather than accidental).
+   */
+  const ids = logs.map((l) => l.id)
+  const duplicates = ids.length - new Set(ids).size
+  note('engine log ids', `${ids.length} entries, id range ${Math.min(...ids)}..${Math.max(...ids)}, duplicates=${duplicates}`)
+  record('this engine run emitted unique log ids', duplicates === 0, `${ids.length} entries, ${duplicates} duplicate id(s)`)
+
   const passed = results.filter((r) => r.ok).length
   note('summary', `${passed}/${results.length} checks passed`)
 

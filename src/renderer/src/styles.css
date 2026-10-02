@@ -1475,6 +1475,14 @@ input[type='color'] {
   color: #fff;
 }
 
+/* Divider between 「全部」 and the level buttons inside the segment bar. */
+.seg-sep {
+  align-self: stretch;
+  width: 1px;
+  margin: 3px 0;
+  background: var(--border-strong);
+}
+
 .mini-check {
   display: inline-flex;
   align-items: center;

@@ -16,6 +16,7 @@ import type {
   SubtitleRenderSettings,
   VideoSettings
 } from '@shared/types'
+import { LOG_HISTORY_LIMIT } from '@shared/defaults'
 
 export interface StreamerState {
   ready: boolean
@@ -63,6 +64,24 @@ export function useStreamer() {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [busy, setBusy] = useState(false)
   const logBuf = useRef<LogEntry[]>([])
+  /**
+   * Keys for the log list.
+   *
+   * `LogEntry.id` is only unique per writer: the main process numbers its own
+   * messages while StreamEngine numbers the engine's, and both start at 1. Using
+   * those values as React keys makes the two streams collide, which silently
+   * drops rows and makes level filtering look like it only covers part of the
+   * log. The renderer therefore re-keys every entry it appends with a counter
+   * that never restarts.
+   */
+  const logKey = useRef(0)
+
+  /** Stamps renderer-unique keys and trims the history to the shared limit. */
+  const appendLogs = useCallback((entries: LogEntry[]): void => {
+    if (entries.length === 0) return
+    const keyed = entries.map((e) => ({ ...e, id: ++logKey.current }))
+    setLogs((prev) => [...prev, ...keyed].slice(-LOG_HISTORY_LIMIT))
+  }, [])
 
   /* ---------------- bootstrap + subscriptions ---------------- */
 
@@ -125,7 +144,10 @@ export function useStreamer() {
       setSettings(settingsRes)
       setPlaylist(playlistRes)
       setStatus(statusRes)
-      setLogs(logsRes.slice(-500))
+      // The whole history the main process still holds, so the level filter and
+      // the 全部 view cover earlier pushes too, not just what arrived since this
+      // window opened.
+      appendLogs(logsRes.slice(-LOG_HISTORY_LIMIT))
       setReady(true)
       void refreshCapabilities(false)
     })()
@@ -140,14 +162,14 @@ export function useStreamer() {
       if (logBuf.current.length > 60) {
         const batch = logBuf.current
         logBuf.current = []
-        setLogs((prev) => [...prev, ...batch].slice(-1500))
+        appendLogs(batch)
       }
     })
     const flush = window.setInterval(() => {
       if (logBuf.current.length > 0) {
         const batch = logBuf.current
         logBuf.current = []
-        setLogs((prev) => [...prev, ...batch].slice(-1500))
+        appendLogs(batch)
       }
     }, 250)
 
@@ -159,7 +181,7 @@ export function useStreamer() {
       offLog()
       window.clearInterval(flush)
     }
-  }, [bridge, refreshCapabilities])
+  }, [appendLogs, bridge, refreshCapabilities])
 
   /* ---------------- settings updates ---------------- */
 
@@ -301,7 +323,19 @@ export function useStreamer() {
     (url: string, key: string): Promise<RtmpTestResult> => requireBridge().testRtmp({ url, streamKey: key, timeoutSec: 25 }),
     [requireBridge]
   )
-  const clearLogs = useCallback(() => requireBridge().clearLogs(), [requireBridge])
+  /**
+   * Empties the log panel.
+   *
+   * The renderer holds the list it renders, and the main process keeps its own
+   * ring buffer — both have to go, otherwise the panel stays populated (the
+   * renderer never learns about the clear) or the next batch of buffered entries
+   * refills it from the main-process copy.
+   */
+  const clearLogs = useCallback(async (): Promise<void> => {
+    logBuf.current = []
+    setLogs([])
+    await requireBridge().clearLogs()
+  }, [requireBridge])
   const showItemInFolder = useCallback((p: string) => requireBridge().showItemInFolder(p), [requireBridge])
 
   const openLogsDir = useCallback(() => requireBridge().openLogsDir(), [requireBridge])

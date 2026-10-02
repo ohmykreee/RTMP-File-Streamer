@@ -10,7 +10,7 @@ import { getSettingsPath, loadSettings, saveSettings } from './store/settings'
 import { getPresetLocation, listPresets } from './store/presets'
 import { setupDataPaths } from './store/paths'
 import { appendLogEntry, closeLogSession, getPersistedLogInfo, startLogSession } from './store/logger'
-import { BUILTIN_PRESETS } from '@shared/defaults'
+import { BUILTIN_PRESETS, LOG_HISTORY_LIMIT } from '@shared/defaults'
 import {
   attachSubtitleFile,
   createPlaylistItems,
@@ -41,10 +41,14 @@ let saveTimer: NodeJS.Timeout | null = null
 /**
  * In-memory entry: shown in the UI log panel.
  * Persisted entry: appended to `Data/Logs/session-*.log` by the logger.
+ *
+ * `entry.id` is only unique per writer (this module and StreamEngine keep
+ * separate counters), so consumers must not treat it as a list-wide key — the
+ * renderer re-keys every entry when it appends it.
  */
 function emitLog(entry: LogEntry, context?: { itemName?: string; itemPath?: string }): void {
   logs.push(entry)
-  if (logs.length > 5000) logs.splice(0, logs.length - 5000)
+  if (logs.length > LOG_HISTORY_LIMIT) logs.splice(0, logs.length - LOG_HISTORY_LIMIT)
   mainWindow?.webContents.send(IPC.evtLog, entry)
   appendLogEntry(entry, context)
 }

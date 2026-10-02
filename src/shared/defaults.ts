@@ -82,6 +82,16 @@ export const DEFAULT_SESSION: SessionSettings = {
 export const OBS_PORT_MIN = 1024
 export const OBS_PORT_MAX = 65535
 
+/**
+ * How many log entries the run keeps in memory.
+ *
+ * Shared by the main process (the app-side ring buffer) and the renderer (its
+ * copy of the history): they must agree, or a reload would silently drop entries
+ * the main process still holds and the level filter would look like it only
+ * covers the most recent part of the run.
+ */
+export const LOG_HISTORY_LIMIT = 5000
+
 /** Resolution presets offered by the two-field scale control. */
 export const SCALE_PRESETS: { label: string; width: number; height: number }[] = [
   { label: '4K (3840×2160)', width: 3840, height: 2160 },

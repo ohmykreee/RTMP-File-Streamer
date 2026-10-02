@@ -365,6 +365,17 @@ while (Date.now() < finishDeadline) {
 }
 record('session returned to idle after the queue finished', idleReached)
 
+/* ---------------- log list integrity ----------------
+ * Two writers feed the log list (the main process and StreamEngine) and each
+ * numbered its entries from 1, so those ids collide. The renderer re-keys every
+ * entry; if that regressed, React would silently drop the colliding rows — which
+ * also made level filtering look like it only covered the latest push.
+ *
+ * Meanwhile the panel is still collapsed, so the rows are checked after it opens
+ * (the body is only mounted while expanded). */
+const history = JSON.parse(await evaluate(`window.streamer.getLogs().then(l => JSON.stringify({ entries: l.length }))`))
+console.log(`    [note] main-process ring buffer holds ${history.entries} entries`)
+
 /* ---------------- the log panel, now opened from its own header ----------------
  * The duplicate 「📋 日志」 button in the player bar is gone; the panel header is
  * the only toggle, and the filter toolbar only exists while the panel is open. */
@@ -401,6 +412,41 @@ record(
   'the filter row is 全部 plus five levels including 调试',
   JSON.stringify(expanded.buttons) === JSON.stringify(['全部', '调试', '信息', '警告', '错误', 'FFmpeg']),
   JSON.stringify(expanded.buttons)
+)
+record(
+  'a separator splits 全部 from the level buttons',
+  await evaluate(`(() => {
+    const seg = document.querySelector('.logs-actions .seg')
+    const sep = seg ? seg.querySelector('.seg-sep') : null
+    if (!sep) return false
+    // Between the 「全部」 button and the first level button, and actually visible.
+    return sep.previousElementSibling && sep.previousElementSibling.textContent.trim() === '全部' &&
+      sep.nextElementSibling && sep.nextElementSibling.textContent.trim() === '调试' &&
+      getComputedStyle(sep).width !== '0px'
+  })()`),
+  'divider between 全部 and 调试'
+)
+
+/* The panel must render everything it holds: the header count comes from the same
+ * array, so a mismatch means rows were dropped while mounting (the id collision),
+ * and the history it holds must be the whole main-process buffer. */
+const rendered = JSON.parse(
+  await evaluate(`(() => {
+    const header = document.querySelector('.logs-title')?.textContent ?? ''
+    const held = Number((header.match(/\\((\\d+)\\)/) ?? [])[1] ?? -1)
+    return JSON.stringify({
+      held,
+      rows: document.querySelectorAll('.log-line').length,
+      levels: [...new Set([...document.querySelectorAll('.log-line')].map(e => e.className.replace('log-line lv-', '')))].sort()
+    })
+  })()`)
+)
+record('every held log entry is rendered', rendered.held > 100 && rendered.rows === rendered.held, `held=${rendered.held} rows=${rendered.rows}`)
+record('the panel holds the whole main-process history', rendered.held === history.entries, `panel=${rendered.held} main=${history.entries}`)
+record(
+  'the log shows entries from both writers (app + engine)',
+  rendered.levels.length >= 3,
+  `levels in view: ${rendered.levels.join(', ')}`
 )
 
 // 「全部」 is active by default (no level selected); pressing 调试 must drop it.
@@ -451,6 +497,70 @@ record(
   JSON.stringify(backToAll.active) === JSON.stringify(['全部']) && backToAll.lines > 3,
   JSON.stringify(backToAll)
 )
+
+/* A level filter must hold for the WHOLE list, not just the newest entries: every
+ * rendered row has to carry the selected level, and the count has to match the
+ * levels actually present in the history. */
+const errorFilter = JSON.parse(
+  await evaluate(`(() => {
+    const btn = [...document.querySelectorAll('.logs-actions .seg-btn')].find(b => b.textContent.trim() === '错误')
+    btn?.click()
+    const header = document.querySelector('.logs-title')?.textContent ?? ''
+    return JSON.stringify({ held: Number((header.match(/\\((\\d+)\\)/) ?? [])[1] ?? -1) })
+  })()`)
+)
+await delay(400)
+const onlyErrors = JSON.parse(
+  await evaluate(`(() => {
+    const rows = [...document.querySelectorAll('.log-line')]
+    return JSON.stringify({
+      rows: rows.length,
+      foreign: rows.filter(r => !r.classList.contains('lv-error')).length,
+      header: (document.querySelector('.logs-title')?.textContent ?? '').replace(/\\s/g, '')
+    })
+  })()`)
+)
+record(
+  'a single level filter shows only that level, across the whole list',
+  onlyErrors.foreign === 0 && onlyErrors.rows === 0 && /^▸运行日志\(0\/\d+\)$/.test(onlyErrors.header),
+  `history had ${errorFilter.held} entries, rows=${onlyErrors.rows}, foreign=${onlyErrors.foreign}, header=${onlyErrors.header}`
+)
+
+/* ---------------- the 清空 button actually empties the panel ---------------- */
+// The header reads `(total)` when nothing is filtered and `(shown/total)`
+// otherwise; parse whichever form is present.
+const readPanelCounts = async () =>
+  JSON.parse(
+    await evaluate(`(() => {
+      const header = document.querySelector('.logs-title')?.textContent ?? ''
+      const pair = header.match(/\\((\\d+)(?:\\/(\\d+))?\\)/)
+      const shown = pair ? Number(pair[1]) : -1
+      const held = pair ? Number(pair[2] ?? pair[1]) : -1
+      return JSON.stringify({ header: header.replace(/\\s/g, ''), shown, held, rows: document.querySelectorAll('.log-line').length })
+    })()`)
+  )
+
+await evaluate(`(() => {
+  const btn = [...document.querySelectorAll('.logs-actions button')].find(b => b.textContent.trim() === '清空')
+  btn?.click()
+  return 'ok'
+})()`)
+await delay(600)
+const afterClear = await readPanelCounts()
+record('清空 empties the rendered log list', afterClear.rows === 0 && afterClear.held === 0, JSON.stringify(afterClear))
+
+/* Nothing may refill the panel afterwards: the renderer cleared its own list, and
+ * the main process has to have dropped its copy as well — otherwise the next
+ * event would hand the old entries straight back. */
+const clearedUpstream = JSON.parse(await evaluate(`window.streamer.getLogs().then(l => JSON.stringify({ entries: l.length }))`))
+record(
+  '清空 also clears the main-process buffer (nothing can be handed back)',
+  clearedUpstream.entries === 0,
+  `main-process entries after 清空: ${clearedUpstream.entries}`
+)
+await delay(1200)
+const settled = await readPanelCounts()
+record('the cleared panel stays empty', settled.rows === 0 && settled.held === 0, JSON.stringify(settled))
 
 const errorLines = await evaluate(
   'JSON.stringify([...document.querySelectorAll(".log-line.lv-error .log-msg")].map(e => e.textContent).slice(0,3))'

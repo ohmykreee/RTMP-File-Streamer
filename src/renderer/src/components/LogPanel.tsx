@@ -92,6 +92,9 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
             >
               全部
             </button>
+            {/* 「全部」 is a different kind of control (it replaces the selection
+                rather than joining it), so it is set apart from the levels. */}
+            <span className="seg-sep" aria-hidden="true" />
             {LEVELS.map((l) => (
               <button
                 key={l.key}
