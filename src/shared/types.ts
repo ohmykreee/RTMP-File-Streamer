@@ -237,6 +237,15 @@ export interface OutputSettings {
   /** obs-websocket compatible control server. */
   obsWebSocket: ObsWebSocketSettings
   /**
+   * Seconds of encoded material the pusher keeps in hand before publishing it.
+   *
+   * The encoder runs ahead of the pusher by this much, so a short encoding
+   * stall is paid out of the buffer instead of starving the player. It is also
+   * the extra delay a viewer sits behind the live edge, so it is a trade-off,
+   * not a free win. 0 keeps the old single-process behaviour.
+   */
+  bufferSec: number
+  /**
    * Loop the final playlist instead of stopping. Off by default: the stream ends
    * when the last file finishes.
    */
@@ -340,7 +349,6 @@ export type EngineState =
   | 'preparing'
   | 'connecting'
   | 'live'
-  | 'paused'
   | 'reconnecting'
   | 'stopping'
   | 'error'
@@ -459,8 +467,6 @@ export interface StreamerApi {
   getStatus(): Promise<EngineStatus>
   getLogs(): Promise<LogEntry[]>
   start(): Promise<EngineStatus>
-  pause(): Promise<EngineStatus>
-  resume(): Promise<EngineStatus>
   stop(): Promise<EngineStatus>
   skipNext(): Promise<EngineStatus>
   seek(positionSec: number): Promise<EngineStatus>
@@ -530,8 +536,6 @@ export const IPC = {
   getObsWebSocketStatus: 'obs:status',
   applyObsWebSocket: 'obs:apply',
   start: 'engine:start',
-  pause: 'engine:pause',
-  resume: 'engine:resume',
   stop: 'engine:stop',
   skipNext: 'engine:skipNext',
   seek: 'engine:seek',

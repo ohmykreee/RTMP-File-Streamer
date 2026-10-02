@@ -69,6 +69,10 @@ export const DEFAULT_SESSION: SessionSettings = {
     realtimePacing: true,
     // obs-websocket's own default endpoint, bound to the local machine only.
     obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
+    // 0 = the single-process pipeline (the default). A non-zero value selects
+    // the buffered two-process playout, which is not finished yet: see the note
+    // at the top of src/main/stream/playout.ts.
+    bufferSec: 0,
     loopPlaylist: false,
     reconnectDelaySec: 3,
     maxReconnectAttempts: 10,
@@ -81,6 +85,8 @@ export const DEFAULT_SESSION: SessionSettings = {
 /** Bounds enforced by the UI and the control server. */
 export const OBS_PORT_MIN = 1024
 export const OBS_PORT_MAX = 65535
+export const BUFFER_SEC_MIN = 0
+export const BUFFER_SEC_MAX = 10
 
 /**
  * How many log entries the run keeps in memory.

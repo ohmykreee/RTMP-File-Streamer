@@ -21,7 +21,7 @@ import type {
   VideoRateControl,
   VideoSettings
 } from '@shared/types'
-import { OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
+import { BUFFER_SEC_MAX, BUFFER_SEC_MIN, OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
 
 interface SettingsPanelProps {
   settings: AppSettings
@@ -762,9 +762,24 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {tab === 'advanced' && (
           <>
             <h3 className="section-title">串流控制</h3>
+            <div className="field-grid">
+              <Field
+                label="推流缓冲 (秒)"
+                hint={`编码领先推流这么多秒，用于吸收瞬时卡顿；越大越流畅、观众延迟越高（${BUFFER_SEC_MIN}–${BUFFER_SEC_MAX}，0 = 关闭）`}
+              >
+                <input
+                  type="number"
+                  min={BUFFER_SEC_MIN}
+                  max={BUFFER_SEC_MAX}
+                  step={0.5}
+                  value={o.bufferSec}
+                  onChange={(e) => props.onUpdateOutput({ bufferSec: clampNumber(Number(e.target.value), BUFFER_SEC_MIN, BUFFER_SEC_MAX, 2) })}
+                />
+              </Field>
+            </div>
             <Toggle
               label="实时节奏推流 (-re)"
-              hint="按源文件的原速度推送。直播必须开启，关闭会以最快速度灌入数据"
+              hint="关闭缓冲时按源文件原速度推送"
               checked={o.realtimePacing}
               onChange={(c) => props.onUpdateOutput({ realtimePacing: c })}
             />

@@ -602,6 +602,41 @@ async function buildAndRun(name, item, settings, startPositionSec, outFile) {
 
 const offItem = { ...itemA, mode: 'off' }
 
+/*
+ * Regression guard for the seek/progress bug.
+ *
+ * ffmpeg rebases the output timeline to zero at the seek point: seeking to 12s in
+ * a 20s clip reports progress for only the remaining ~8s. Anything that maps
+ * ffmpeg's own progress onto "position in the file" therefore has to add the
+ * seek offset back, or the progress bar jumps backwards and never reaches the
+ * end. This pins the behaviour the engine depends on.
+ */
+{
+  const outFile = path.join(here, 'probe_seek_pts.mp4')
+  fs.rmSync(outFile, { force: true })
+  const built = buildStreamCommand({
+    ffmpegPath: FFMPEG,
+    media: infoA,
+    item: offItem,
+    settings: baseSession,
+    startPositionSec: 12,
+    outputOverride: outFile
+  })
+  const res = await run(FFMPEG, built.args, { timeoutMs: 180000 })
+  const times = []
+  for (const line of res.stdout.split(/\r?\n/)) {
+    const m = /^out_time_us=(\d+)$/.exec(line)
+    if (m) times.push(Number(m[1]) / 1e6)
+  }
+  const last = times.at(-1) ?? 0
+  const expected = infoA.durationSec - 12
+  record(
+    'a seeked pass reports progress rebased to zero (engine must add the seek offset)',
+    times.length > 0 && last > expected - 1.5 && last < expected + 1.5,
+    `last out_time=${last.toFixed(2)}s for a ${infoA.durationSec}s clip seeked to 12s (expected ~${expected.toFixed(1)}s)`
+  )
+}
+
 // 7a. plain seek: 20s clip, start at 5s -> 15s of content, output starts at 0.
 {
   const { measured } = await buildAndRun(

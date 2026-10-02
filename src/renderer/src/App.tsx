@@ -12,7 +12,6 @@ const STATE_LABEL: Record<EngineState, string> = {
   preparing: '准备中',
   connecting: '连接中',
   live: '推流中',
-  paused: '已暂停',
   reconnecting: '重连中',
   stopping: '停止中',
   error: '错误'
@@ -139,7 +138,7 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('beforeunload', handler)
   }, [isActive])
 
-  /* Keyboard shortcuts: space = start/pause, Ctrl+→ = next file. */
+  /* Keyboard shortcuts: space = start, Ctrl+→ = next file. */
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement | null
@@ -148,8 +147,6 @@ export default function App(): React.JSX.Element {
       if (e.code === 'Space') {
         e.preventDefault()
         if (!isActive && canStart) void run(() => st.start())
-        else if (status.state === 'live') void run(() => st.pause())
-        else if (status.state === 'paused') void run(() => st.resume())
       }
       if (e.ctrlKey && e.code === 'ArrowRight') {
         e.preventDefault()
@@ -158,7 +155,7 @@ export default function App(): React.JSX.Element {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [canStart, isActive, run, st, status.state])
+  }, [canStart, isActive, run, st])
 
   const handleSeek = useCallback(
     (positionSec: number, itemId: string) => {
@@ -341,15 +338,6 @@ export default function App(): React.JSX.Element {
               </button>
             ) : (
               <>
-                {status.state === 'paused' ? (
-                  <button className="btn primary" onClick={() => void run(() => st.resume())} disabled={actionPending}>
-                    ▶ 继续
-                  </button>
-                ) : (
-                  <button className="btn" onClick={() => void run(() => st.pause())} disabled={actionPending || status.state !== 'live'}>
-                    ⏸ 暂停
-                  </button>
-                )}
                 <button className="btn" onClick={() => void run(() => st.skipNext())} disabled={actionPending} title="Ctrl+→">
                   ⏭ 下一个文件
                 </button>

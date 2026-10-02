@@ -42,8 +42,6 @@ export interface AppServices {
   pushLog: (level: LogEntry['level'], message: string) => void
   engineStatus: () => EngineStatus
   engineStart: () => Promise<EngineStatus>
-  enginePause: () => Promise<EngineStatus>
-  engineResume: () => Promise<EngineStatus>
   engineStop: () => Promise<EngineStatus>
   engineSkipNext: () => Promise<EngineStatus>
   engineSeek: (positionSec: number) => Promise<EngineStatus>
@@ -178,8 +176,6 @@ export function registerIpc(services: AppServices): void {
   /* ---------------- engine ---------------- */
 
   ipcMain.handle(IPC.start, (): Promise<EngineStatus> => services.engineStart())
-  ipcMain.handle(IPC.pause, (): Promise<EngineStatus> => services.enginePause())
-  ipcMain.handle(IPC.resume, (): Promise<EngineStatus> => services.engineResume())
   ipcMain.handle(IPC.stop, (): Promise<EngineStatus> => services.engineStop())
   ipcMain.handle(IPC.skipNext, (): Promise<EngineStatus> => services.engineSkipNext())
   ipcMain.handle(IPC.seek, (_e, positionSec: number): Promise<EngineStatus> => services.engineSeek(Number(positionSec) || 0))

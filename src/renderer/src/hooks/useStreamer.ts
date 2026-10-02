@@ -314,8 +314,6 @@ export function useStreamer() {
   const jumpToItem = useCallback((id: string) => requireBridge().jumpToItem(id), [requireBridge])
   const seek = useCallback((positionSec: number) => requireBridge().seek(positionSec), [requireBridge])
   const start = useCallback(() => requireBridge().start(), [requireBridge])
-  const pause = useCallback(() => requireBridge().pause(), [requireBridge])
-  const resume = useCallback(() => requireBridge().resume(), [requireBridge])
   const stop = useCallback(() => requireBridge().stop(), [requireBridge])
   const skipNext = useCallback(() => requireBridge().skipNext(), [requireBridge])
   const previewCommand = useCallback(() => requireBridge().previewCommand(), [requireBridge])
@@ -433,8 +431,6 @@ export function useStreamer() {
     jumpToItem,
     seek,
     start,
-    pause,
-    resume,
     stop,
     skipNext,
     previewCommand,

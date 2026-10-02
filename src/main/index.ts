@@ -167,8 +167,6 @@ const services: AppServices = {
   pushLog,
   engineStatus: () => engine.getStatus(),
   engineStart: () => engine.start(),
-  enginePause: () => engine.pause(),
-  engineResume: () => engine.resume(),
   engineStop: () => engine.stop(),
   engineSkipNext: () => engine.skipNext(),
   engineSeek: (positionSec: number) => engine.seek(positionSec),

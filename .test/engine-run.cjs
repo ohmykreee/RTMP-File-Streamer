@@ -178,6 +178,10 @@ async function main() {
       container: 'flv',
       extraOutputArgs: '',
       realtimePacing: true,
+      // 0 = single-process pipeline (the app default). Set BUFFER_SEC to try the
+      // buffered two-process playout once it can keep the pusher alive.
+      bufferSec: Number(process.env.BUFFER_SEC ?? 0),
+      obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
       loopPlaylist: false,
       reconnectDelaySec: 2,
       maxReconnectAttempts: 2,
@@ -286,8 +290,16 @@ async function main() {
   await engine.seek(12)
   await delay(900)
   const afterSeek = engine.getStatus()
+  /*
+   * After a seek the reported position must sit AT the seek point, not behind it.
+   * ffmpeg rebases its progress timeline to zero for a seeked pass (verified in
+   * the unit harness), so any code that forwards that value straight to the UI
+   * makes the bar jump backwards and never reach the end.
+   */
+  const seekReportsPosition = afterSeek.positionSec >= 11.5 && afterSeek.positionSec <= 13.5
+  const seekKeepsProgress = afterSeek.completedSec >= 11.5
   const seekToSecond = await waitUntil(() => engine.getStatus().currentIndex === 1, 25000, 'phase 2 reaching entry 2')
-  note('phase 2 post-seek', `pos=${afterSeek.positionSec.toFixed(1)}s, reached entry 2=${seekToSecond}`)
+  note('phase 2 post-seek', `pos=${afterSeek.positionSec.toFixed(1)}s, completed=${afterSeek.completedSec.toFixed(1)}s, reached entry 2=${seekToSecond}`)
 
   // Let the second entry finish so the session closes cleanly.
   await waitUntil(() => !engine.isActive(), 40000, 'phase 2 completion')
@@ -404,6 +416,11 @@ async function main() {
     JSON.stringify(phase2Status.itemStatus)
   )
   record('phase 2 reached the second entry after the seek', seekToSecond)
+  record(
+    'a seek reports the position it seeks TO, not a rebased remainder',
+    seekReportsPosition && seekKeepsProgress,
+    `pos=${afterSeek.positionSec.toFixed(2)}s (expected ~12s), completed=${afterSeek.completedSec.toFixed(2)}s`
+  )
 
   // The seek republished the tail of clip_a, so pick the session that carries
   // clip_a's resolution but only part of its material, rather than guessing indices.
@@ -451,12 +468,22 @@ async function main() {
   note('engine log ids', `${ids.length} entries, id range ${Math.min(...ids)}..${Math.max(...ids)}, duplicates=${duplicates}`)
   record('this engine run emitted unique log ids', duplicates === 0, `${ids.length} entries, ${duplicates} duplicate id(s)`)
 
+  /*
+   * The buffered playout runs two processes on purpose: the pusher owns the RTMP
+   * session and must OUTLIVE every encoder restart (one per file, per seek, per
+   * skip). This reports the actual counts so that claim is observable instead of
+   * assumed: many encoder starts against a single pusher start.
+   */
+  const pusherStarts = logs.filter((l) => l.message.includes('推流进程已启动')).length
+  const encoderStarts = logs.filter((l) => l.message.includes('编码进程已启动')).length
+  note('playout processes', `pusher starts=${pusherStarts}, encoder starts=${encoderStarts}`)
+
   const passed = results.filter((r) => r.ok).length
   note('summary', `${passed}/${results.length} checks passed`)
 
   fs.writeFileSync(
     path.join(testDir, 'engine-run-report.json'),
-    JSON.stringify({ results, logs: logs.slice(-60), timeline }, null, 2)
+    JSON.stringify({ results, playout: { pusherStarts, encoderStarts }, logs: logs.slice(-60), timeline }, null, 2)
   )
   console.log('\n--- engine log tail ---')
   for (const l of logs.slice(-30)) console.log(`  ${l.level.padEnd(6)} ${l.message}`)

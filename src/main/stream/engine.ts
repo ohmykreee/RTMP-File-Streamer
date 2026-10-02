@@ -10,8 +10,10 @@ import type {
   PlaylistItemStatus,
   SessionSettings
 } from '@shared/types'
-import { buildStreamCommand, describeStreams, type BuiltCommand } from '../ffmpeg/command'
+import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand } from '../ffmpeg/command'
+import { Playout } from './playout'
 import { buildRtmpTarget } from '@shared/rtmp'
+import { CONTAINER_MUXER } from '@shared/defaults'
 
 export interface EngineDeps {
   getFfmpegPath: () => string
@@ -58,12 +60,18 @@ export class StreamEngine {
   private outTimeSec = 0
   private itemDuration = 0
   private stopping = false
-  private paused = false
   private restartTimer: NodeJS.Timeout | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
   private logSeq = 1
   private lastStderrLine = ''
   private lastStderrRepeat = 0
+
+  /* --- two-process playout (bufferSec > 0) --- */
+  private playout: Playout | null = null
+  /** Encoder pass being produced, i.e. what the pusher is heading into. */
+  private pass: { index: number; startSec: number; itemDurationSec: number; tsOffset: number } | null = null
+  /** Pass the pusher has actually reached, used to report what is on screen. */
+  private playing: { startSec: number; tsOffset: number } | null = null
 
   constructor(deps: EngineDeps) {
     this.deps = deps
@@ -135,6 +143,22 @@ export class StreamEngine {
     this.sink.status(this.getStatus())
   }
 
+  /**
+   * Sets the position inside the current file and derives the session total from
+   * it, so the two can never disagree.
+   *
+   * `positionSec` is always "seconds into the current file" — including the part
+   * a seek skipped — which is what the progress bar and the completion check
+   * need. Deriving `completedSec` here (instead of in each caller) is what keeps
+   * a seek from leaving a stale total behind.
+   */
+  private setPosition(positionSec: number): void {
+    const max = this.itemDuration > 0 ? this.itemDuration : positionSec
+    const clamped = Math.max(0, Math.min(positionSec, max))
+    this.positionSec = clamped
+    this.completedSec = this.sumDurationsBefore(this.currentIndex) + clamped
+  }
+
   private emitPlaylist(): void {
     this.sink.playlist([...this.items])
   }
@@ -152,7 +176,7 @@ export class StreamEngine {
       this.log('warn', '播放列表为空，无法开始串流。')
       return this.getStatus()
     }
-    if (this.state === 'live' || this.state === 'paused' || this.state === 'connecting' || this.state === 'preparing') {
+    if (this.state === 'live' || this.state === 'connecting' || this.state === 'preparing') {
       this.log('info', '串流已在进行中。')
       return this.getStatus()
     }
@@ -173,7 +197,6 @@ export class StreamEngine {
     this.startedAt = Date.now()
     this.reconnectCount = 0
     this.stopping = false
-    this.paused = false
     this.currentIndex = atIndex !== undefined ? Math.max(0, Math.min(atIndex, this.items.length - 1)) : 0
     this.emitPlaylist()
 
@@ -189,51 +212,6 @@ export class StreamEngine {
     return this.getStatus()
   }
 
-  async pause(): Promise<EngineStatus> {
-    if (this.state !== 'live' || !this.child) return this.getStatus()
-    this.paused = true
-    this.state = 'paused'
-    if (process.platform === 'win32') {
-      // Windows has no SIGSTOP for child processes; a graceful stop is the only
-      // reliable cross-platform pause. The session resumes by reconnecting.
-      try {
-        this.child.stdin.write('q')
-      } catch {
-        /* ignore */
-      }
-      this.log('warn', '暂停：已停止推送，恢复时将重新连接 RTMP 服务器。')
-    } else {
-      try {
-        this.child.kill('SIGSTOP')
-        this.log('info', '已暂停（进程挂起，RTMP 连接保持）。')
-      } catch (err) {
-        this.log('warn', `暂停失败: ${String(err)}`)
-      }
-    }
-    this.emitStatus()
-    return this.getStatus()
-  }
-
-  async resume(): Promise<EngineStatus> {
-    if (this.state !== 'paused') return this.getStatus()
-    this.paused = false
-    if (process.platform !== 'win32' && this.child && !this.child.killed) {
-      try {
-        this.child.kill('SIGCONT')
-        this.state = 'live'
-        this.log('info', '已恢复。')
-        this.emitStatus()
-        return this.getStatus()
-      } catch (err) {
-        this.log('warn', `恢复失败，将重启编码进程: ${String(err)}`)
-      }
-    }
-    // Reconnect from the current position.
-    this.log('info', '从当前进度重新开始推流…')
-    await this.launchCurrent(this.startPositionSec, 'resume')
-    return this.getStatus()
-  }
-
   async stop(): Promise<EngineStatus> {
     if (this.state === 'idle') return this.getStatus()
     this.stopping = true
@@ -242,9 +220,17 @@ export class StreamEngine {
     this.emitStatus()
     this.log('info', '正在停止串流…')
     await this.killChild(true)
+    // The buffered playout owns two processes; stopping it flushes whatever the
+    // pusher still had in hand before the RTMP session is closed.
+    if (this.playout) {
+      const playout = this.playout
+      this.playout = null
+      await playout.stop()
+    }
+    this.pass = null
+    this.playing = null
     this.state = 'idle'
     this.connected = false
-    this.paused = false
     this.currentIndex = -1
     this.positionSec = 0
     this.startPositionSec = 0
@@ -393,22 +379,17 @@ export class StreamEngine {
     const item = this.items[index]
     if (!item) return
 
-    const previousIndex = this.currentIndex
-    if (previousIndex !== index) {
-      // Entering a different file: everything before it counts as completed.
-      this.completedSec = this.sumDurationsBefore(index)
-    } else if (positionSec > 0 || this.completedSec === 0) {
-      // Seeking inside the same file: completed prefix plus the new position.
-      this.completedSec = this.sumDurationsBefore(index) + positionSec
-    }
-
     await this.killChild(true)
     this.cancelTimers()
     const generation = ++this.generation
     this.currentIndex = index
     this.startPositionSec = positionSec
-    this.positionSec = positionSec
-    this.outTimeSec = positionSec
+    // Position and the derived session total are set together, so a seek cannot
+    // leave the total pointing at where playback used to be.
+    this.setPosition(positionSec)
+    // Raw ffmpeg timeline: rebased to zero by an input seek, so it starts at 0 for
+    // every pass regardless of where the pass begins.
+    this.outTimeSec = 0
     this.speed = 0
     this.fps = 0
     this.bitrateKbps = 0
@@ -416,7 +397,6 @@ export class StreamEngine {
     this.droppedFrames = 0
     this.connected = false
     this.stopping = false
-    this.paused = false
     this.emitStatus()
 
     /* --- probe (cached) --- */
@@ -449,6 +429,18 @@ export class StreamEngine {
 
     /* --- build the command --- */
     const settings = this.deps.getSettings()
+
+    /* Two-process playout: encoder ahead of a pacing pusher.
+     *
+     * With a buffer configured the session runs as encoder -> TS buffer ->
+     * pusher (see playout.ts). The pusher owns the RTMP session and outlives
+     * every encoder restart, which is what makes a seek cheap and absorbs short
+     * encoding stalls. */
+    if (settings.output.bufferSec > 0) {
+      await this.launchBuffered(index, item, media, positionSec, reason, generation)
+      return
+    }
+
     let built: BuiltCommand
     try {
       built = buildStreamCommand({
@@ -531,6 +523,138 @@ export class StreamEngine {
     })
   }
 
+  /* ------------------------------------------------------------ *
+   * Two-process playout (bufferSec > 0)
+   * ------------------------------------------------------------ */
+
+  /**
+   * Feeds one playlist entry to the buffered playout.
+   *
+   * The pusher is created once per session and then left alone: every later call
+   * (next file, skip, seek) only replaces the encoder, so the RTMP publish
+   * session survives and the player never re-buffers. Each pass carries a
+   * timeline offset so the published stream stays continuous across restarts.
+   */
+  private async launchBuffered(
+    index: number,
+    item: PlaylistItem,
+    media: MediaInfo,
+    positionSec: number,
+    reason: string,
+    generation: number
+  ): Promise<void> {
+    const settings = this.deps.getSettings()
+    const ffmpeg = this.deps.getFfmpegPath()
+
+    let args: string[]
+    try {
+      const built = buildEncoderArgs({ ffmpegPath: ffmpeg, media, item, settings, startPositionSec: positionSec })
+      args = built.args
+      this.lastWarnings = built.warnings
+      if (reason !== 'retry' || positionSec === 0) {
+        this.log('info', `▸ 正在准备「${item.name}」${positionSec > 0 ? `（从 ${formatDuration(positionSec)} 开始）` : ''}`)
+        this.log('debug', `   文件: ${item.path}`)
+        this.log('debug', `   ${describeStreams(media)}`)
+        for (const line of built.summary) this.log('debug', `   ${line}`)
+      }
+      if (generation !== this.generation) return
+    } catch (err) {
+      this.log('error', `构建编码参数失败: ${String(err)}`)
+      this.setItemStatus(index, 'error', String(err))
+      this.state = 'error'
+      this.emitStatus()
+      return
+    }
+
+    this.itemDuration = media.durationSec || item.durationSec || 0
+    this.currentIndex = index
+    this.startPositionSec = positionSec
+    this.positionSec = positionSec
+
+    if (!this.playout) {
+      this.playout = new Playout(ffmpeg, this.buildPusherArgs(settings), {
+        log: (level, message) => this.log(level, message),
+        onPublished: (seconds) => this.onPublished(seconds),
+        onPusherExit: (code) => this.onPusherExit(code),
+        onEncoderExit: (code, materialSec) => this.onEncoderExit(code, materialSec)
+      })
+      this.log('info', `已启用缓冲推流：编码领先推流 ${settings.output.bufferSec}s，seek 只重启编码进程。`)
+    }
+
+    // Continue the published timeline; a tiny margin keeps the splice strictly
+    // forward even if the encoder's reported duration was rounded down.
+    const tsOffset = this.playout.getNextOffset() + (positionSec > 0.05 ? 0.05 : 0)
+    const expectedSec = Math.max(0, this.itemDuration - positionSec)
+    this.pass = { index, startSec: positionSec, itemDurationSec: this.itemDuration, tsOffset }
+
+    const pass = { input: item.path, args, startPositionSec: positionSec, tsOffset, expectedSec }
+    if (this.playout.isPusherRunning()) this.playout.restartEncoder(pass)
+    else this.playout.start(pass)
+
+    this.state = 'live'
+    this.connected = true
+    this.setItemStatus(index, 'live')
+    this.emitStatus()
+  }
+
+  /** The pusher's arguments: the muxer, extra flags and the RTMP destination. */
+  private buildPusherArgs(settings: SessionSettings): string[] {
+    const out = settings.output
+    return [
+      '-flvflags',
+      'no_duration_filesize',
+      ...(out.extraOutputArgs.trim() ? out.extraOutputArgs.trim().split(/\s+/) : []),
+      '-f',
+      CONTAINER_MUXER[out.container],
+      buildRtmpTarget(out.server, out.streamKey)
+    ]
+  }
+
+  /**
+   * The pusher reported how far it has published.
+   *
+   * Its timeline is the session timeline and only moves forward, so the media
+   * position is that value minus the offset of the pass the pusher has reached.
+   */
+  private onPublished(seconds: number): void {
+    if (!this.pass) return
+    if (!this.playing || seconds >= this.pass.tsOffset - 0.001) {
+      this.playing = { startSec: this.pass.startSec, tsOffset: this.pass.tsOffset }
+    }
+    const mediaPos = this.playing.startSec + Math.max(0, seconds - this.playing.tsOffset)
+    this.itemDuration = this.pass.itemDurationSec
+    this.currentIndex = this.pass.index
+    this.setPosition(mediaPos)
+    this.emitStatus()
+  }
+
+  /** An encoder pass ended: what it produced is now part of the stream. */
+  private onEncoderExit(code: number | null, materialSec: number): void {
+    if (this.stopping || !this.pass) return
+    const index = this.pass.index
+    const item = this.items[index]
+    if (code !== 0) {
+      this.log('warn', `「${item?.name ?? '文件'}」编码进程异常结束（退出码 ${code ?? '未知'}），已产出的部分仍会继续播放。`)
+      this.setItemStatus(index, 'error', `编码进程退出码 ${code ?? '未知'}`)
+      this.emitStatus()
+    }
+    this.log('info', `✔ 「${item?.name ?? '文件'}」编码完成，已交给推流进程（${materialSec.toFixed(1)}s）。`)
+    this.setItemStatus(index, 'done')
+    const gapMs = Math.max(0, Math.min(30, this.deps.getSettings().output.gapBetweenItemsSec ?? 1)) * 1000
+    this.restartTimer = setTimeout(() => {
+      void this.advanceTo(index + 1, 'finish')
+    }, Math.max(150, gapMs))
+  }
+
+  /** The pusher died: that *is* the RTMP session, so the run is over. */
+  private onPusherExit(code: number | null): void {
+    if (this.stopping) return
+    this.connected = false
+    this.state = 'error'
+    this.emitStatus()
+    this.log('error', `推流进程结束（退出码 ${code ?? '未知'}），串流中断。`)
+  }
+
   private sumDurationsBefore(index: number): number {
     let sum = 0
     for (let i = 0; i < index && i < this.items.length; i += 1) sum += this.items[i].durationSec || 0
@@ -556,15 +680,22 @@ export class StreamEngine {
         case 'out_time_ms': {
           const micro = Number(value)
           if (Number.isFinite(micro)) {
-            const sec = key === 'out_time_us' ? micro / 1_000_000 : micro / 1_000_000
-            // ffmpeg reports absolute-ish timestamps; clamp to the seeked window.
-            if (sec > this.outTimeSec - 1) {
-              this.outTimeSec = sec
-              const relative = sec
-              const max = this.itemDuration > 0 ? this.itemDuration : relative
-              this.positionSec = Math.max(this.startPositionSec, Math.min(relative, max))
-              const base = this.sumDurationsBefore(this.currentIndex)
-              this.completedSec = base + this.positionSec
+            const elapsed = micro / 1_000_000
+            // ffmpeg's `-progress` timeline is relative to the *output*, and after
+            // an input seek the output is rebased to zero: seeking to 12s in a 20s
+            // file reports 8s of material, not 20s. `positionSec` therefore has to
+            // be the seek offset plus what ffmpeg has produced since — using the
+            // reported value directly made the bar jump backwards at every seek and
+            // never reach the end.
+            if (elapsed > this.outTimeSec - 1) {
+              this.outTimeSec = elapsed
+              // ffmpeg's `-progress` timeline is relative to the *output*, and after
+              // an input seek the output is rebased to zero: seeking to 12s in a 20s
+              // file reports 8s of material, not 20s. The position inside the file is
+              // therefore the seek offset plus what ffmpeg has produced since — using
+              // the reported value directly made the bar jump backwards at every seek
+              // and never reach the end.
+              this.setPosition(this.startPositionSec + elapsed)
             }
           }
           break
@@ -657,13 +788,21 @@ export class StreamEngine {
     this.child = null
     this.connected = false
 
-    if (this.stopping || this.paused) {
+    if (this.stopping) {
       this.emitStatus()
       return
     }
 
     const item = this.items[index]
     const settings = this.deps.getSettings()
+    /**
+     * A publish that ends on its own had nothing left to send, so it counts as
+     * finishing the file. This must not depend solely on `positionSec`: the
+     * position is derived from ffmpeg's progress reports, and the last report of
+     * a short tail (after a seek, or a file whose last block is cut mid-second)
+     * can sit just under the end. A premature exit is a non-zero code, and a
+     * forced stop is filtered out above.
+     */
     const reachedEnd = this.itemDuration > 0 && this.positionSec >= this.itemDuration - COMPLETION_TOLERANCE_SEC
     const cleanExit = code === 0 || signal === 'SIGINT'
 
@@ -672,9 +811,7 @@ export class StreamEngine {
       this.completedSec = this.sumDurationsBefore(index) + (item?.durationSec ?? 0)
       this.positionSec = item?.durationSec ?? this.positionSec
       this.emitStatus()
-      if (reachedEnd) {
-        this.log('info', `✔ 「${item?.name ?? '文件'}」串流完成。`)
-      }
+      this.log('info', `✔ 「${item?.name ?? '文件'}」串流完成。`)
       // Advancing opens a fresh RTMP publish session, so give the server a moment
       // to release the stream key before the next ffmpeg connects.
       const gapMs = Math.max(0, Math.min(30, settings.output.gapBetweenItemsSec ?? 1)) * 1000 + 300

@@ -576,6 +576,129 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   }
 }
 
+/**
+ * Builds just the *codec* side of the pipeline: filters, stream mapping and
+ * encoder options, with no input, muxer or destination arguments.
+ *
+ * This is the half of {@link buildStreamCommand} that the two-process playout
+ * needs for its encoder pass — the pass writes MPEG-TS to a buffer file, so the
+ * RTMP target, `-re` pacing and container flags all belong to the pusher instead.
+ */
+export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
+  args: string[]
+  summary: string[]
+  warnings: string[]
+  vencName: string
+} {
+  const { item, settings, media } = req
+  const v = settings.video
+  const a = settings.audio
+  const sub = settings.subtitles
+  const out = settings.output
+  const available = getAvailableEncoderNames()
+  const warnings: string[] = []
+  const summary: string[] = []
+  const args: string[] = []
+
+  const copyVideo = v.codec === 'copy'
+  const videoIn = pickBest(media.videoStreams)
+  const audioIn = pickBest(media.audioStreams)
+
+  /* ---- subtitle selection (same rules as the single-process builder) ---- */
+  const mode = item.mode ?? sub.mode
+  let track: SubtitleTrackRef | null = null
+  if (mode !== 'off') {
+    if (item.selectedSubtitleId) track = item.subtitleTracks.find((t) => t.id === item.selectedSubtitleId) ?? null
+    if (!track && item.subtitleTracks.length > 0) track = item.subtitleTracks.find((t) => t.family === 'text') ?? item.subtitleTracks[0]
+    if (!track && media.subtitleStreams.length > 0) {
+      const s0 = media.subtitleStreams[0]
+      track = { id: `emb:${s0.index}`, source: 'embedded', streamIndex: s0.index, codec: s0.codec, family: s0.subtitleFamily ?? 'unknown' }
+    }
+  }
+  const isTextTrack = track
+    ? track.family === 'text' || (track.family === 'unknown' && !/(pgs|dvd|dvb|xsub|hdmv)/i.test(track.codec))
+    : false
+
+  const avOffset = item.syncOffsetSec || 0
+  const subDelay = item.subtitleDelaySec || 0
+  const internalOffset = avOffset + subDelay
+  const hasOffset = Math.abs(internalOffset) > 0.0005
+
+  const filters: string[] = []
+  const scaleFilter = resolveScaleFilter(v)
+  const sourceFps = videoIn?.fps ?? 0
+  const wantsFps = !copyVideo && v.fps > 0 && Math.abs(sourceFps - v.fps) > 0.05
+  if (!copyVideo) {
+    if (scaleFilter) {
+      filters.push(`scale=${scaleFilter}:flags=bicubic`)
+      summary.push(`缩放 ${scaleFilter}`)
+    }
+    if (wantsFps) {
+      filters.push(`fps=${v.fps}`)
+      summary.push(`${v.fps} fps`)
+    }
+  }
+
+  let burnText = false
+  if (mode === 'burn' && track && isTextTrack && !copyVideo) {
+    if (track.source === 'embedded') {
+      filters.push(subtitlesFilterArg('0', track.streamIndex ?? -1, sub))
+      burnText = true
+    } else if (track.path) {
+      filters.push(subtitlesFilterArg(escapeFilterPath(track.path), -1, sub))
+      burnText = true
+    }
+    if (burnText) summary.push(`烧录字幕${track.source === 'embedded' ? ` (内挂 #${track.streamIndex})` : ''}`)
+  }
+  if (hasOffset && internalOffset > 0) {
+    warnings.push(`偏移 +${round2(internalOffset)}s 会延后所有内容，推流开头会有约 ${round2(internalOffset)} 秒的空档等待缓冲。`)
+  }
+
+  /* ---- mapping ---- */
+  if (videoIn) {
+    args.push('-map', `0:${videoIn.index}`)
+    if (filters.length > 0) args.push('-vf', filters.join(','))
+  }
+  if (audioIn && a.codec !== 'none') args.push('-map', `0:${audioIn.index}`)
+
+  /* ---- video encoder ---- */
+  const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
+  if (copyVideo) {
+    args.push('-c:v', 'copy')
+    summary.unshift('视频：直接复制 (不重编码)')
+  } else if (!videoIn) {
+    warnings.push('源文件没有可用的视频轨，将只推送音频。')
+  } else {
+    args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
+    const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
+    applyVideoEncoderArgs(args, v, spec, fpsForGop, out.container)
+    if (v.repeatHeaders) args.push('-flags', '+cgop')
+    const hw = spec.kind === 'software' ? '' : ' [硬件]'
+    summary.unshift(`视频：${spec.name}${hw} · ${v.rateControl.toUpperCase()}${v.rateControl === 'crf' ? ` CRF ${v.crf}` : ` ${v.bitrateKbps}kbps`}`)
+  }
+
+  /* ---- audio encoder ---- */
+  const audioFilters: string[] = []
+  if (a.codec === 'none') {
+    summary.push('音频：丢弃')
+  } else if (!audioIn) {
+    warnings.push('源文件没有音频轨，将只推送视频。')
+  } else if (a.codec === 'copy') {
+    args.push('-c:a', 'copy')
+    summary.push('音频：直接复制')
+  } else {
+    if (a.loudnorm) {
+      audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
+      summary.push('响度归一化 -16 LUFS')
+    }
+    const enc = applyAudioArgs(args, a, audioFilters, audioIn.channels ?? 2)
+    summary.push(`音频：${enc} ${a.bitrateKbps}kbps @ ${a.codec === 'libopus' ? 48000 : a.sampleRate}Hz`)
+  }
+  if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
+
+  return { args, summary, warnings, vencName: copyVideo ? 'copy' : spec.name }
+}
+
 /** Quote an argument vector for display / copy-paste. */
 export function buildCommandLine(bin: string, args: string[]): string {
   const quote = (s: string): string => {
