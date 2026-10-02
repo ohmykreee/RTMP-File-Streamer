@@ -8,6 +8,7 @@ import type {
   SessionSettings,
   SubtitleRenderSettings,
   SubtitleTrackRef,
+  VideoCodecName,
   VideoSettings
 } from '@shared/types'
 import { CONTAINER_MUXER } from '@shared/defaults'
@@ -341,6 +342,22 @@ function applyAudioArgs(args: string[], a: AudioSettings, filters: string[], sou
   return enc
 }
 
+/**
+ * Enhanced-RTMP notice for FLV targets using a non-H.264 video codec.
+ *
+ * FFmpeg's FLV muxer writes HEVC as FourCC `hvc1` and AV1 as `av01` — the
+ * Enhanced-RTMP format — but whether the stream actually plays depends on the
+ * ingest server and the player supporting Enhanced-RTMP. Without that support
+ * the video track is dropped or left undecodable, so the user must be told
+ * rather than left guessing why the picture is black.
+ */
+function flvCodecWarning(codec: VideoCodecName, container: ContainerName): string | null {
+  if (container !== 'flv') return null
+  if (codec === 'hevc') return 'HEVC 通过 Enhanced-RTMP（hvc1）推流，需要服务器与播放器支持 Enhanced-RTMP，否则画面会黑屏/无视频。'
+  if (codec === 'av1') return 'AV1 通过 Enhanced-RTMP（av01）推流，需要服务器与播放器支持 Enhanced-RTMP，否则画面会黑屏/无视频。'
+  return null
+}
+
 /* ------------------------------------------------------------------ *
  * Main builder
  * ------------------------------------------------------------------ */
@@ -482,6 +499,8 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   /* ---------------- video encoder ---------------- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
   let vencName = 'copy'
+  const flvWarn = flvCodecWarning(v.codec, out.container)
+  if (flvWarn) warnings.push(flvWarn)
 
   if (copyVideo) {
     args.push('-c:v', 'copy')
@@ -663,6 +682,8 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
 
   /* ---- video encoder ---- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
+  const flvWarn = flvCodecWarning(v.codec, out.container)
+  if (flvWarn) warnings.push(flvWarn)
   if (copyVideo) {
     args.push('-c:v', 'copy')
     summary.unshift('视频：直接复制 (不重编码)')

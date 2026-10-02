@@ -95,16 +95,18 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
     <aside
       className={`playlist${fileDrag ? ' file-drag' : ''}`}
       onDragEnter={(e) => {
+        if (locked) return
         if (!dragId && e.dataTransfer?.types?.includes('Files')) setFileDrag(true)
       }}
       onDragLeave={(e) => {
         if (e.currentTarget === e.target) setFileDrag(false)
       }}
       onDragOver={(e) => {
+        if (locked) return
         if (!dragId && e.dataTransfer?.types?.includes('Files')) e.preventDefault()
       }}
       onDrop={(e) => {
-        if (dragId) return
+        if (locked || dragId) return
         e.preventDefault()
         setFileDrag(false)
         const paths = videoPathsFromDrop(e)
@@ -119,7 +121,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
           </p>
         </div>
         <div className="panel-head-actions">
-          <button className="btn primary" onClick={props.onAddVideos} disabled={props.busy} title="添加视频文件（可多选）">
+          <button className="btn primary" onClick={props.onAddVideos} disabled={props.busy || locked} title={locked ? '串流进行中，无法添加文件' : '添加视频文件（可多选）'}>
             + 视频
           </button>
           <button className="btn ghost" onClick={props.onClear} disabled={props.busy || items.length === 0 || locked} title="清空播放列表">
@@ -274,7 +276,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
           })}
         </ol>
       )}
-      {fileDrag && <div className="drop-overlay">松开以添加文件</div>}
+      {fileDrag && !locked && <div className="drop-overlay">松开以添加文件</div>}
     </aside>
   )
 }

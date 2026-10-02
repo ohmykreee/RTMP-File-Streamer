@@ -66,6 +66,19 @@ function bufferedMode(output: SessionSettings['output']): boolean {
   return output.buffered === true && output.bufferSec > 0
 }
 
+/**
+ * Whether the buffered playout's MPEG-TS relay can carry the requested codec.
+ *
+ * MPEG-TS carries H.264 and HEVC but not AV1: the MPEG-TS muxer writes AV1 as a
+ * private data stream and the demuxer reads it back as `bin_data`, so the video
+ * would be dropped before it ever reaches the FLV muxer. AV1 must therefore use
+ * the single-process FLV path, where ffmpeg writes the Enhanced-RTMP `av01` tag
+ * directly.
+ */
+function bufferedRelaySupportsCodec(settings: SessionSettings): boolean {
+  return settings.video.codec !== 'av1'
+}
+
 export class StreamEngine {
   private readonly deps: EngineDeps
   private sink: EngineSink = { status: () => {}, log: () => {}, playlist: () => {} }
@@ -568,10 +581,17 @@ export class StreamEngine {
      * With buffering enabled the session runs as encoder -> TS buffer -> pusher
      * (see playout.ts). The pusher owns the RTMP session and outlives every encoder
      * restart, which is what makes a file change cheap and absorbs short encoding
-     * stalls. */
+     * stalls. The MPEG-TS relay carries H.264 and HEVC but not AV1, so AV1 falls
+     * back to the single-process FLV path below (ffmpeg writes AV1 as Enhanced-RTMP
+     * `av01` directly). */
     if (bufferedMode(settings.output)) {
-      await this.launchBuffered(index, item, media, positionSec, reason, generation)
-      return
+      if (bufferedRelaySupportsCodec(settings)) {
+        await this.launchBuffered(index, item, media, positionSec, reason, generation)
+        return
+      }
+      if (reason !== 'retry') {
+        this.log('info', 'AV1 无法通过 MPEG-TS 缓冲中转（MPEG-TS 不支持 AV1），本次改用单进程直推 FLV（Enhanced-RTMP av01）。')
+      }
     }
 
     let built: BuiltCommand
@@ -690,6 +710,7 @@ export class StreamEngine {
         this.log('debug', `   ${describeStreams(media)}`)
         for (const line of built.summary) this.log('debug', `   ${line}`)
       }
+      for (const w of built.warnings) this.log('warn', w)
       if (generation !== this.generation) return
     } catch (err) {
       this.log('error', `构建编码参数失败: ${String(err)}`)
