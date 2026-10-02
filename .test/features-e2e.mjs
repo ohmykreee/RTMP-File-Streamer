@@ -313,6 +313,43 @@ function bail(message) {
 
   record('the UI shows no composed push target', (await ev(`!!document.querySelector('.rtmp-target')`)) === false)
 
+  // UI polish regressions: the password input shares the dark theme, number
+  // inputs hide their native spinner (selects keep the dropdown arrow), and
+  // tune defaults to "unset" (AMF + zerolatency is incompatible with some
+  // streaming servers, so it must be opt-in).
+  const pwdBg = await ev(`(() => {
+    const keyField = [...document.querySelectorAll('.settings-body .field')].find(f => (f.querySelector('.field-label')?.textContent ?? '').trim().startsWith('串流密钥'))
+    return getComputedStyle(keyField.querySelector('input')).backgroundColor
+  })()`)
+  record('the password input uses the dark input background', pwdBg === 'rgb(11, 16, 23)', pwdBg)
+
+  await ev(`[...document.querySelectorAll('.tab')].find(t => t.textContent.includes('视频编码'))?.click()`)
+  await delay(350)
+  // Chromium's getComputedStyle cannot observe the spinner pseudo-element, so
+  // verify the stylesheet carries the hiding rule instead (visual effect is
+  // confirmed by screenshot inspection).
+  const spinnerRule = await ev(`(() => {
+    for (const sheet of document.styleSheets) {
+      let rules
+      try {
+        rules = sheet.cssRules
+      } catch {
+        continue
+      }
+      for (const rule of rules) {
+        if (rule.selectorText && rule.selectorText.includes('inner-spin-button') && rule.style && rule.style.webkitAppearance === 'none') return true
+      }
+    }
+    return false
+  })()`)
+  record('number inputs hide the native spinner', spinnerRule === true, spinnerRule)
+  record('tune defaults to unset', (await ev('window.streamer.getSettings().then(s => s.session.video.tune)')) === '')
+  const tuneSelect = await ev(`(() => {
+    const field = [...document.querySelectorAll('.settings-body .field')].find(f => (f.querySelector('.field-label')?.textContent ?? '').trim() === 'tune')
+    return field ? field.querySelector('select').value : 'no-field'
+  })()`)
+  record('the tune select renders with no value selected', tuneSelect === '', tuneSelect)
+
   const storedRaw = fs.readFileSync(SETTINGS_FILE, 'utf8')
   const stored = JSON.parse(storedRaw)
   record('the key is still stored in plain text on disk', stored.session?.output?.streamKey === 'lock-test-key', stored.session?.output?.streamKey)

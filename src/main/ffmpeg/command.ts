@@ -245,7 +245,13 @@ function applyVideoEncoderArgs(
       slow: 'quality'
     }
     args.push('-quality', qualityMap[v.preset] ?? 'balanced')
-    args.push('-usage', 'lowlatency', '-header_insertion_mode', 'idr')
+    if (v.tune === 'zerolatency') {
+      // Opt-in via tune: AMF's low-latency usage makes some streaming servers
+      // (verified against mediamtx's RTSP output) drop the whole video track —
+      // the RTMP side registers both tracks with an identical bitstream, yet
+      // RTSP readers receive zero video RTP packets while audio keeps flowing.
+      args.push('-usage', 'lowlatency')
+    }
     args.push('-bf', String(bf))
     if (v.profile && spec.name.startsWith('h264')) args.push('-profile:v', v.profile)
   } else if (spec.kind === 'qsv') {
@@ -492,6 +498,9 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     summary.unshift(`视频：${spec.name}${hw} · ${v.rateControl.toUpperCase()}${v.rateControl === 'crf' ? ` CRF ${v.crf}` : ` ${v.bitrateKbps}kbps`}`)
     if (spec.kind === 'software' && v.bitrateKbps > 12000) {
       warnings.push(`软件编码 ${spec.name} 在高码率下可能无法实时编码，建议改用硬件编码器或降低码率。`)
+    }
+    if (spec.kind === 'amf' && v.tune === 'zerolatency') {
+      warnings.push('AMF 低延迟模式（tune=zerolatency）与部分流媒体服务器不兼容，如遇黑屏请把 tune 改为「不设置」。')
     }
   }
 

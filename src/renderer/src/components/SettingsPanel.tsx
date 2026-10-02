@@ -170,7 +170,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* ---------------------------------------------------------- VIDEO */}
         {tab === 'video' && (
           <>
-            <Field label="视频编码格式" hint="选择输出编码；RTMP 推流最通用的是 H.264">
+            <Field label="视频编码格式" hint="RTMP 推流最通用的是 H.264">
               <select value={v.codec} onChange={(e) => props.onUpdateVideo({ codec: e.target.value as VideoCodecName, encoder: 'auto' })}>
                 {(Object.keys(CODEC_LABEL) as VideoCodecName[]).map((c) => (
                   <option key={c} value={c}>
@@ -262,7 +262,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                     )}
                   </Field>
 
-                  <Field label="tune" hint="直播推荐 zerolatency">
+                  <Field label="tune">
                     <select value={v.tune} onChange={(e) => props.onUpdateVideo({ tune: e.target.value })}>
                       <option value="">（不设置）</option>
                       <option value="zerolatency">zerolatency（零延迟）</option>
@@ -536,7 +536,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* --------------------------------------------------------- OUTPUT */}
         {tab === 'output' && (
           <>
-            <Field label="RTMP 推流地址" hint="填到应用路径为止（通常以 / 结尾）。最终推送目标 = 地址 + 密钥，直接拼接，不再插入斜杠">
+            <Field label="RTMP 推流地址" hint="填到应用路径为止（含结尾 /）">
               <input
                 value={o.rtmpUrl}
                 placeholder="rtmp://127.0.0.1/live/"
@@ -545,7 +545,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               />
             </Field>
 
-            <Field label="串流密钥 (可选)" hint="点状显示，可点「显示」查看；留空则直接推送地址本身">
+            <Field label="串流密钥 (可选)" hint="留空则不携带密钥">
               <div className="secret-row">
                 <input
                   type={showKey ? 'text' : 'password'}
@@ -619,7 +619,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               </select>
             </Field>
 
-            <Field label="追加自定义参数" hint="原样追加到 ffmpeg 输出参数中，例如 -flvflags no_duration_filesize">
+            <Field label="追加自定义参数" hint="追加到 ffmpeg 输出参数末尾，例如 -flvflags no_duration_filesize">
               <input
                 value={o.extraOutputArgs}
                 placeholder=""
@@ -777,7 +777,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 <span>当前占用</span>
                 <code>
                   {props.logInfo
-                    ? `${props.logInfo.fileCount} 个文件 / ${(props.logInfo.totalBytes / 1024).toFixed(0)} KB · 上限 ${(props.logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB（超出自动清理最旧日志）`
+                    ? `${props.logInfo.fileCount} 个文件 / ${(props.logInfo.totalBytes / 1024).toFixed(0)} KB · 上限 ${(props.logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB`
                     : '—'}
                 </code>
               </div>

@@ -17,7 +17,7 @@ export const DEFAULT_VIDEO: VideoSettings = {
   bufferSizeKbps: 12000,
   crf: 22,
   preset: 'veryfast',
-  tune: 'zerolatency',
+  tune: '',
   profile: 'high',
   keyframeIntervalSec: 2,
   bFrames: 0,

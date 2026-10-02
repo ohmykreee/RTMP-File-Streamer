@@ -8,9 +8,9 @@
  * resolver prefers over PATH.
  */
 module.exports = {
-  appId: 'com.streamingtools.rtmpfilestreamer',
+  appId: 'net.kre3.rtmpfilestreamer',
   productName: 'RTMP File Streamer',
-  copyright: 'Copyright © 2026 StreamingTools',
+  copyright: 'Copyright © 2026 TurboKre',
   directories: {
     output: 'release',
     buildResources: 'build'

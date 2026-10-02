@@ -899,6 +899,7 @@ code {
 
 input[type='text'],
 input[type='number'],
+input[type='password'],
 input:not([type]),
 select {
   width: 100%;
@@ -911,6 +912,19 @@ select {
   font-size: 12.5px;
   outline: none;
   transition: border-color 0.13s, box-shadow 0.13s;
+}
+
+/* Hide the native spinner buttons inside number inputs; the select dropdown
+   arrow is untouched. */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
 input:focus,

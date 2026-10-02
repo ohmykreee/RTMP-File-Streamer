@@ -188,35 +188,47 @@ await checkLayout({
 /* ---------------- 2. packaged unpacked build ---------------- */
 if (fs.existsSync(path.join(UNPACKED, 'RTMPFileStreamer.exe'))) {
   const packedData = path.join(UNPACKED, 'Data')
+  // The packaged app may carry real user state (it is the copy people actually
+  // run), so back it up and put it back afterwards instead of wiping it.
+  const packedBackup = path.join(here, 'packed-data-backup')
+  fs.rmSync(packedBackup, { recursive: true, force: true })
+  const hadPackedData = fs.existsSync(packedData)
+  if (hadPackedData) fs.cpSync(packedData, packedBackup, { recursive: true })
   fs.rmSync(packedData, { recursive: true, force: true })
   fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 
-  await checkLayout({
-    label: '免安装目录版',
-    command: path.join(UNPACKED, 'RTMPFileStreamer.exe'),
-    args: ['--remote-debugging-port=9842', '--remote-allow-origins=*'],
-    cwd: UNPACKED,
-    expectedDataDir: packedData,
-    cdpPort: 9842
-  })
+  try {
+    await checkLayout({
+      label: '免安装目录版',
+      command: path.join(UNPACKED, 'RTMPFileStreamer.exe'),
+      args: ['--remote-debugging-port=9842', '--remote-allow-origins=*'],
+      cwd: UNPACKED,
+      expectedDataDir: packedData,
+      cdpPort: 9842
+    })
 
-  // The whole point of the folder layout: it can be moved and still works.
-  const movedDir = path.join(here, 'moved-app')
-  fs.rmSync(movedDir, { recursive: true, force: true })
-  fs.cpSync(UNPACKED, movedDir, { recursive: true })
-  const movedData = path.join(movedDir, 'Data')
-  fs.rmSync(movedData, { recursive: true, force: true })
-  fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
+    // The whole point of the folder layout: it can be moved and still works.
+    const movedDir = path.join(here, 'moved-app')
+    fs.rmSync(movedDir, { recursive: true, force: true })
+    fs.cpSync(UNPACKED, movedDir, { recursive: true })
+    const movedData = path.join(movedDir, 'Data')
+    fs.rmSync(movedData, { recursive: true, force: true })
+    fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 
-  await checkLayout({
-    label: '移动后的目录',
-    command: path.join(movedDir, 'RTMPFileStreamer.exe'),
-    args: ['--remote-debugging-port=9843', '--remote-allow-origins=*'],
-    cwd: movedDir,
-    expectedDataDir: movedData,
-    cdpPort: 9843
-  })
-  fs.rmSync(movedDir, { recursive: true, force: true })
+    await checkLayout({
+      label: '移动后的目录',
+      command: path.join(movedDir, 'RTMPFileStreamer.exe'),
+      args: ['--remote-debugging-port=9843', '--remote-allow-origins=*'],
+      cwd: movedDir,
+      expectedDataDir: movedData,
+      cdpPort: 9843
+    })
+    fs.rmSync(movedDir, { recursive: true, force: true })
+  } finally {
+    fs.rmSync(packedData, { recursive: true, force: true })
+    if (hadPackedData) fs.cpSync(packedBackup, packedData, { recursive: true })
+    fs.rmSync(packedBackup, { recursive: true, force: true })
+  }
 } else {
   note('skipping packaged checks', `${UNPACKED}\\RTMPFileStreamer.exe not found — run \`pnpm dist\` first`)
 }

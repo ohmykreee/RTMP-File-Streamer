@@ -51,11 +51,6 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, logInfo, o
           <span className={`chevron${expanded ? ' open' : ''}`}>▸</span>
           运行日志
           <span className="muted small">({logs.length})</span>
-          {logInfo && (
-            <span className="muted small" title={`日志目录：${logInfo.dir}\n上限 ${(logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB，超出自动清理最旧日志`}>
-              · 留存 {(logInfo.totalBytes / 1024).toFixed(0)} KB
-            </span>
-          )}
         </span>
         <div className="logs-actions" onClick={(e) => e.stopPropagation()}>
           <div className="seg">
