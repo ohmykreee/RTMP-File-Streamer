@@ -58,12 +58,64 @@ export function invalidateProbe(filePath: string): void {
 }
 
 /**
- * Sidecar subtitle files that belong to `videoPath`: same basename with any
+ * How many leading characters the two cleaned names must share.
+ *
+ * Exact-name matching is too strict in practice: a release folder typically holds
+ * `Show.S01E01.mkv` next to `Show.S01E01.chs.srt` / `.cht.srt` / `.简体.srt`, and
+ * those qualifier suffixes are exactly what has to be tolerated. The comparison
+ * therefore happens on the name with its language/edition tokens removed, and the
+ * shared part must still be long enough to identify the file — which is what stops
+ * `…S01E01` from matching `…S01E02`.
+ */
+const SIDECAR_MIN_SHARED_CHARS = 6
+
+/** Qualifier tokens carrying no identifying information, stripped before comparing. */
+const SUBTITLE_QUALIFIER_RE =
+  /(?:^|[._\-\s])(chs|cht|cn|zh|zho|chi|hans|hant|sc|tc|简体|繁体|简|繁|中文|双语|中英|英文|english|eng|jpn|jp|japanese|kor|kr|korean|forced|sdh|cc|full|default)(?=$|[._\-\s])/i
+
+/**
+ * The identifying part of a filename: everything before the first qualifier token,
+ * lower-cased and without trailing separators. `Show.S01E01.chs.srt` →
+ * `show.s01e01`.
+ */
+export function stemPrefix(name: string): string {
+  const stem = path.basename(name, path.extname(name)).toLowerCase()
+  const match = new RegExp(SUBTITLE_QUALIFIER_RE.source, 'i').exec(stem)
+  return (match ? stem.slice(0, match.index) : stem).replace(/[._\-\s]+$/, '')
+}
+
+/**
+ * True when `subtitleName` looks like a sidecar of `videoName`.
+ *
+ * Two ways to qualify:
+ *  1. the subtitle stem is the video stem, or the video stem followed by a
+ *     separator (`movie.srt`, `movie.zh-CN.srt`) — the original rules;
+ *  2. after dropping language/edition tokens from the subtitle name, the two share
+ *     at least {@link SIDECAR_MIN_SHARED_CHARS} characters and one is a prefix of
+ *     the other, so `Show.S01E01.1080p` pairs with `Show.S01E01.chs` but not with
+ *     `Show.S01E02.chs`.
+ */
+export function subtitleMatchesVideo(videoName: string, subtitleName: string): boolean {
+  const videoStem = path.basename(videoName, path.extname(videoName)).toLowerCase().replace(/[._\-\s]+$/, '')
+  const subStem = path.basename(subtitleName, path.extname(subtitleName)).toLowerCase()
+  if (!videoStem || !subStem) return false
+  if (subStem === videoStem || subStem.startsWith(`${videoStem}.`) || subStem.startsWith(`${videoStem}_`) || subStem.startsWith(`${videoStem}-`)) {
+    return true
+  }
+  const videoPrefix = stemPrefix(videoName)
+  const subPrefix = stemPrefix(subtitleName)
+  if (!videoPrefix || !subPrefix) return false
+  const shorter = videoPrefix.length <= subPrefix.length ? videoPrefix : subPrefix
+  const longer = shorter === videoPrefix ? subPrefix : videoPrefix
+  return shorter.length >= SIDECAR_MIN_SHARED_CHARS && longer.startsWith(shorter)
+}
+
+/**
+ * Sidecar subtitle files that belong to `videoPath`: a shared name prefix plus any
  * language/qualifier suffix, plus `Subs/`-style sibling folders.
  */
 export function findSidecarSubtitles(videoPath: string): string[] {
   const dir = path.dirname(videoPath)
-  const stem = path.basename(videoPath, path.extname(videoPath)).toLowerCase()
   const found: string[] = []
 
   const scan = (targetDir: string, depth: number): void => {
@@ -81,11 +133,7 @@ export function findSidecarSubtitles(videoPath: string): string[] {
       }
       const ext = path.extname(entry.name).toLowerCase()
       if (!SUPPORTED_SUBTITLE_EXT.includes(ext)) continue
-      const entryStem = path.basename(entry.name, ext).toLowerCase()
-      // Accept "movie.srt", "movie.zh-CN.srt", "movie.forced.ass", "movie.eng"
-      if (entryStem === stem || entryStem.startsWith(`${stem}.`) || entryStem.startsWith(`${stem}_`) || entryStem.startsWith(`${stem}-`)) {
-        found.push(full)
-      }
+      if (subtitleMatchesVideo(videoPath, entry.name)) found.push(full)
     }
   }
 

@@ -169,7 +169,6 @@ const services: AppServices = {
   engineStart: () => engine.start(),
   engineStop: () => engine.stop(),
   engineSkipNext: () => engine.skipNext(),
-  engineSeek: (positionSec: number) => engine.seek(positionSec),
   engineJumpToItem: (itemId: string) => engine.jumpToItem(itemId),
   enginePreviewCommand: () => engine.getCommandPreview(),
   obsStatus: () => obs.status(),

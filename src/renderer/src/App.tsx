@@ -13,6 +13,7 @@ const STATE_LABEL: Record<EngineState, string> = {
   connecting: '连接中',
   live: '推流中',
   reconnecting: '重连中',
+  draining: '播出剩余缓冲',
   stopping: '停止中',
   error: '错误'
 }
@@ -157,13 +158,18 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [canStart, isActive, run, st])
 
-  const handleSeek = useCallback(
-    (positionSec: number, itemId: string) => {
-      const target = playlist.find((i) => i.id === itemId)
-      if (!target) return
+  /**
+   * Clicking the bar jumps to that playlist entry.
+   *
+   * Seeking *inside* a file is deliberately gone: it needs the encoder to restart
+   * mid-file, and with the buffered playout that restart also has to be spliced
+   * into an already-published stream, which is not something the player can be
+   * asked to tolerate. Jumping between files is the supported operation.
+   */
+  const handleJump = useCallback(
+    (itemId: string) => {
       const currentId = playlist[status.currentIndex]?.id
       if (currentId !== itemId) void run(() => st.jumpToItem(itemId))
-      else void run(() => st.seek(positionSec))
     },
     [playlist, run, st, status.currentIndex]
   )
@@ -312,22 +318,33 @@ export default function App(): React.JSX.Element {
             <span title="已推流时长 / 当前文件时长">
               {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
             </span>
-            <span title="编码速度">速度 {status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—'}</span>
-            <span title="实时码率">{formatBitrate(status.bitrateKbps)}</span>
-            <span title="编码帧率">fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
+            {/* Buffered mode runs two processes: the figures above describe what has
+                been PUBLISHED, the marked ones describe the ENCODER, which is free
+                to run ahead of real time. */}
+            {status.encoder ? (
+              <>
+                <span className="warn">
+                  [编码 ffmpeg] 速度 {status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—'}
+                </span>
+                <span className="warn">fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
+                <span className="warn">{formatBitrate(status.encoder.bitrateKbps)}</span>
+                <span title="编码进程领先推流进程的秒数，即缓冲深度">缓冲领先 {status.encoder.leadSec.toFixed(1)}s</span>
+                <span title="推流进程的节奏，稳定在 1× 左右">[推流] 速度 {status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—'}</span>
+              </>
+            ) : (
+              <>
+                <span title="编码速度">速度 {status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—'}</span>
+                <span title="实时码率">{formatBitrate(status.bitrateKbps)}</span>
+                <span title="编码帧率">fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
+              </>
+            )}
             {status.droppedFrames > 0 && <span className="warn">丢帧 {status.droppedFrames}</span>}
             {status.reconnectCount > 0 && <span className="warn">重连 {status.reconnectCount}</span>}
             <span title="会话已运行时长">已运行 {formatDuration(status.elapsedSec)}</span>
           </div>
         </div>
 
-        <Timeline
-          items={playlist}
-          status={status}
-          onSeek={handleSeek}
-          onJumpToItem={(id) => void run(() => st.jumpToItem(id))}
-          disabled={playlist.length === 0}
-        />
+        <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
 
         <div className="player-controls">
           <div className="progress-pct mono">{progressPct.toFixed(1)}%</div>

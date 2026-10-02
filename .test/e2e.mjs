@@ -59,7 +59,7 @@ if (suites.includes('engine') && !fs.existsSync(path.join(root, 'out', 'main', '
   if (built.status !== 0) process.exit(built.status ?? 1)
 }
 
-const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_a.srt']
+const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_d.mp4', 'clip_a.srt']
 if (FIXTURES.some((f) => !fs.existsSync(path.join(here, f)))) {
   console.log('Generating test media...')
   const gen = spawnSync(process.execPath, [path.join(here, 'make-fixtures.mjs')], { cwd: root, stdio: 'inherit' })

@@ -32,6 +32,28 @@ export interface EngineSink {
 /** How close to the end of a file counts as "finished normally". */
 const COMPLETION_TOLERANCE_SEC = 1.5
 
+/**
+ * How far the pusher may lag the encoder's hand-off point and still count as
+ * "everything has aired".
+ *
+ * The final pass's span is only known once its process ends, and the pusher's last
+ * reported position arrives with it, so the two never meet exactly. Half a second
+ * is below one progress interval and far below anything a viewer would notice.
+ */
+const DRAIN_TOLERANCE_SEC = 0.5
+
+/** Backstop for the drain wait: content, not a stuck process, decides the end. */
+const DRAIN_MAX_SEC = 300
+const DRAIN_STALL_MS = 45_000
+
+/**
+ * Gap left between what the pusher has published and where the next pass starts.
+ *
+ * Larger than a frame, smaller than anything a viewer would notice, and it keeps the
+ * splice strictly forward even when the encoder's reported span was rounded down.
+ */
+const PASS_START_MARGIN_SEC = 0.25
+
 export class StreamEngine {
   private readonly deps: EngineDeps
   private sink: EngineSink = { status: () => {}, log: () => {}, playlist: () => {} }
@@ -70,8 +92,31 @@ export class StreamEngine {
   private playout: Playout | null = null
   /** Encoder pass being produced, i.e. what the pusher is heading into. */
   private pass: { index: number; startSec: number; itemDurationSec: number; tsOffset: number } | null = null
-  /** Pass the pusher has actually reached, used to report what is on screen. */
-  private playing: { startSec: number; tsOffset: number } | null = null
+  /**
+   * Set once every playlist entry is encoded but the pusher is still publishing
+   * what it holds. In buffered mode the encoder deliberately runs ahead of the
+   * viewer, so "the last file was encoded" is not "the stream is over" — a 35s
+   * playlist is fully encoded in a few seconds and still needs 35s of airtime.
+   */
+  private drain: { startedAt: number; lastProgressAt: number; waitingForSec: number } | null = null
+  /**
+   * True while a skip or a jump is replacing the RTMP session.
+   *
+   * A session restart discards the buffer and opens a new publish session, which
+   * takes a moment; the passes being torn down and started during that window report
+   * events that belong to neither the session that ended nor the one that is coming.
+   */
+  private restartingSession = false
+  /**
+   * Every pass handed to the pusher, in timeline order.
+   *
+   * The pusher airs them at 1x while the encoder races ahead, and it outlives the
+   * encoder, so this log is the only way to answer "what is the viewer watching"
+   * once several passes are in flight — or once none are.
+   */
+  private airedPasses: { index: number; startSec: number; itemDurationSec: number; tsOffset: number }[] = []
+  /** Highest timeline value the pusher has reported (seconds, session timeline). */
+  private publishedSec = 0
 
   constructor(deps: EngineDeps) {
     this.deps = deps
@@ -104,6 +149,9 @@ export class StreamEngine {
     this.emitPlaylist()
   }
 
+  /** Encoder-side figures, only meaningful in buffered (two-process) mode. */
+  private encoderStats: { speed: number; fps: number; bitrateKbps: number; leadSec: number } | null = null
+
   /* ------------------------------------------------------------ *
    * Status / logging
    * ------------------------------------------------------------ */
@@ -135,7 +183,9 @@ export class StreamEngine {
       reconnectCount: this.reconnectCount,
       connected: this.connected,
       startedAt: this.startedAt,
-      elapsedSec: this.startedAt ? Math.round((Date.now() - this.startedAt) / 1000) : 0
+      elapsedSec: this.startedAt ? Math.round((Date.now() - this.startedAt) / 1000) : 0,
+      buffered: this.playout !== null,
+      ...(this.playout && this.encoderStats ? { encoder: this.encoderStats } : {})
     }
   }
 
@@ -197,6 +247,11 @@ export class StreamEngine {
     this.startedAt = Date.now()
     this.reconnectCount = 0
     this.stopping = false
+    // A new session starts a new RTMP timeline, so the pass log and the published
+    // position must not carry over from the previous run.
+    this.airedPasses = []
+    this.publishedSec = 0
+    this.drain = null
     this.currentIndex = atIndex !== undefined ? Math.max(0, Math.min(atIndex, this.items.length - 1)) : 0
     this.emitPlaylist()
 
@@ -228,7 +283,9 @@ export class StreamEngine {
       await playout.stop()
     }
     this.pass = null
-    this.playing = null
+    this.drain = null
+    this.airedPasses = []
+    this.publishedSec = 0
     this.state = 'idle'
     this.connected = false
     this.currentIndex = -1
@@ -277,21 +334,6 @@ export class StreamEngine {
       return this.start(index)
     }
     await this.advanceTo(index, 'jump')
-    return this.getStatus()
-  }
-
-  /**
-   * Seek inside the current file by restarting the encoder at the new position.
-   * This is the only reliable way to move forward in a live RTMP push: the FLV
-   * timeline cannot be scrubbed once frames are sent.
-   */
-  async seek(positionSec: number): Promise<EngineStatus> {
-    if (this.currentIndex < 0) return this.getStatus()
-    const item = this.items[this.currentIndex]
-    const duration = this.itemDuration || item.durationSec
-    const target = Math.max(0, Math.min(positionSec, Math.max(0, duration - 0.5)))
-    this.log('info', `跳转到 ${formatDuration(target)}（重新启动编码进程）`)
-    await this.launchCurrent(target, 'seek')
     return this.getStatus()
   }
 
@@ -358,17 +400,52 @@ export class StreamEngine {
         this.emitPlaylist()
         await this.launchCurrentFrom(0, 0, reason)
         return
-      }      this.log('info', '播放列表全部完成，串流结束。')
-      await this.killChild(true)
-      this.state = 'idle'
-      this.connected = false
-      this.positionSec = 0
-      this.currentIndex = -1
-      this.startedAt = null
-      this.emitStatus()
+      }
+      // Buffered playout: the files are all encoded, but the pusher is paced at
+      // 1x and still holds a backlog. Closing the session here would cut the
+      // viewer off mid-file and reset the RTMP timeline, so the run waits for the
+      // backlog to air first.
+      if (this.playout && this.playout.isPusherRunning()) {
+        const waitingForSec = this.playout.getNextOffset()
+        const published = this.playout.getPublishedSec()
+        if (published < waitingForSec - DRAIN_TOLERANCE_SEC) {
+          const now = Date.now()
+          this.drain = { startedAt: now, lastProgressAt: now, waitingForSec }
+          this.state = 'draining'
+          this.emitStatus()
+          this.log(
+            'info',
+            `播放列表已全部编码完成，正在按 1× 播出剩余缓冲（还需约 ${formatDuration(waitingForSec - published)}）。`
+          )
+          return
+        }
+      }
+      this.log('info', '播放列表全部完成，串流结束。')
+      await this.finishSession()
       return
     }
     await this.launchCurrentFrom(index, 0, reason)
+  }
+
+  /** Closes the RTMP session and returns the engine to idle. */
+  private async finishSession(): Promise<void> {
+    this.drain = null
+    await this.killChild(true)
+    // The playout owns the RTMP session, so ending the run has to end it too. It
+    // must also be dropped here: a kept-but-stopped playout still holds its dead
+    // pusher, and the next session would hand it new encoder passes that nobody
+    // publishes (`Playout.start` returns early while it believes a pusher exists).
+    if (this.playout) {
+      const playout = this.playout
+      this.playout = null
+      await playout.stop()
+    }
+    this.state = 'idle'
+    this.connected = false
+    this.positionSec = 0
+    this.currentIndex = -1
+    this.startedAt = null
+    this.emitStatus()
   }
 
   private async launchCurrent(positionSec: number, reason: string): Promise<void> {
@@ -581,15 +658,63 @@ export class StreamEngine {
       this.log('info', `已启用缓冲推流：编码领先推流 ${settings.output.bufferSec}s，seek 只重启编码进程。`)
     }
 
-    // Continue the published timeline; a tiny margin keeps the splice strictly
-    // forward even if the encoder's reported duration was rounded down.
-    const tsOffset = this.playout.getNextOffset() + (positionSec > 0.05 ? 0.05 : 0)
+    /*
+     * Whether this file continues the session or opens a new one.
+     *
+     * `finish` (and the natural start of the queue) means the previous file simply
+     * ended: the pusher has aired everything handed to it, so only the encoder is
+     * replaced and the RTMP session — and every viewer's connection — survives. That
+     * is the entire point of running two processes.
+     *
+     * `skip` and `jump` are different in kind. The encoder runs ahead on purpose, so
+     * the requested file is usually already encoded and sitting in the buffer behind
+     * content the viewer has not watched. A published timeline only moves forward, so
+     * that backlog cannot be skipped over: the session is ended and reopened at the
+     * requested file, and the buffer is discarded with it.
+     */
+    const restartSession = this.playout.isPusherRunning() && (reason === 'skip' || reason === 'jump')
+    const tsOffset = restartSession
+      ? positionSec > 0.05
+        ? PASS_START_MARGIN_SEC
+        : 0
+      : this.playout.getNextOffset() + (positionSec > 0.05 ? PASS_START_MARGIN_SEC : 0)
     const expectedSec = Math.max(0, this.itemDuration - positionSec)
+    if (restartSession) {
+      // The timeline restarts with the session, so what the viewer is watching is
+      // reported against the new one from here on.
+      this.airedPasses = []
+      this.publishedSec = 0
+      this.drain = null
+    }
     this.pass = { index, startSec: positionSec, itemDurationSec: this.itemDuration, tsOffset }
+    // Recorded before the encoder starts, so a pusher that crosses into this pass
+    // while it is still being built is already reported as watching it.
+    if (this.airedPasses.at(-1)?.tsOffset !== tsOffset) this.airedPasses.push({ ...this.pass })
 
     const pass = { input: item.path, args, startPositionSec: positionSec, tsOffset, expectedSec }
-    if (this.playout.isPusherRunning()) this.playout.restartEncoder(pass)
-    else await this.playout.start(pass)
+    if (restartSession) {
+      /*
+       * The session is being replaced, so nothing the playout reports until it is
+       * back counts as progress: the old pass is being killed and the new one may
+       * finish encoding long before the new publisher has even connected. Treating
+       * that as "a file completed" ends the playlist — which tears down the very
+       * session the restart is opening (measured: the jump was cancelled by the
+       * completion of the file it was jumping to).
+       */
+      this.restartingSession = true
+      try {
+        await this.playout.restartSession(pass)
+      } finally {
+        this.restartingSession = false
+      }
+      // The new pass has been handed over and will air from the start of the file.
+      this.pass = { index, startSec: positionSec, itemDurationSec: this.itemDuration, tsOffset }
+      this.airedPasses = [{ ...this.pass }]
+    } else if (this.playout.isPusherRunning()) {
+      this.playout.restartEncoder(pass)
+    } else {
+      await this.playout.start(pass)
+    }
 
     this.state = 'live'
     this.connected = true
@@ -617,20 +742,82 @@ export class StreamEngine {
    * position is that value minus the offset of the pass the pusher has reached.
    */
   private onPublished(seconds: number): void {
-    if (!this.pass) return
-    if (!this.playing || seconds >= this.pass.tsOffset - 0.001) {
-      this.playing = { startSec: this.pass.startSec, tsOffset: this.pass.tsOffset }
+    // Progress, not elapsed time, is what proves the pusher is still working, so
+    // the drain stall guard measures inactivity rather than duration.
+    if (seconds > this.publishedSec && this.drain) this.drain.lastProgressAt = Date.now()
+    this.publishedSec = seconds
+    // In buffered mode the encoder runs ahead of the viewer, so what is on screen
+    // is decided by which pass boundary the pusher has crossed — not by the pass
+    // currently being encoded. Reporting the latter would jump the progress bar to
+    // a file the viewer has not reached yet, and during the drain phase (no encoder
+    // running at all) it would leave the position stuck at the last file's start.
+    const live = this.passAt(seconds)
+    if (live) {
+      this.itemDuration = live.itemDurationSec
+      this.currentIndex = live.index
+      this.setPosition(live.startSec + Math.max(0, seconds - live.tsOffset))
     }
-    const mediaPos = this.playing.startSec + Math.max(0, seconds - this.playing.tsOffset)
-    this.itemDuration = this.pass.itemDurationSec
-    this.currentIndex = this.pass.index
-    this.setPosition(mediaPos)
+    // In buffered mode the live figures belong to the *encoder* (which runs at its
+    // own pace, above 1x), so they travel separately instead of being mixed into
+    // the numbers that describe what the viewer receives.
+    const enc = this.playout?.getEncoderStats()
+    if (enc) this.encoderStats = enc
     this.emitStatus()
+    this.checkDrainComplete()
+  }
+
+  /**
+   * The pass the pusher is currently airing: the last boundary it has reached.
+   *
+   * Both the start of the session and the very first seconds of a pass fall before
+   * that pass's first reported timestamp, so the newest pass whose offset lies
+   * below the published position is the right answer, with the oldest pass as the
+   * fallback while the pusher is still waiting for its first packet.
+   */
+  private passAt(
+    seconds: number
+  ): { index: number; startSec: number; itemDurationSec: number; tsOffset: number } | null {
+    let found: { index: number; startSec: number; itemDurationSec: number; tsOffset: number } | null = null
+    for (const p of this.airedPasses) {
+      if (seconds >= p.tsOffset - 0.001) found = p
+      else break
+    }
+    return found ?? this.airedPasses.at(-1) ?? null
+  }
+
+  /**
+   * Ends the session once the pusher has published everything that was encoded.
+   *
+   * Buffered playout only: the encoder finishes the whole playlist in a few
+   * seconds and the material then takes its own length to air, so the run is over
+   * when the timeline the pusher reports catches up with the timeline the encoder
+   * handed over. The stall guard exists because a publisher that stops reporting
+   * while still running is a fault (a dead RTMP connection), not content.
+   */
+  private checkDrainComplete(): void {
+    const drain = this.drain
+    if (!drain || this.stopping) return
+    const now = Date.now()
+    if (this.publishedSec >= drain.waitingForSec - DRAIN_TOLERANCE_SEC) {
+      this.log('info', `缓冲已全部播出（${this.publishedSec.toFixed(1)}s），串流结束。`)
+    } else if (now - drain.lastProgressAt > DRAIN_STALL_MS) {
+      this.log(
+        'warn',
+        `推流进程在 ${this.publishedSec.toFixed(1)}s 处停止推进（已交付 ${drain.waitingForSec.toFixed(1)}s），提前结束会话。`
+      )
+    } else if ((now - drain.startedAt) / 1000 > drain.waitingForSec + DRAIN_MAX_SEC) {
+      this.log('warn', `播出剩余缓冲超过预期上限（${drain.waitingForSec.toFixed(1)}s），提前结束会话。`)
+    } else {
+      return
+    }
+    void this.finishSession()
   }
 
   /** An encoder pass ended: what it produced is now part of the stream. */
   private onEncoderExit(code: number | null, materialSec: number): void {
-    if (this.stopping || !this.pass) return
+    // A restart is tearing this pass down; the parts belong to the session that is
+    // being closed, not to the queue (see `restartingSession`).
+    if (this.stopping || this.restartingSession || !this.pass) return
     const index = this.pass.index
     const item = this.items[index]
     if (code !== 0) {
@@ -650,6 +837,42 @@ export class StreamEngine {
   private onPusherExit(code: number | null): void {
     if (this.stopping) return
     this.connected = false
+    // The buffered playout is the RTMP session, so a dead publisher takes it with
+    // it: without this the engine keeps handing encoder passes to a playout whose
+    // reader is gone, and a later attempt to continue silently publishes nothing.
+    if (this.playout) {
+      const playout = this.playout
+      this.playout = null
+      this.airedPasses = []
+      this.publishedSec = 0
+      this.drain = null
+      void playout.stop()
+    }
+    /*
+     * A publish that failed is retried before the run is given up on.
+     *
+     * This matters most right after a skip or a jump, which ends one publish session
+     * and immediately opens another: the server may still be tearing the previous one
+     * down, and losing the session to that race would turn a working skip into a
+     * dropped stream. Retrying replays the position the viewer is at rather than
+     * resuming mid-buffer, because the playout — and its buffer — are gone.
+     */
+    const settings = this.deps.getSettings()
+    if (settings.output.maxReconnectAttempts > 0 && this.reconnectCount < settings.output.maxReconnectAttempts) {
+      this.reconnectCount += 1
+      const delayMs = Math.max(1, settings.output.reconnectDelaySec) * 1000
+      this.state = 'reconnecting'
+      this.emitStatus()
+      this.log(
+        'warn',
+        `推流进程结束（退出码 ${code ?? '未知'}），${delayMs / 1000}s 后重试（第 ${this.reconnectCount}/${settings.output.maxReconnectAttempts} 次）…`
+      )
+      this.reconnectTimer = setTimeout(() => {
+        if (this.stopping) return
+        void this.launchCurrentFrom(this.currentIndex, Math.max(0, this.positionSec), 'retry')
+      }, delayMs)
+      return
+    }
     this.state = 'error'
     this.emitStatus()
     this.log('error', `推流进程结束（退出码 ${code ?? '未知'}），串流中断。`)

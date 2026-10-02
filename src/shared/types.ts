@@ -259,7 +259,7 @@ export interface OutputSettings {
    * reopened, so servers need a moment to release the stream key.
    */
   gapBetweenItemsSec: number
-  /** Seek accuracy: fast = keyframe seek, accurate = decode-accurate (slower restart). */
+  /** Fractional seek accuracy when restarting inside a file; kept for stored settings. */
   seekAccuracy: 'fast' | 'accurate'
   /** Optional https/http query parameters appended to the RTMP url. */
   dropLateFrames: boolean
@@ -350,6 +350,13 @@ export type EngineState =
   | 'connecting'
   | 'live'
   | 'reconnecting'
+  /**
+   * The buffered playout has every file encoded but the pusher is still working
+   * through what it holds, at 1x. The session is not over: the encoder simply has
+   * nothing left to add, so the remaining material has to be published before the
+   * RTMP session is closed.
+   */
+  | 'draining'
   | 'stopping'
   | 'error'
 
@@ -377,6 +384,22 @@ export interface EngineStatus {
   fps: number
   bitrateKbps: number
   droppedFrames: number
+  /**
+   * True when the session runs as two processes (encoder + publisher).
+   *
+   * The numbers above then describe the *published* stream; the encoder has its
+   * own pace, which is what `encoder` carries so the UI can show both instead of
+   * pretending they are the same thing.
+   */
+  buffered?: boolean
+  /** Live figures of the encoder process, only present in buffered mode. */
+  encoder?: {
+    speed: number
+    fps: number
+    bitrateKbps: number
+    /** How far the encoder currently leads the publisher, in seconds. */
+    leadSec: number
+  }
   frame: number
   /** Item ids in playback order; used by the UI to render the queue. */
   order: string[]
@@ -469,7 +492,6 @@ export interface StreamerApi {
   start(): Promise<EngineStatus>
   stop(): Promise<EngineStatus>
   skipNext(): Promise<EngineStatus>
-  seek(positionSec: number): Promise<EngineStatus>
   jumpToItem(itemId: string): Promise<EngineStatus>
   testRtmp(req: RtmpTestRequest): Promise<RtmpTestResult>
   clearLogs(): Promise<void>
@@ -538,7 +560,6 @@ export const IPC = {
   start: 'engine:start',
   stop: 'engine:stop',
   skipNext: 'engine:skipNext',
-  seek: 'engine:seek',
   jumpToItem: 'engine:jumpToItem',
   testRtmp: 'engine:testRtmp',
   previewCommand: 'engine:previewCommand',

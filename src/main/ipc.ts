@@ -44,7 +44,6 @@ export interface AppServices {
   engineStart: () => Promise<EngineStatus>
   engineStop: () => Promise<EngineStatus>
   engineSkipNext: () => Promise<EngineStatus>
-  engineSeek: (positionSec: number) => Promise<EngineStatus>
   engineJumpToItem: (itemId: string) => Promise<EngineStatus>
   enginePreviewCommand: () => string
   /** Live state of the obs-websocket compatible control server. */
@@ -178,7 +177,6 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.start, (): Promise<EngineStatus> => services.engineStart())
   ipcMain.handle(IPC.stop, (): Promise<EngineStatus> => services.engineStop())
   ipcMain.handle(IPC.skipNext, (): Promise<EngineStatus> => services.engineSkipNext())
-  ipcMain.handle(IPC.seek, (_e, positionSec: number): Promise<EngineStatus> => services.engineSeek(Number(positionSec) || 0))
   ipcMain.handle(IPC.jumpToItem, (_e, itemId: string): Promise<EngineStatus> => services.engineJumpToItem(String(itemId)))
   ipcMain.handle(IPC.getStatus, (): EngineStatus => services.engineStatus())
   ipcMain.handle(IPC.previewCommand, (): string => services.enginePreviewCommand())

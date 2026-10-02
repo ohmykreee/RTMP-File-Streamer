@@ -69,14 +69,18 @@ export const DEFAULT_SESSION: SessionSettings = {
     realtimePacing: true,
     // obs-websocket's own default endpoint, bound to the local machine only.
     obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
-    // 0 = the single-process pipeline (the default).
+    // How far the encoder may run ahead of the publisher, in seconds. A non-zero
+    // value selects the buffered two-process playout: the encoder runs flat out and
+    // a separate pusher publishes at exactly 1x, so a slow stretch of encoding (a
+    // hardware encoder warming up, a dense subtitle scene) is absorbed by the buffer
+    // instead of stalling every viewer. A new file only restarts the encoder, which
+    // leaves the RTMP session — and the viewers' connections — alone.
     //
-    // A non-zero value selects the buffered two-process playout. Its shape is
-    // proven (one publisher across many encoder restarts, encoder free to run
-    // above 1x), but the publisher currently aborts at the first pass boundary —
-    // see the BLOCKER note at the top of src/main/stream/playout.ts. Keep this at
-    // 0 until that is fixed.
-    bufferSec: 0,
+    // A skip or a jump is different: the requested file is usually already inside the
+    // buffer, behind content the viewer has not watched, and a published timeline
+    // cannot be rewound. Those discard the buffer and reopen the RTMP session, so the
+    // viewer waits for a reconnect but gets the file they asked for.
+    bufferSec: 2,
     loopPlaylist: false,
     reconnectDelaySec: 3,
     maxReconnectAttempts: 10,

@@ -5,7 +5,6 @@ import { formatDuration } from '../lib/format'
 interface TimelineProps {
   items: PlaylistItem[]
   status: EngineStatus
-  onSeek: (positionSec: number, itemId: string) => void
   onJumpToItem: (itemId: string) => void
   disabled?: boolean
 }
@@ -20,12 +19,12 @@ interface Segment {
 /**
  * A draggable progress bar covering the whole playlist.
  *
- * Because an RTMP push cannot be scrubbed once frames are on the wire, dragging
- * maps to a position and the engine restarts the encoder from there. Segments
- * make it obvious which file a position belongs to; releasing inside another
- * file jumps straight to it.
+ * An RTMP push cannot be scrubbed once frames are on the wire, so the bar only
+ * moves BETWEEN playlist entries: dragging to another segment jumps to that file.
+ * Seeking inside the current file is not offered at all (it would require
+ * restarting the encoder mid-file and splicing it into the published stream).
  */
-export default function Timeline({ items, status, onSeek, onJumpToItem, disabled }: TimelineProps): React.JSX.Element {
+export default function Timeline({ items, status, onJumpToItem, disabled }: TimelineProps): React.JSX.Element {
   const barRef = useRef<HTMLDivElement | null>(null)
   const [dragFraction, setDragFraction] = useState<number | null>(null)
   const [hoverFraction, setHoverFraction] = useState<number | null>(null)
@@ -56,7 +55,6 @@ export default function Timeline({ items, status, onSeek, onJumpToItem, disabled
     return Math.max(0, Math.min(1, done / totalDuration))
   }, [status.completedSec, totalDuration])
 
-  const isActive = status.state !== 'idle' && status.state !== 'error'
   const fraction = dragFraction ?? playedFraction
 
   const fractionFromEvent = useCallback((clientX: number): number => {
@@ -92,11 +90,9 @@ export default function Timeline({ items, status, onSeek, onJumpToItem, disabled
       const target = resolveTarget(frac)
       if (!target) return
       const currentId = items[status.currentIndex]?.id
-      if (!isActive || currentId !== target.itemId) {
-        onJumpToItem(target.itemId)
-      } else {
-        onSeek(target.positionSec, target.itemId)
-      }
+      // Only a jump to another entry does anything: releasing inside the entry
+      // that is already live is a no-op.
+      if (target.itemId !== currentId) onJumpToItem(target.itemId)
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -106,7 +102,7 @@ export default function Timeline({ items, status, onSeek, onJumpToItem, disabled
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
     }
-  }, [fractionFromEvent, items, onJumpToItem, onSeek, resolveTarget, status.currentIndex, isActive])
+  }, [fractionFromEvent, items, onJumpToItem, resolveTarget, status.currentIndex])
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
     if (disabled || segments.length === 0) return

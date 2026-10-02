@@ -312,7 +312,6 @@ export function useStreamer() {
     [requireBridge]
   )
   const jumpToItem = useCallback((id: string) => requireBridge().jumpToItem(id), [requireBridge])
-  const seek = useCallback((positionSec: number) => requireBridge().seek(positionSec), [requireBridge])
   const start = useCallback(() => requireBridge().start(), [requireBridge])
   const stop = useCallback(() => requireBridge().stop(), [requireBridge])
   const skipNext = useCallback(() => requireBridge().skipNext(), [requireBridge])
@@ -429,7 +428,6 @@ export function useStreamer() {
     reorderPlaylist,
     updateItem,
     jumpToItem,
-    seek,
     start,
     stop,
     skipNext,

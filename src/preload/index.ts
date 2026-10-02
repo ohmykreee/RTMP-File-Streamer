@@ -45,7 +45,6 @@ const api: StreamerApi = {
   start: () => ipcRenderer.invoke(IPC.start) as Promise<EngineStatus>,
   stop: () => ipcRenderer.invoke(IPC.stop) as Promise<EngineStatus>,
   skipNext: () => ipcRenderer.invoke(IPC.skipNext) as Promise<EngineStatus>,
-  seek: (positionSec) => ipcRenderer.invoke(IPC.seek, positionSec) as Promise<EngineStatus>,
   jumpToItem: (itemId) => ipcRenderer.invoke(IPC.jumpToItem, itemId) as Promise<EngineStatus>,
   testRtmp: (req: RtmpTestRequest) => ipcRenderer.invoke(IPC.testRtmp, req) as Promise<RtmpTestResult>,
   clearLogs: () => ipcRenderer.invoke(IPC.clearLogs) as Promise<void>,
