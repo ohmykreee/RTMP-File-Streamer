@@ -69,9 +69,13 @@ export const DEFAULT_SESSION: SessionSettings = {
     realtimePacing: true,
     // obs-websocket's own default endpoint, bound to the local machine only.
     obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
-    // 0 = the single-process pipeline (the default). A non-zero value selects
-    // the buffered two-process playout, which is not finished yet: see the note
-    // at the top of src/main/stream/playout.ts.
+    // 0 = the single-process pipeline (the default).
+    //
+    // A non-zero value selects the buffered two-process playout. Its shape is
+    // proven (one publisher across many encoder restarts, encoder free to run
+    // above 1x), but the publisher currently aborts at the first pass boundary —
+    // see the BLOCKER note at the top of src/main/stream/playout.ts. Keep this at
+    // 0 until that is fixed.
     bufferSec: 0,
     loopPlaylist: false,
     reconnectDelaySec: 3,

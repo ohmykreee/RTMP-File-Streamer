@@ -8,33 +8,54 @@ import type { LogLevel } from '@shared/types'
  * Two-process playout: an encoder writes MPEG-TS segments, a long-lived pusher
  * publishes them to RTMP.
  *
- *   encoder ffmpeg --(seg-N.ts)--> manifest.txt --(-re -follow 1, concat)--> pusher ffmpeg --> RTMP
+ *   encoder ffmpeg --(MPEG-TS over UDP, loopback)--> pusher ffmpeg --(-re)--> RTMP
  *
  * Why it is split in two:
- *  - the encoder is allowed to run ahead by `bufferSec`, so a slow stretch
- *    (subtitle burn-in, a hardware encoder hiccup) drains the buffer instead of
- *    reaching the viewer as a stall;
- *  - a seek only restarts the *encoder*. The pusher keeps reading the manifest,
- *    so the RTMP publish session stays open and the player never re-buffers.
+ *  - the encoder runs FLAT OUT (no `-re`). It is limited by the encoder rather
+ *    than by wall clock, so a hardware encoder that needs a moment to warm up, or
+ *    that dips below 1x on a hard scene, no longer dictates what the viewer gets;
+ *  - the pusher paces the published stream with `-re` at exactly 1x, and it is a
+ *    separate process, so a seek (or a dead pass) only restarts the encoder.
  *
- * The splice between two encoder passes goes through the concat demuxer rather
- * than raw bytes: it works on whole files, so a pass boundary can never cut a
- * 188-byte TS packet — which is exactly what produced "Packet corrupt" when two
- * raw MPEG-TS streams were glued together.
+ * Why datagrams rather than a file, a manifest or a pipe — all measured here with
+ * ffmpeg on Windows:
+ *  - the `concat` demuxer parses its manifest ONCE (`concat_read_header` →
+ *    `concat_parse_script`) and latches EOF when the list runs out
+ *    (`open_next_file` sets `cat->eof` once `++fileno >= cat->nb_files`). Tested
+ *    deliberately: a pusher given a one-segment list exited at the end of that
+ *    segment, and appending a second entry seven seconds later changed nothing
+ *    (0 extra bytes, 6.04s of output, `progress=end`). A growing list of files
+ *    therefore cannot feed a live publisher;
+ *  - restarting the publisher instead is not an option either: a new publish
+ *    restarts the RTMP timeline (observed: after a seek the reported position fell
+ *    back to 0.00 because the replacement publisher started from zero);
+ *  - `-follow 1` reads zero bytes from a local file or a manifest (and belongs to
+ *    the http protocol anyway);
+ *  - `udp_read()` has no EOF path at all, so a datagram reader simply waits for
+ *    the next packet. Verified: a publisher rode out a 4s silent gap and resumed
+ *    on a NEW encoder that started at a different offset — which no file,
+ *    manifest, HTTP or pipe transport allows.
  *
- * Because the viewer's timeline cannot move backwards, seeking backwards still
- * appends *ahead* of what has already been published, with the timeline shifted
- * forward (see {@link seek}). The viewer jumps to the requested content without
- * a gap; the requested offset only lands exactly when seeking forward.
+ * Timestamp continuity is carried by the passes themselves: each one is encoded
+ * with `-output_ts_offset` set to the published timeline length, so the seam
+ * between two passes stays continuous even though the encoder process changed.
  *
- * NOT YET USABLE — kept behind `bufferSec = 0` for a follow-up:
- * a pusher that survives an encoder restart has to wait at the end of the
- * concat manifest for the next segment. `-follow 1` was expected to do that, but
- * measured on this platform it makes the input read nothing at all (0 bytes and
- * 0 progress samples in every variant that includes it, while the identical
- * command without it publishes normally at 1x with `-re`). Until the pusher can
- * be kept alive some other way, `bufferSec` must stay 0 and the single-process
- * path in engine.ts is what runs.
+ * Because the published timeline cannot move backwards, seeking backwards appends
+ * *ahead* of what has already gone out with a shifted timeline: the viewer jumps
+ * to the requested content without a gap, and the requested offset lands exactly
+ * only for forward seeks.
+ *
+ * REMAINING BLOCKER — do not enable this (`bufferSec`) until it is fixed:
+ * the publisher dies with an access violation (exit `0xFFFF5C7A`) at the FIRST
+ * pass boundary. Measured: one publisher, five encoder starts (exactly the wanted
+ * shape — the RTMP session survives every encoder restart), but only 8.0s of a 35s
+ * playlist reached the ingest, and the log order is "pass 2 encoded → publisher
+ * died". So the crash is in the handoff, not in the transport: when a pass is
+ * replaced mid-stream the socket briefly carries two different MPEG-TS program
+ * identities, and the reader's demuxer aborts. `-force_key_frames expr:eq(n,0)`
+ * did not change it. Prime suspects for the next attempt: keep the TS program
+ * identity (PID/PAT/PMT) stable across passes, or stop relying on the reader to
+ * resynchronise and re-mux the handoff inside the Node relay instead.
  */
 
 export interface PlayoutCallbacks {
@@ -66,15 +87,15 @@ export class Playout {
   private readonly ffmpegPath: string
   private readonly outputArgs: string[]
   private readonly callbacks: PlayoutCallbacks
+  /** Scratch folder for anything a pass needs on disk (logs, sidecars). */
   private readonly dir: string
-  private readonly manifest: string
+  /** Loopback datagram endpoint the encoder sends to and the publisher reads. */
+  private readonly udpPort: number
+  private readonly inputUrl: string
 
   private pusher: ChildProcess | null = null
   private encoder: ChildProcess | null = null
-  private manifestStream: fs.WriteStream | null = null
   private seq = 0
-  /** Segments written and announced, with the timeline span each one covers. */
-  private readonly segments: { file: string; durationSec: number; startSec: number }[] = []
   /** Timeline value the next encoder pass must start at. */
   private nextOffset = 0
   /** Highest timeline value the pusher has reached. */
@@ -88,20 +109,27 @@ export class Playout {
     this.outputArgs = outputArgs
     this.callbacks = callbacks
     this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rtmp-streamer-'))
-    this.manifest = path.join(this.dir, 'manifest.txt')
+    this.udpPort = 20000 + Math.floor(Math.random() * 20000)
+    // Loopback only, with `sources=` pinning the sender so nothing else on the
+    // machine can inject into the stream (the option is IPv4-only by design, hence
+    // the explicit address). `overrun_nonfatal` keeps a burst from killing the
+    // reader; `fifo_size` is the socket receive buffer in bytes.
+    this.inputUrl = `udp://127.0.0.1:${this.udpPort}?sources=127.0.0.1&overrun_nonfatal=1&fifo_size=1000000`
   }
 
   /* ------------------------------------------------------------ *
    * Lifecycle
    * ------------------------------------------------------------ */
 
-  /** Starts the pusher and the first encoder pass. */
-  start(pass: EncoderPass): void {
+  /** Starts the publisher and the first encoder pass. */
+  async start(pass: EncoderPass): Promise<void> {
     if (this.pusher) return
     this.stopping = false
-    this.openManifest()
-    this.startPusher()
+    // The encoder goes first: a datagram reader that starts on an empty socket
+    // can give up before anything arrives, and it costs nothing to have the first
+    // packets waiting in the socket buffer.
     this.startEncoder(pass)
+    this.startPusher()
   }
 
   /** Replaces the encoder pass; the pusher (and the RTMP session) is untouched. */
@@ -139,7 +167,6 @@ export class Playout {
         })
       })
     }
-    this.closeManifest()
     this.cleanup()
   }
 
@@ -158,52 +185,19 @@ export class Playout {
   }
 
   /* ------------------------------------------------------------ *
-   * Segments / manifest
+   * Timeline accounting
    * ------------------------------------------------------------ */
 
-  private openManifest(): void {
-    fs.writeFileSync(this.manifest, 'ffconcat version 1.0\n')
-    this.manifestStream = fs.createWriteStream(this.manifest, { flags: 'a' })
-  }
-
-  private closeManifest(): void {
-    try {
-      this.manifestStream?.end()
-    } catch {
-      /* ignore */
-    }
-    this.manifestStream = null
-  }
-
   /**
-   * Announces a finished segment.
+   * Records the span a finished pass contributed.
    *
-   * The pass is described by its own span: `duration` is what this pass added to
-   * the timeline, so the reader can splice the next file exactly where this one
-   * ends without a gap or an overlap.
+   * Nothing is buffered on disk: the encoder streams into the socket, so what
+   * stands between the two processes is the UDP receive buffer plus whatever the
+   * encoder has already pushed. The span only has to move the timeline so the
+   * next pass continues exactly where this one stopped.
    */
-  private publishSegment(file: string, durationSec: number): void {
-    const span = Math.max(0.001, durationSec)
-    const entry = `file '${file}'\nduration ${span.toFixed(3)}\n`
-    this.manifestStream?.write(entry)
-    this.segments.push({ file, durationSec: span, startSec: this.nextOffset })
-    this.nextOffset += span
-  }
-
-  /** Drops segments the pusher has already passed, keeping the buffer bounded. */
-  private trimConsumed(): void {
-    // Keep a small window behind the playhead: the pusher may still be reading
-    // the segment it is in the middle of.
-    const threshold = this.publishedSec - 3
-    while (this.segments.length > 1 && this.segments[0].startSec + this.segments[0].durationSec < threshold) {
-      const gone = this.segments.shift()
-      if (!gone) break
-      try {
-        fs.rmSync(path.join(this.dir, gone.file), { force: true })
-      } catch {
-        /* best effort */
-      }
-    }
+  private publishSegment(durationSec: number): void {
+    this.nextOffset += Math.max(0.001, durationSec)
   }
 
   private cleanup(): void {
@@ -227,14 +221,13 @@ export class Playout {
       // `-re` on the *input* is what paces publication: the encoder may be
       // seconds ahead, the viewer still receives exactly one second per second.
       '-re',
-      '-follow',
-      '1',
+      // A datagram input is the one ffmpeg transport with NO EOF: `udp_read()`
+      // has no end-of-stream path, so when the encoder is killed the publisher
+      // waits for the next packet instead of ending its RTMP session.
       '-f',
-      'concat',
-      '-safe',
-      '0',
+      'mpegts',
       '-i',
-      this.manifest,
+      this.inputUrl,
       '-c',
       'copy',
       '-max_interleave_delta',
@@ -285,11 +278,10 @@ export class Playout {
         if (sec > this.publishedSec) {
           this.publishedSec = sec
           this.callbacks.onPublished(sec)
-          this.trimConsumed()
         }
       } else if (key === 'progress' && value === 'end') {
-        // The pusher reached the end of the manifest; with `-follow` it keeps
-        // waiting for the next segment instead of exiting.
+        // The publisher has caught up with the encoder; it simply waits for the
+        // next datagram, which is why this transport survives encoder restarts.
         this.callbacks.log('debug', '推流进程已追平编码进度，等待后续内容。')
       } else if (key === 'speed') {
         // no-op: the pusher is paced by -re, so this is always ~1x
@@ -303,8 +295,6 @@ export class Playout {
 
   private startEncoder(pass: EncoderPass): void {
     this.seq += 1
-    const file = `seg-${this.seq}.ts`
-    const full = path.join(this.dir, file)
     const args = [
       '-hide_banner',
       '-nostdin',
@@ -322,6 +312,13 @@ export class Playout {
       '-map',
       '0:a:0',
       ...pass.args,
+      // Every pass must OPEN on a keyframe: the seam between two passes is a
+      // splice mid-stream, and a reader that joins on a P/B frame cannot decode
+      // until the next IDR (this is the failure mode ffmpeg documents for
+      // `-restart_with_keyframe`/`drop_pkts_on_overflow`). Forcing frame 0 of each
+      // pass to be an IDR makes the seam decodable.
+      '-force_key_frames',
+      'expr:eq(n,0)',
       // The viewer's timeline must not step backwards when a pass is replaced,
       // so the new pass continues exactly where the published stream already is.
       ...(pass.tsOffset > 0 ? ['-output_ts_offset', String(Math.round(pass.tsOffset * 1000) / 1000)] : []),
@@ -329,15 +326,22 @@ export class Playout {
       '0',
       '-muxpreload',
       '0',
+      // The span this pass contributes has to be measured, and `-progress` is the
+      // only reliable source for it (a muxer-level measurement would also miss the
+      // frames still in flight when the process is killed).
       '-progress',
       'pipe:1',
       '-nostats',
+      // Straight to the publisher over loopback: no intermediate file, no
+      // manifest for a publisher to trip over, and the encoder is free to run
+      // faster than real time — which is the entire point of the split.
+      '-flush_packets',
+      '1',
       '-f',
       'mpegts',
-      '-y',
-      full
+      `${this.inputUrl}&pkt_size=1316`
     ]
-    this.callbacks.log('debug', `编码进程 → ${file}: ${args.join(' ')}`)
+    this.callbacks.log('debug', `编码进程（第 ${this.seq} 段）: ${args.join(' ')}`)
     const child = spawn(this.ffmpegPath, args, { windowsHide: true })
     this.encoder = child
     this.encoderProgressBuf = ''
@@ -355,9 +359,9 @@ export class Playout {
       const wasCurrent = this.encoder === child
       if (wasCurrent) this.encoder = null
       if (this.stopping || !wasCurrent) return
-      // The pass is complete (or died): measure what it produced and splice it
-      // in. The pusher keeps reading either way.
-      void this.finishPass(full, file, pass, code)
+      // The pass is complete (or died): account for what it produced. The
+      // publisher keeps reading the socket either way.
+      this.finishPass(pass, code)
     })
   }
 
@@ -391,24 +395,28 @@ export class Playout {
   /** Material the current/last pass produced, in seconds. */
   private lastPassMaterialSec = 0
 
-  private async finishPass(full: string, file: string, pass: EncoderPass, code: number | null): Promise<void> {
-    const materialSec = this.lastPassMaterialSec > 0 ? this.lastPassMaterialSec : 0
+  /**
+   * A pass finished: account for its span and let the caller start the next one.
+   *
+   * There is no segment file to inspect — the pass streamed its output into the
+   * socket — so the span comes from the last progress report, falling back to what
+   * the pass was asked to produce.
+   */
+  private finishPass(pass: EncoderPass, code: number | null): void {
+    const materialSec = this.lastPassMaterialSec
     this.lastPassMaterialSec = 0
     if (code !== 0) {
       this.callbacks.log('warn', `编码进程以退出码 ${code ?? '未知'} 结束（文件 ${path.basename(pass.input)}）。`)
     }
-    if (!fs.existsSync(full) || fs.statSync(full).size === 0) {
-      this.callbacks.log('error', '编码进程没有产出任何数据，本段已跳过。')
+    if (materialSec <= 0) {
+      if (code === 0) this.callbacks.log('debug', '本次编码没有产出可推流的数据。')
       this.callbacks.onEncoderExit(code, 0)
       return
     }
     // Prefer the measured span; fall back to what the pass was asked to produce.
     const span = materialSec > 0 ? materialSec : pass.expectedSec
-    this.publishSegment(file, span)
-    this.callbacks.log(
-      'debug',
-      `已拼接 ${file}（${span.toFixed(2)}s），时间线推进到 ${this.nextOffset.toFixed(2)}s`
-    )
+    this.publishSegment(span)
+    this.callbacks.log('debug', `第 ${this.seq} 段完成（${span.toFixed(2)}s），时间线推进到 ${this.nextOffset.toFixed(2)}s`)
     this.callbacks.onEncoderExit(code, span)
   }
 

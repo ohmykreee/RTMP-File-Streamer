@@ -589,7 +589,7 @@ export class StreamEngine {
 
     const pass = { input: item.path, args, startPositionSec: positionSec, tsOffset, expectedSec }
     if (this.playout.isPusherRunning()) this.playout.restartEncoder(pass)
-    else this.playout.start(pass)
+    else await this.playout.start(pass)
 
     this.state = 'live'
     this.connected = true
