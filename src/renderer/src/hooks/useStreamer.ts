@@ -265,6 +265,23 @@ export function useStreamer() {
   const clearLogs = useCallback(() => requireBridge().clearLogs(), [requireBridge])
   const showItemInFolder = useCallback((p: string) => requireBridge().showItemInFolder(p), [requireBridge])
 
+  const openLogsDir = useCallback(() => requireBridge().openLogsDir(), [requireBridge])
+  const getLogFileInfo = useCallback(() => requireBridge().getLogFileInfo(), [requireBridge])
+
+  /**
+   * Turns dropped `File` objects into disk paths.
+   * Electron no longer exposes `File.path`, so the lookup goes through the
+   * preload bridge (`webUtils.getPathForFile`).
+   */
+  const resolveDroppedPaths = useCallback(
+    (files: FileList | File[]): string[] => {
+      const api = bridge()
+      if (!api) return []
+      return api.getPathsForFiles(Array.from(files))
+    },
+    [bridge]
+  )
+
   /* ---------------- presets ---------------- */
 
   const [presets, setPresets] = useState<PresetsPayload | null>(null)
@@ -351,6 +368,9 @@ export function useStreamer() {
     testRtmp,
     clearLogs,
     showItemInFolder,
+    openLogsDir,
+    getLogFileInfo,
+    resolveDroppedPaths,
     presets,
     loadPresets,
     applyPreset,

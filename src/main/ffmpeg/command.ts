@@ -11,6 +11,7 @@ import type {
   VideoSettings
 } from '@shared/types'
 import { CONTAINER_MUXER } from '@shared/defaults'
+import { buildRtmpTarget } from '@shared/rtmp'
 import { encoderArgFor, getAvailableEncoderNames } from './capabilities'
 
 export interface BuildRequest {
@@ -37,6 +38,10 @@ export interface BuiltCommand {
   subtitleApplied: SubtitleApplication
   /** Seconds of material left from `startPositionSec`. */
   remainingDurationSec: number
+  /** ffprobe index of the video stream that was mapped, or -1 when there is none. */
+  videoStreamIndex: number
+  /** ffprobe index of the audio stream that was mapped, or -1 when there is none. */
+  audioStreamIndex: number
 }
 
 interface EncoderSpec {
@@ -134,8 +139,20 @@ export function resolveScaleFilter(v: VideoSettings): string {
  * Stream selection
  * ------------------------------------------------------------------ */
 
+/**
+ * Picks the stream to encode.
+ *
+ * Cover art (an `attached_pic` video stream: album/MV thumbnails) must never be
+ * chosen over the real video, and neither must a stream ffprobe could not
+ * describe (no codec) — that combination produces a silent audio-only stream.
+ */
 function pickBest(streams: MediaStreamInfo[]): MediaStreamInfo | undefined {
-  if (streams.length === 0) return undefined
+  const usable = streams.filter((s) => {
+    if (!s.codec || s.codec === 'unknown') return false
+    if (s.attachedPic) return false
+    return true
+  })
+  if (usable.length === 0) return undefined
   const score = (s: MediaStreamInfo): number => {
     let v = 0
     if (s.isDefault) v += 1000
@@ -146,7 +163,21 @@ function pickBest(streams: MediaStreamInfo[]): MediaStreamInfo | undefined {
     if (s.type === 'video') v += Math.min(s.width ?? 0, 3840) / 50
     return v
   }
-  return [...streams].sort((a, b) => score(b) - score(a))[0]
+  return [...usable].sort((a, b) => score(b) - score(a))[0]
+}
+
+/** One-line stream inventory, used in the log so "no video" cases are diagnosable. */
+export function describeStreams(media: MediaInfo): string {
+  if (media.streams.length === 0) return '流信息: (空)'
+  const parts = media.streams.map((s) => {
+    const bits = [`#${s.index}`, s.type, s.codec]
+    if (s.type === 'video') bits.push(`${s.width ?? '?'}x${s.height ?? '?'}`, `${s.fps ?? '?'}fps`)
+    if (s.type === 'audio') bits.push(`${s.channels ?? '?'}ch`, `${s.sampleRate ?? '?'}Hz`)
+    if (s.attachedPic) bits.push('封面图')
+    if (s.isDefault) bits.push('默认')
+    return bits.join(' ')
+  })
+  return `流信息: ${parts.join(' | ')}`
 }
 
 /* ------------------------------------------------------------------ *
@@ -342,7 +373,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     ? track.family === 'text' || (track.family === 'unknown' && !/(pgs|dvd|dvb|xsub|hdmv)/i.test(track.codec))
     : false
   const hasExternalSub = track?.source === 'external' && !!track.path
-  const burnBitmapExternal = mode === 'burn' && !!track && !isTextTrack && hasExternalSub && !copyVideo
+  const burnBitmapExternal = mode === 'burn' && !!track && !isTextTrack && hasExternalSub && !copyVideo && !!videoIn
 
   /* ---------------- timestamp offsets ---------------- */
   const avOffset = item.syncOffsetSec || 0
@@ -427,17 +458,20 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   const audioFilters: string[] = []
 
   /* ---------------- stream mapping ---------------- */
+  // Streams are mapped by their absolute ffprobe index, not by `0:v:0`-style
+  // specifiers: the first video stream can be cover art (attached_pic) while
+  // `pickBest` selected the real track, and the two must not diverge.
   if (burnBitmapExternal) {
     const base = videoFilterChain || 'null'
-    const graph = `[0:v]${base}[vbase];[vbase][${externalSubInput}:v]overlay=eof_action=pass:repeatlast=0[vout]`
+    const graph = `[0:${videoIn!.index}]${base}[vbase];[vbase][${externalSubInput}:v]overlay=eof_action=pass:repeatlast=0[vout]`
     args.push('-filter_complex', graph)
     args.push('-map', '[vout]')
     summary.push('位图字幕 overlay 合成')
-  } else {
-    args.push('-map', videoIn ? '0:v:0' : '0:v:0?')
+  } else if (videoIn) {
+    args.push('-map', `0:${videoIn.index}`)
     if (videoFilterChain) args.push('-vf', videoFilterChain)
   }
-  if (audioIn && a.codec !== 'none') args.push('-map', `0:a:${media.audioStreams.indexOf(audioIn)}`)
+  if (audioIn && a.codec !== 'none') args.push('-map', `0:${audioIn.index}`)
 
   /* ---------------- video encoder ---------------- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
@@ -447,7 +481,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     args.push('-c:v', 'copy')
     summary.unshift('视频：直接复制 (不重编码)')
   } else if (!videoIn) {
-    warnings.push('源文件没有视频轨，将只推送音频。')
+    warnings.push('源文件没有可用的视频轨（或只有封面图），将只推送音频。')
   } else {
     vencName = spec.name
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
@@ -512,7 +546,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   args.push('-progress', 'pipe:1', '-nostats')
 
   const format = CONTAINER_MUXER[out.container]
-  const target = req.outputOverride ?? `${out.rtmpUrl.replace(/\/+$/, '')}/${out.streamKey}`
+  const target = req.outputOverride ?? buildRtmpTarget(out.rtmpUrl, out.streamKey)
   if (!req.outputOverride) {
     // Let ffmpeg retry the socket instead of tearing the whole pipeline down.
     args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', String(Math.max(1, out.reconnectDelaySec)))
@@ -527,7 +561,9 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     vencName,
     aencName,
     subtitleApplied,
-    remainingDurationSec: remaining
+    remainingDurationSec: remaining,
+    videoStreamIndex: videoIn ? videoIn.index : -1,
+    audioStreamIndex: audioIn && a.codec !== 'none' ? audioIn.index : -1
   }
 }
 
@@ -545,6 +581,7 @@ export function buildCommandLine(bin: string, args: string[]): string {
 export function buildTestCommand(settings: SessionSettings, url: string, streamKey: string): string[] {
   const a = settings.audio
   const aenc = a.codec === 'none' || a.codec === 'copy' ? 'aac' : a.codec === 'libopus' ? 'libopus' : a.codec === 'libmp3lame' ? 'libmp3lame' : 'aac'
+  const target = buildRtmpTarget(url, streamKey)
   return [
     '-hide_banner',
     '-loglevel',
@@ -587,6 +624,6 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
     '2',
     '-f',
     CONTAINER_MUXER[settings.output.container],
-    `${url.replace(/\/+$/, '')}/${streamKey}`
+    target
   ]
 }

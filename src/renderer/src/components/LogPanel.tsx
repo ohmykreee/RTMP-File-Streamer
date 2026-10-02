@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { LogEntry, LogLevel } from '@shared/types'
+import type { LogEntry, LogLevel, PersistedLogInfo } from '@shared/types'
 import { formatClock } from '../lib/format'
 
 interface LogPanelProps {
@@ -7,6 +7,9 @@ interface LogPanelProps {
   onClear: () => void
   expanded: boolean
   onToggle: () => void
+  /** Persisted log usage, shown next to the in-memory count. */
+  logInfo: PersistedLogInfo | null
+  onOpenLogsDir: () => void
 }
 
 const LEVELS: { key: LogLevel | 'all'; label: string }[] = [
@@ -25,7 +28,7 @@ const LEVEL_TAG: Record<LogLevel, string> = {
   ffmpeg: 'FFM'
 }
 
-export default function LogPanel({ logs, onClear, expanded, onToggle }: LogPanelProps): React.JSX.Element {
+export default function LogPanel({ logs, onClear, expanded, onToggle, logInfo, onOpenLogsDir }: LogPanelProps): React.JSX.Element {
   const [filter, setFilter] = useState<LogLevel | 'all'>('all')
   const [autoscroll, setAutoscroll] = useState(true)
   const endRef = useRef<HTMLDivElement | null>(null)
@@ -48,6 +51,11 @@ export default function LogPanel({ logs, onClear, expanded, onToggle }: LogPanel
           <span className={`chevron${expanded ? ' open' : ''}`}>▸</span>
           运行日志
           <span className="muted small">({logs.length})</span>
+          {logInfo && (
+            <span className="muted small" title={`日志目录：${logInfo.dir}\n上限 ${(logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB，超出自动清理最旧日志`}>
+              · 留存 {(logInfo.totalBytes / 1024).toFixed(0)} KB
+            </span>
+          )}
         </span>
         <div className="logs-actions" onClick={(e) => e.stopPropagation()}>
           <div className="seg">
@@ -61,6 +69,9 @@ export default function LogPanel({ logs, onClear, expanded, onToggle }: LogPanel
             <input type="checkbox" checked={autoscroll} onChange={(e) => setAutoscroll(e.target.checked)} />
             自动滚动
           </label>
+          <button className="btn tiny ghost" onClick={onOpenLogsDir} title="打开留存日志所在的目录">
+            📂 日志目录
+          </button>
           <button className="btn tiny ghost" onClick={onClear}>
             清空
           </button>

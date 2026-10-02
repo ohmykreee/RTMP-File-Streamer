@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { PlaylistItem, SubtitleMode } from '@shared/types'
+import { SUPPORTED_VIDEO_EXT } from '@shared/types'
 import { formatBytes, formatDuration, languageLabel } from '../lib/format'
 
 interface PlaylistPanelProps {
@@ -7,6 +8,8 @@ interface PlaylistPanelProps {
   currentIndex: number
   active: boolean
   busy: boolean
+  /** True while a stream is live: mutating the queue would break the session. */
+  locked: boolean
   onAddVideos: () => void
   onAddPaths: (paths: string[]) => void
   onRemove: (itemId: string) => void
@@ -19,6 +22,8 @@ interface PlaylistPanelProps {
     patch: Partial<Pick<PlaylistItem, 'selectedSubtitleId' | 'mode' | 'syncOffsetSec' | 'subtitleDelaySec'>>
   ) => void
   onReveal: (filePath: string) => void
+  /** Resolves dropped `File` objects to disk paths through the preload bridge. */
+  onResolveDroppedPaths: (files: FileList | File[]) => string[]
   onFilesDropped: (paths: string[]) => void
 }
 
@@ -31,20 +36,8 @@ const STATUS_LABEL: Record<PlaylistItem['status'], string> = {
   error: '错误'
 }
 
-/** Extract filesystem paths from a drag-and-drop event (Electron exposes them via File.path). */
-function pathsFromDrop(e: React.DragEvent): string[] {
-  const out: string[] = []
-  const files = e.dataTransfer?.files
-  if (!files) return out
-  for (let i = 0; i < files.length; i += 1) {
-    const f = files[i] as File & { path?: string }
-    if (f.path) out.push(f.path)
-  }
-  return out
-}
-
 export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Element {
-  const { items, currentIndex, active } = props
+  const { items, currentIndex, locked } = props
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -53,7 +46,19 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
   const totalDuration = useMemo(() => items.reduce((s, i) => s + (i.durationSec || 0), 0), [items])
   const totalSize = useMemo(() => items.reduce((s, i) => s + (i.size || 0), 0), [items])
 
+  /** Turns a drop event into video paths, resolving `File` → path via the bridge. */
+  const videoPathsFromDrop = (e: React.DragEvent): string[] => {
+    const files = e.dataTransfer?.files
+    if (!files || files.length === 0) return []
+    const resolved = props.onResolveDroppedPaths(files)
+    return resolved.filter((p) => SUPPORTED_VIDEO_EXT.includes(p.slice(p.lastIndexOf('.')).toLowerCase()))
+  }
+
   const handleDragStart = (itemId: string) => (e: React.DragEvent): void => {
+    if (locked) {
+      e.preventDefault()
+      return
+    }
     setDragId(itemId)
     e.dataTransfer.effectAllowed = 'move'
     // Required for Firefox/Chromium to start a drag.
@@ -102,7 +107,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
         if (dragId) return
         e.preventDefault()
         setFileDrag(false)
-        const paths = pathsFromDrop(e)
+        const paths = videoPathsFromDrop(e)
         if (paths.length > 0) props.onFilesDropped(paths)
       }}
     >
@@ -117,7 +122,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
           <button className="btn primary" onClick={props.onAddVideos} disabled={props.busy} title="添加视频文件（可多选）">
             + 视频
           </button>
-          <button className="btn ghost" onClick={props.onClear} disabled={props.busy || items.length === 0} title="清空播放列表">
+          <button className="btn ghost" onClick={props.onClear} disabled={props.busy || items.length === 0 || locked} title="清空播放列表">
             清空
           </button>
         </div>
@@ -140,7 +145,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
               <li
                 key={item.id}
                 className={`playlist-item st-${item.status}${isCurrent ? ' current' : ''}${dropTarget === item.id ? ' drop-target' : ''}`}
-                draggable
+                draggable={!locked}
                 onDragStart={handleDragStart(item.id)}
                 onDragOver={handleDragOver(item.id)}
                 onDragLeave={() => setDropTarget((t) => (t === item.id ? null : t))}
@@ -180,13 +185,18 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                   >
                     ▶ 从此开始
                   </button>
-                  <button className="btn tiny" onClick={() => setExpanded(isOpen ? null : item.id)} title="字幕与同步设置">
+                  <button
+                    className="btn tiny"
+                    onClick={() => setExpanded(isOpen ? null : item.id)}
+                    disabled={locked}
+                    title="字幕与同步设置"
+                  >
                     {isOpen ? '收起' : '字幕/同步'}
                   </button>
-                  <button className="btn tiny" onClick={() => props.onAttachSubtitle(item.id)} title="关联外部字幕文件">
+                  <button className="btn tiny" onClick={() => props.onAttachSubtitle(item.id)} disabled={locked} title="关联外部字幕文件">
                     + 字幕
                   </button>
-                  <button className="btn tiny danger" onClick={() => props.onRemove(item.id)} disabled={active && isCurrent} title="移除">
+                  <button className="btn tiny danger" onClick={() => props.onRemove(item.id)} disabled={locked} title="移除">
                     ✕
                   </button>
                 </div>
@@ -197,6 +207,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                       <span>字幕轨道</span>
                       <select
                         value={item.selectedSubtitleId ?? ''}
+                        disabled={locked}
                         onChange={(e) => props.onUpdateItem(item.id, { selectedSubtitleId: e.target.value || null })}
                       >
                         <option value="">（不使用字幕）</option>
@@ -211,7 +222,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
 
                     <label className="field">
                       <span>字幕处理</span>
-                      <select value={item.mode} onChange={(e) => props.onUpdateItem(item.id, { mode: e.target.value as SubtitleMode })}>
+                      <select value={item.mode} disabled={locked} onChange={(e) => props.onUpdateItem(item.id, { mode: e.target.value as SubtitleMode })}>
                         <option value="off">关闭</option>
                         <option value="burn">烧录进画面</option>
                         <option value="copy">作为独立轨道复制</option>
@@ -224,6 +235,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                         type="number"
                         step="0.1"
                         value={item.syncOffsetSec}
+                        disabled={locked}
                         onChange={(e) => props.onUpdateItem(item.id, { syncOffsetSec: Number(e.target.value) || 0 })}
                         title="正值 = 音视频整体延后播放"
                       />
@@ -235,6 +247,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                         type="number"
                         step="0.1"
                         value={item.subtitleDelaySec}
+                        disabled={locked}
                         onChange={(e) => props.onUpdateItem(item.id, { subtitleDelaySec: Number(e.target.value) || 0 })}
                         title="正值 = 字幕延后出现"
                       />
@@ -246,6 +259,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                       </button>
                       <button
                         className="btn tiny ghost"
+                        disabled={locked}
                         onClick={() => {
                           props.onUpdateItem(item.id, { syncOffsetSec: 0, subtitleDelaySec: 0 })
                         }}

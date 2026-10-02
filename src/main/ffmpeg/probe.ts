@@ -110,6 +110,9 @@ function toStreamInfo(s: FfprobeStream): MediaStreamInfo {
   if (s.disposition) {
     info.isDefault = Boolean(s.disposition.default)
     info.isForced = Boolean(s.disposition.forced)
+    // Cover art shows up as a video stream flagged `attached_pic`; it must not be
+    // mistaken for the real video track when choosing what to encode.
+    if (s.disposition.attached_pic) info.attachedPic = true
   }
   return info
 }

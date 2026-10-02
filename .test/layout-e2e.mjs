@@ -12,6 +12,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { installWatchdog } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -28,7 +29,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
 })
 
 async function waitForTarget(timeoutMs = 30000) {
@@ -117,9 +118,25 @@ const measure = () =>
     })
   })()`).then(JSON.parse)
 
-const TABS = ['视频编码', '音频编码', '字幕', '输出', '高级']
-const baseline = await measure()
+/* The shell geometry sits on fractional pixels (DPR scaling), so a single
+ * measurement taken while the window is still settling can land on the other
+ * side of a .5 rounding boundary and poison the baseline. Measure twice and
+ * only accept a baseline that repeats exactly. */
+let baseline = await measure()
+for (let i = 0; i < 10; i += 1) {
+  await delay(500)
+  const again = await measure()
+  const same =
+    again.player.top === baseline.player.top &&
+    again.player.height === baseline.player.height &&
+    again.timeline.top === baseline.timeline.top &&
+    again.workspace.height === baseline.workspace.height
+  if (same) break
+  baseline = again
+}
 note('baseline (视频编码)', `player=${baseline.player.height}px timeline.top=${baseline.timeline.top}`)
+
+const TABS = ['视频编码', '音频编码', '字幕', '输出', '高级']
 
 let allStable = true
 const perTab = []

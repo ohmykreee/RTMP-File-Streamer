@@ -60,8 +60,10 @@ export const DEFAULT_SESSION: SessionSettings = {
   audio: DEFAULT_AUDIO,
   subtitles: DEFAULT_SUBTITLES,
   output: {
-    rtmpUrl: 'rtmp://127.0.0.1/live',
-    streamKey: 'test',
+    // The address carries the full application path (trailing `/` included);
+    // the stream key is appended directly to it, with no extra separator.
+    rtmpUrl: 'rtmp://127.0.0.1/live/',
+    streamKey: '',
     container: 'flv',
     extraOutputArgs: '',
     realtimePacing: true,

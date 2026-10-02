@@ -10,7 +10,8 @@ import type {
   PlaylistItemStatus,
   SessionSettings
 } from '@shared/types'
-import { buildStreamCommand, type BuiltCommand } from '../ffmpeg/command'
+import { buildStreamCommand, describeStreams, type BuiltCommand } from '../ffmpeg/command'
+import { buildRtmpTarget } from '@shared/rtmp'
 
 export interface EngineDeps {
   getFfmpegPath: () => string
@@ -177,8 +178,11 @@ export class StreamEngine {
     this.emitPlaylist()
 
     const settings = this.deps.getSettings()
-    const target = `${settings.output.rtmpUrl.replace(/\/+$/, '')}/${settings.output.streamKey}`
-    this.log('info', `开始串流会话 → ${target}`)
+    const target = buildRtmpTarget(settings.output.rtmpUrl, settings.output.streamKey)
+    // The full target (which contains the stream key) is only shown in the debug
+    // log, not in the UI and not in the info log.
+    this.log('info', '开始串流会话。')
+    this.log('debug', `推流目标: ${target}`)
     this.log('info', `播放列表共 ${this.items.length} 个文件，预计总时长 ${formatDuration(this.items.reduce((s, i) => s + (i.durationSec || 0), 0))}`)
 
     await this.launchCurrent(0, 'session-start')
@@ -466,7 +470,28 @@ export class StreamEngine {
 
     if (reason !== 'retry' || positionSec === 0) {
       this.log('info', `▸ 正在准备「${item.name}」${positionSec > 0 ? `（从 ${formatDuration(positionSec)} 开始）` : ''}`)
+      // Log exactly what was found, so "the stream had no video" is diagnosable
+      // from the log alone.
+      this.log('debug', `   文件: ${item.path}`)
+      this.log('debug', `   ${describeStreams(media)}`)
+      if (built.videoStreamIndex >= 0) {
+        const v = media.videoStreams.find((s) => s.index === built.videoStreamIndex)
+        this.log(
+          'debug',
+          `   选用视频流 #${built.videoStreamIndex}${v ? ` (${v.codec} ${v.width}x${v.height} @ ${v.fps ?? '?'}fps)` : ''}`
+        )
+      }
+      if (built.audioStreamIndex >= 0) {
+        const a = media.audioStreams.find((s) => s.index === built.audioStreamIndex)
+        this.log(
+          'debug',
+          `   选用音频流 #${built.audioStreamIndex}${a ? ` (${a.codec} ${a.channels ?? '?'}ch @ ${a.sampleRate ?? '?'}Hz)` : ''}`
+        )
+      }
       for (const line of built.summary) this.log('debug', `   ${line}`)
+    }
+    if (built.videoStreamIndex < 0) {
+      this.log('warn', '本次编码没有选中任何视频流，推流将是纯音频。')
     }
     for (const w of built.warnings) this.log('warn', w)
     this.log('ffmpeg', built.commandLine)

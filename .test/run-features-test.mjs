@@ -1,8 +1,8 @@
 /**
- * Runs the UI end-to-end test, clearing ELECTRON_RUN_AS_NODE so the app really
- * launches a window.
+ * Runs the features end-to-end test (drag-drop, lock, masking, alignment,
+ * persisted logs), clearing ELECTRON_RUN_AS_NODE so the app really launches.
  *
- * Usage: node .test/run-ui-test.mjs
+ * Usage: node .test/run-features-test.mjs
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
@@ -20,7 +20,7 @@ if (!fs.existsSync(path.join(root, 'out', 'main', 'index.js'))) {
 }
 
 // The test media is generated on demand so the suite works from a clean checkout.
-const media = ['clip_a.mp4', 'clip_b.mp4', 'clip_a.srt']
+const media = ['clip_a.mp4', 'clip_a.srt']
 const missing = media.filter((f) => !fs.existsSync(path.join(here, f)))
 if (missing.length > 0) {
   console.log(`Generating test media (${missing.join(', ')})...`)
@@ -34,8 +34,8 @@ if (missing.length > 0) {
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 
-const disarmWatchdog = installWatchdog(420000, 'test:ui')
-const child = spawn(process.execPath, [path.join(here, 'ui-e2e.mjs')], { cwd: root, env, stdio: 'inherit' })
+const disarmWatchdog = installWatchdog(360000, 'test:features')
+const child = spawn(process.execPath, [path.join(here, 'features-e2e.mjs')], { cwd: root, env, stdio: 'inherit' })
 child.on('exit', (code) => {
   disarmWatchdog()
   process.exit(code ?? 1)

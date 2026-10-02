@@ -704,7 +704,7 @@ code {
 }
 
 .res-enable {
-  margin: 2px 0 6px;
+  margin: 0;
 }
 
 .res-inputs {
@@ -850,13 +850,51 @@ code {
   font-weight: 400;
   font-size: 11px;
   color: var(--text-faint);
-  margin-top: 1px;
+  line-height: 1.45;
+  margin-top: 2px;
 }
 
 .field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
   gap: 12px;
+  /* Rows stay top-aligned so controls line up even when hints differ in length. */
+  align-items: start;
+}
+
+/* Stream key: masked input with a reveal toggle. */
+.secret-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.secret-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  letter-spacing: 0.5px;
+}
+
+.secret-toggle {
+  flex-shrink: 0;
+  min-width: 46px;
+}
+
+/* Locked while a stream is live. */
+.lock-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 12px;
+  color: #f0cd7a;
+  background: rgba(210, 153, 34, 0.1);
+  border-bottom: 1px solid rgba(210, 153, 34, 0.35);
+}
+
+.settings-body[inert] {
+  opacity: 0.55;
 }
 
 input[type='text'],
@@ -975,16 +1013,6 @@ input[type='color'] {
   display: flex;
   flex-direction: column;
   font-size: 12.5px;
-}
-
-.rtmp-target {
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  color: var(--text-dim);
-  word-break: break-all;
-  user-select: text;
 }
 
 .test-result {

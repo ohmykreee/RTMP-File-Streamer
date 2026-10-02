@@ -12,6 +12,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { installWatchdog } from './harness-util.mjs'
+
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
 const electron = path.join(
@@ -35,5 +37,9 @@ if (!fs.existsSync(path.join(root, 'out', 'main', 'test-entry.cjs'))) {
 const env = { ...process.env }
 delete env.ELECTRON_RUN_AS_NODE
 
+const disarmWatchdog = installWatchdog(300000, 'test:engine')
 const child = spawn(electron, ['.test'], { cwd: root, env, stdio: 'inherit' })
-child.on('exit', (code) => process.exit(code ?? 1))
+child.on('exit', (code) => {
+  disarmWatchdog()
+  process.exit(code ?? 1)
+})

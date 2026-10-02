@@ -8,6 +8,7 @@ import { StreamEngine } from './stream/engine'
 import { getSettingsPath, loadSettings, saveSettings } from './store/settings'
 import { getPresetLocation, listPresets } from './store/presets'
 import { setupDataPaths } from './store/paths'
+import { appendLogEntry, closeLogSession, getPersistedLogInfo, startLogSession } from './store/logger'
 import { BUILTIN_PRESETS } from '@shared/defaults'
 import {
   attachSubtitleFile,
@@ -36,11 +37,19 @@ const logs: LogEntry[] = []
 const logSeq = { value: 1 }
 let saveTimer: NodeJS.Timeout | null = null
 
-function pushLog(level: LogEntry['level'], message: string): void {
-  const entry: LogEntry = { id: logSeq.value++, ts: Date.now(), level, message }
+/**
+ * In-memory entry: shown in the UI log panel.
+ * Persisted entry: appended to `Data/Logs/session-*.log` by the logger.
+ */
+function emitLog(entry: LogEntry, context?: { itemName?: string; itemPath?: string }): void {
   logs.push(entry)
   if (logs.length > 5000) logs.splice(0, logs.length - 5000)
   mainWindow?.webContents.send(IPC.evtLog, entry)
+  appendLogEntry(entry, context)
+}
+
+function pushLog(level: LogEntry['level'], message: string): void {
+  emitLog({ id: logSeq.value++, ts: Date.now(), level, message })
 }
 
 let playlist: PlaylistItem[] = []
@@ -67,9 +76,11 @@ const engine = new StreamEngine({
 engine.setSink({
   status: (status) => mainWindow?.webContents.send(IPC.evtStatus, status),
   log: (entry) => {
-    logs.push(entry)
-    if (logs.length > 5000) logs.splice(0, logs.length - 5000)
-    mainWindow?.webContents.send(IPC.evtLog, entry)
+    // The engine tags entries with the file they belong to so a later reader can
+    // tell which item a warning or failure came from.
+    const idx = engine.getStatus().currentIndex
+    const current = idx >= 0 ? playlist[idx] : undefined
+    emitLog(entry, current ? { itemName: current.name, itemPath: current.path } : undefined)
   },
   playlist: (items) => {
     // The engine mutates the same objects we hold, so status changes flow through.
@@ -181,11 +192,23 @@ function createWindow(): void {
       sandbox: false,
       contextIsolation: true,
       nodeIntegration: false,
-      spellcheck: false
+      spellcheck: false,
+      // The e2e run moves the window off-screen (occluded); without this the
+      // renderer's main thread gets throttled and CDP calls stall for seconds.
+      backgroundThrottling: process.env.STREAMER_E2E !== '1'
     }
   })
 
-  mainWindow.on('ready-to-show', () => mainWindow?.show())
+  mainWindow.on('ready-to-show', () => {
+    // E2E runs set STREAMER_E2E=1: the window moves off-screen and becomes
+    // click-through, so stray physical mouse input cannot perturb a test while
+    // CDP keeps full control.
+    if (process.env.STREAMER_E2E === '1' && mainWindow) {
+      mainWindow.setPosition(-32000, -32000)
+      mainWindow.setIgnoreMouseEvents(true)
+    }
+    mainWindow?.show()
+  })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url)
@@ -221,6 +244,9 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null)
+
+    // Start persisting logs before anything can go wrong.
+    startLogSession(`app start (pid ${process.pid})`)
 
     createWindow()
     registerIpc(services)
@@ -279,6 +305,11 @@ if (!app.requestSingleInstanceLock()) {
       const loc = getPresetLocation()
       pushLog('info', `数据目录: ${loc.dir}${loc.writable ? '' : ' — 不可写，无法保存设置与预设'}`)
       pushLog('debug', `缓存目录: ${dataPaths.cacheDir}`)
+      const logInfo = getPersistedLogInfo()
+      pushLog(
+        'info',
+        `日志留存: ${logInfo.currentFile || '（未启用）'}（目录共 ${logInfo.fileCount} 个文件 / ${(logInfo.totalBytes / 1024).toFixed(0)} KB，上限 ${(logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB）`
+      )
       if (dataPaths.migratedFrom) {
         pushLog('info', `已从旧位置迁移设置: ${dataPaths.migratedFrom}`)
       }
@@ -303,5 +334,7 @@ if (!app.requestSingleInstanceLock()) {
       saveTimer = null
     }
     persistPlaylist(playlist)
+    pushLog('info', '应用退出，日志会话已关闭。')
+    closeLogSession()
   })
 }

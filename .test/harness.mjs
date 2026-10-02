@@ -12,14 +12,20 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { installWatchdog, phase } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
 const FFMPEG = process.env.FFMPEG_BIN ?? 'ffmpeg'
 const FFPROBE = process.env.FFPROBE_BIN ?? 'ffprobe'
 
+// The harness runs real transcodes; a wedged ffmpeg must abort the run rather
+// than hang the suite forever (exit code 3 = timed out).
+const disarmWatchdog = installWatchdog(600000, 'test:unit')
+
 const builderUrl = pathToFileURL(path.join(here, 'builder.bundle.mjs')).href
 const { buildStreamCommand, buildTestCommand } = await import(builderUrl)
+const { buildRtmpTarget } = await import(pathToFileURL(path.join(here, 'rtmp.bundle.mjs')).href)
 
 const { probeMedia, embeddedSubtitleRefs, probeSubtitleFile } = await import(pathToFileURL(path.join(here, 'probe.bundle.mjs')).href)
 
@@ -248,6 +254,8 @@ const builtSubCopy = buildStreamCommand({
 record('external subtitle copy is refused with a warning', builtSubCopy.subtitleApplied === 'none' && builtSubCopy.warnings.some((w) => w.includes('外部字幕')), builtSubCopy.warnings.join(' | '))
 
 // 2e. RTMP target composition
+console.log('\n=== 2e. RTMP target composition ===')
+const end2e = phase('rtmp target composition')
 const builtRtmp = buildStreamCommand({
   ffmpegPath: FFMPEG,
   media: infoB,
@@ -255,9 +263,68 @@ const builtRtmp = buildStreamCommand({
   settings: { ...baseSession, output: { ...baseSession.output, rtmpUrl: 'rtmp://a.example.com/live/', streamKey: 'KEY-123' } },
   startPositionSec: 0
 })
-record('RTMP url + key joined without duplicate slash', builtRtmp.args.at(-1) === 'rtmp://a.example.com/live/KEY-123', builtRtmp.args.at(-1))
+record('address with trailing slash + key stays a single slash', builtRtmp.args.at(-1) === 'rtmp://a.example.com/live/KEY-123', builtRtmp.args.at(-1))
 record('flv muxer selected', builtRtmp.args[builtRtmp.args.indexOf('-f') + 1] === 'flv')
 record('reconnect flags present for rtmp', builtRtmp.args.includes('-reconnect'))
+
+// The shared composer appends the key directly — no separator is inserted.
+record('buildRtmpTarget concatenates the key directly (no / inserted)', buildRtmpTarget('rtmp://h/live', 'abc') === 'rtmp://h/liveabc', buildRtmpTarget('rtmp://h/live', 'abc'))
+record('buildRtmpTarget keeps the slash the user typed', buildRtmpTarget('rtmp://h/live/', 'abc') === 'rtmp://h/live/abc', buildRtmpTarget('rtmp://h/live/', 'abc'))
+record('buildRtmpTarget tolerates whitespace and slashes in the key', buildRtmpTarget('rtmp://h/live/', '/abc?x=1') === 'rtmp://h/live/abc?x=1', buildRtmpTarget('rtmp://h/live/', '/abc?x=1'))
+record('buildRtmpTarget without a key returns the address only', buildRtmpTarget('rtmp://h/live/', '') === 'rtmp://h/live/' && buildRtmpTarget('rtmp://h/live', '') === 'rtmp://h/live', `${buildRtmpTarget('rtmp://h/live/', '')} | ${buildRtmpTarget('rtmp://h/live', '')}`)
+record('buildRtmpTarget with an empty address is empty', buildRtmpTarget('', 'abc') === '')
+end2e()
+
+// 2e-bis. cover art must never be mapped instead of the real video
+{
+  const fabricated = {
+    ...infoB,
+    streams: [
+      { index: 0, type: 'video', codec: 'mjpeg', attachedPic: true },
+      { index: 1, type: 'video', codec: 'h264', width: 1280, height: 720, fps: 30 },
+      { index: 2, type: 'audio', codec: 'aac', channels: 2, sampleRate: 44100 }
+    ],
+    videoStreams: [
+      { index: 0, type: 'video', codec: 'mjpeg', attachedPic: true },
+      { index: 1, type: 'video', codec: 'h264', width: 1280, height: 720, fps: 30 }
+    ],
+    audioStreams: [{ index: 2, type: 'audio', codec: 'aac', channels: 2, sampleRate: 44100 }],
+    subtitleStreams: []
+  }
+  const builtCover = buildStreamCommand({
+    ffmpegPath: FFMPEG,
+    media: fabricated,
+    item: { ...itemB, mode: 'off', subtitleTracks: [], selectedSubtitleId: null },
+    settings: baseSession,
+    startPositionSec: 0,
+    outputOverride: path.join(here, 'out_cover.mp4')
+  })
+  const vMap = builtCover.args[builtCover.args.indexOf('-map') + 1]
+  const aMap = builtCover.args[builtCover.args.lastIndexOf('-map') + 1]
+  record('attached_pic cover art is not selected as the video stream', builtCover.videoStreamIndex === 1, `mapped ${vMap}, stream #${builtCover.videoStreamIndex}`)
+  record('real video stream mapped by absolute index', vMap === '0:1', vMap)
+  record('audio stream mapped by absolute index', aMap === '0:2', aMap)
+
+  const coverOnly = {
+    ...fabricated,
+    streams: [fabricated.streams[0]],
+    videoStreams: [fabricated.streams[0]],
+    audioStreams: [fabricated.streams[2]]
+  }
+  const builtCoverOnly = buildStreamCommand({
+    ffmpegPath: FFMPEG,
+    media: coverOnly,
+    item: { ...itemB, mode: 'off', subtitleTracks: [], selectedSubtitleId: null },
+    settings: baseSession,
+    startPositionSec: 0,
+    outputOverride: path.join(here, 'out_cover_only.mp4')
+  })
+  record(
+    'a file with only cover art warns and pushes audio only',
+    builtCoverOnly.videoStreamIndex === -1 && builtCoverOnly.warnings.some((w) => w.includes('只推送音频')),
+    builtCoverOnly.warnings.join(' | ')
+  )
+}
 
 // 2f. hardware encoder selection
 const builtHw = buildStreamCommand({
@@ -361,7 +428,7 @@ await new Promise((r) => setTimeout(r, 1200))
 
 const rtmpSettings = {
   ...baseSession,
-  output: { ...baseSession.output, rtmpUrl: `rtmp://127.0.0.1:${listenPort}/live`, streamKey: 'test', realtimePacing: true, maxReconnectAttempts: 0 }
+  output: { ...baseSession.output, rtmpUrl: `rtmp://127.0.0.1:${listenPort}/live/`, streamKey: 'test', realtimePacing: true, maxReconnectAttempts: 0 }
 }
 const builtRtmpPush = buildStreamCommand({
   ffmpegPath: FFMPEG,
@@ -588,6 +655,7 @@ console.log('\n=== summary ===')
 const passed = results.filter((r) => r.ok).length
 console.log(`${passed}/${results.length} checks passed`)
 const failures = results.filter((r) => !r.ok)
+disarmWatchdog()
 if (failures.length > 0) {
   console.log('\nFailures:')
   for (const f of failures) console.log(`  - ${f.name}: ${f.detail}`)

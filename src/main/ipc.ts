@@ -7,6 +7,7 @@ import type {
   EngineStatus,
   FfmpegCapabilities,
   LogEntry,
+  PersistedLogInfo,
   PlaylistItem,
   PresetsPayload,
   ProbeResult,
@@ -15,11 +16,13 @@ import type {
   SessionSettings
 } from '@shared/types'
 import { IPC, SUPPORTED_SUBTITLE_EXT, SUPPORTED_VIDEO_EXT } from '@shared/types'
+import { buildRtmpTarget } from '@shared/rtmp'
 import { buildCommandLine, buildTestCommand } from '@main/ffmpeg/command'
 import { ENCODER_CATALOGUE, getCapabilities, resolveBinaries, runProcess, setAvailableEncoderNames } from '@main/ffmpeg/capabilities'
 import { embeddedSubtitleRefs } from '@main/ffmpeg/probe'
 import { probeCached } from '@main/store/playlist'
 import { deletePreset, getPresetLocation, listPresets, renamePreset, savePreset } from '@main/store/presets'
+import { getPersistedLogInfo } from '@main/store/logger'
 import { BUILTIN_PRESETS } from '@shared/defaults'
 
 /** Everything the IPC layer needs from the running application. */
@@ -146,9 +149,15 @@ export function registerIpc(services: AppServices): void {
   /* ---------------- playlist ---------------- */
 
   ipcMain.handle(IPC.getPlaylist, (): PlaylistItem[] => services.getPlaylist())
-  ipcMain.handle(IPC.addItems, (_e, paths: string[]): Promise<PlaylistItem[]> =>
-    services.addItems(Array.isArray(paths) ? paths : [])
-  )
+  ipcMain.handle(IPC.addItems, (_e, paths: string[]): Promise<PlaylistItem[]> => {
+    const list = Array.isArray(paths) ? paths : []
+    // Only video files belong in the playlist; a stray subtitle that slipped
+    // into a drop would otherwise be probed as a "video" and fail to stream.
+    const videos = list.filter((p) => SUPPORTED_VIDEO_EXT.includes(path.extname(String(p)).toLowerCase()))
+    const skipped = list.length - videos.length
+    if (skipped > 0) services.pushLog('info', `已忽略 ${skipped} 个非视频文件。`)
+    return services.addItems(videos)
+  })
   ipcMain.handle(IPC.attachSubtitle, (_e, itemId: string, filePath: string): Promise<PlaylistItem | null> =>
     services.attachSubtitle(itemId, filePath)
   )
@@ -217,6 +226,21 @@ export function registerIpc(services: AppServices): void {
     }
     void shell.openPath(dir)
   })
+
+  /* ---------------- persisted logs ---------------- */
+
+  ipcMain.handle(IPC.openLogsDir, (): void => {
+    const { dir } = getPersistedLogInfo()
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+    } catch {
+      /* ignore: the shell will report a missing folder */
+    }
+    void shell.openPath(dir)
+  })
+
+  ipcMain.handle(IPC.getLogFileInfo, (): PersistedLogInfo => getPersistedLogInfo())
+
   /* ---------------- RTMP connection test ---------------- */
 
   ipcMain.handle(IPC.testRtmp, async (_e, req: RtmpTestRequest): Promise<RtmpTestResult> => {
@@ -229,30 +253,47 @@ export function registerIpc(services: AppServices): void {
     if (!/^rtmps?:\/\//i.test(url)) {
       return { ok: false, message: '地址必须是以 rtmp:// 或 rtmps:// 开头的推流地址', detail: '', elapsedMs: 0 }
     }
-    if (!key) return { ok: false, message: '请填写串流密钥 (stream key)', detail: '', elapsedMs: 0 }
-
-    const target = `${url.replace(/\/+$/, '')}/${key}`
+    // The stream key is optional: some servers take the whole path in the address.
+    const target = buildRtmpTarget(url, key)
     const args = buildTestCommand(settings.session, url, key)
     const timeoutMs = Math.max(5, Math.min(60, Number(req?.timeoutSec) || 20)) * 1000
+    services.pushLog('debug', `RTMP 测试目标: ${target}`)
     services.pushLog('debug', `RTMP 测试命令: ${buildCommandLine(resolved.ffmpeg, args)}`)
 
     const started = Date.now()
-    const res = await runProcess(resolved.ffmpeg, args, timeoutMs)
+    // The ffmpeg run has its own timeout; this guard only covers a hang below
+    // runProcess (e.g. a stuck pipe) so the test can never wedge the UI.
+    const guardMs = timeoutMs + 5000
+    let guard: NodeJS.Timeout | null = null
+    const timeoutResult = await Promise.race([
+      runProcess(resolved.ffmpeg, args, timeoutMs),
+      new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
+        guard = setTimeout(
+          () => resolve({ code: -3, stdout: '', stderr: '[test aborted] 测试未能在时限内完成，已强制结束。' }),
+          guardMs
+        )
+      })
+    ]).finally(() => {
+      if (guard) clearTimeout(guard)
+    })
+
     const elapsedMs = Date.now() - started
-    const combined = `${res.stderr}\n${res.stdout}`
+    const combined = `${timeoutResult.stderr}\n${timeoutResult.stdout}`
     const detail = combined
       .split(/\r?\n/)
       .filter((l) => l.trim())
       .slice(-30)
       .join('\n')
-    const timedOut = res.code === -2
+    const timedOut = timeoutResult.code === -2 || timeoutResult.code === -3
     const failedPattern =
       /Connection refused|Server error|Unauthorized|Cannot open connection|Unknown error|Connection reset|timed out|No route to host|Name or service not known|Immediate exit requested/i
-    const ok = !timedOut && res.code === 0 && !failedPattern.test(combined)
+    const ok = !timedOut && timeoutResult.code === 0 && !failedPattern.test(combined)
 
     let message: string
     if (ok) {
       message = `连接成功：已向 ${target} 推送 5 秒测试流（耗时 ${(elapsedMs / 1000).toFixed(1)}s）`
+    } else if (timeoutResult.code === -3) {
+      message = '测试卡住，已强制中止（超过等待上限）'
     } else if (timedOut) {
       message = `测试超时（${timeoutMs / 1000}s）：服务器无响应或地址不可达`
     } else {
@@ -260,7 +301,7 @@ export function registerIpc(services: AppServices): void {
         .split(/\r?\n/)
         .reverse()
         .find((l) => failedPattern.test(l))
-      message = errLine ? errLine.trim() : `推流失败（ffmpeg 退出码 ${res.code ?? '未知'}）`
+      message = errLine ? errLine.trim() : `推流失败（ffmpeg 退出码 ${timeoutResult.code ?? '未知'}）`
     }
     services.pushLog(ok ? 'info' : 'error', `RTMP 测试：${message}`)
     return { ok, message, detail, elapsedMs }

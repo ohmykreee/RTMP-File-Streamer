@@ -11,6 +11,7 @@ import { app } from 'electron'
  *   Data/settings.json   ffmpeg paths + current session settings
  *   Data/playlist.json   the queue, restored on next launch
  *   Data/presets.json    user-saved presets
+ *   Data/Logs/           persisted run logs (rotated, size-capped)
  *   Data/Cache/          Chromium/Electron caches (kept out of the main folder)
  */
 export function getAppRoot(): string {
@@ -26,6 +27,10 @@ export function dataDir(): string {
 
 export function cacheDir(): string {
   return path.join(dataDir(), 'Cache')
+}
+
+export function logsDir(): string {
+  return path.join(dataDir(), 'Logs')
 }
 
 export function ensureDir(dir: string): boolean {

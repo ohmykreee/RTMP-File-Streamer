@@ -13,6 +13,7 @@ import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { installWatchdog } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -76,7 +77,7 @@ async function checkLayout({ label, command, args, cwd, expectedDataDir, cdpPort
   note(`launching ${label}`, `cwd=${cwd}`)
   const child = spawn(command, args, {
     cwd,
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
   })
   let log = ''
   child.stdout?.on('data', (d) => (log += d.toString()))

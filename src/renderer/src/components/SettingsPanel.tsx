@@ -8,6 +8,7 @@ import type {
   ContainerName,
   FfmpegCapabilities,
   OutputSettings,
+  PersistedLogInfo,
   Preset,
   PresetsPayload,
   RtmpTestResult,
@@ -26,12 +27,16 @@ interface SettingsPanelProps {
   capsLoading: boolean
   info: AppInfo | null
   busy: boolean
+  /** True while a stream is live: every control is frozen until it ends. */
+  locked: boolean
   presets: PresetsPayload | null
+  logInfo: PersistedLogInfo | null
   activePresetId: string
   onSelectPreset: (preset: Preset) => void
   onSavePreset: (name: string) => void
   onDeletePreset: (presetId: string) => void
   onOpenConfigDir: () => void
+  onOpenLogsDir: () => void
   onUpdateVideo: (patch: Partial<VideoSettings>) => void
   onUpdateAudio: (patch: Partial<AudioSettings>) => void
   onUpdateSubtitles: (patch: Partial<SubtitleRenderSettings>) => void
@@ -87,6 +92,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
   const [tab, setTab] = useState<TabKey>('video')
   const [testState, setTestState] = useState<{ running: boolean; result: RtmpTestResult | null }>({ running: false, result: null })
   const [commandPreview, setCommandPreview] = useState<string | null>(null)
+  const [showKey, setShowKey] = useState(false)
   const v = settings.session.video
   const a = settings.session.audio
   const s = settings.session.subtitles
@@ -111,8 +117,17 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
   const runTest = async (): Promise<void> => {
     setTestState({ running: true, result: null })
+    // Last-resort guard: the main process already bounds the ffmpeg run, this
+    // only stops the button from staying "正在测试…" forever if the IPC answer
+    // itself never arrives.
+    const guard = new Promise<RtmpTestResult>((resolve) =>
+      window.setTimeout(
+        () => resolve({ ok: false, message: '测试超时：31 秒内未返回结果，已中止等待。', detail: '', elapsedMs: 31000 }),
+        31000
+      )
+    )
     try {
-      const result = await props.onTestRtmp(o.rtmpUrl, o.streamKey)
+      const result = await Promise.race([props.onTestRtmp(o.rtmpUrl, o.streamKey), guard])
       setTestState({ running: false, result })
     } catch (err) {
       setTestState({ running: false, result: { ok: false, message: String(err), detail: '', elapsedMs: 0 } })
@@ -129,6 +144,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
       <PresetBar
         presets={props.presets}
         activePresetId={props.activePresetId}
+        locked={props.locked}
         onSelectPreset={props.onSelectPreset}
         onSavePreset={props.onSavePreset}
         onDeletePreset={props.onDeletePreset}
@@ -144,7 +160,13 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         ))}
       </nav>
 
-      <div className="settings-body">
+      {props.locked && (
+        <div className="lock-note">
+          <span>🔒 串流进行中，设置已锁定（串流使用的参数在开始时已确定）。停止串流后可修改。</span>
+        </div>
+      )}
+
+      <div className="settings-body" inert={props.locked}>
         {/* ---------------------------------------------------------- VIDEO */}
         {tab === 'video' && (
           <>
@@ -514,27 +536,30 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* --------------------------------------------------------- OUTPUT */}
         {tab === 'output' && (
           <>
-            <Field label="RTMP 推流地址" hint="只填到 /应用名 为止，不要带密钥。例如 rtmp://live.example.com/app">
+            <Field label="RTMP 推流地址" hint="填到应用路径为止（通常以 / 结尾）。最终推送目标 = 地址 + 密钥，直接拼接，不再插入斜杠">
               <input
                 value={o.rtmpUrl}
-                placeholder="rtmp://127.0.0.1/live"
+                placeholder="rtmp://127.0.0.1/live/"
                 onChange={(e) => props.onUpdateOutput({ rtmpUrl: e.target.value })}
                 spellCheck={false}
               />
             </Field>
 
-            <Field label="串流密钥 (stream key)" hint="单独一栏填写；最终地址 = 推流地址 + / + 密钥">
-              <input
-                value={o.streamKey}
-                placeholder="例如 abc123-def456"
-                onChange={(e) => props.onUpdateOutput({ streamKey: e.target.value })}
-                spellCheck={false}
-              />
+            <Field label="串流密钥 (可选)" hint="点状显示，可点「显示」查看；留空则直接推送地址本身">
+              <div className="secret-row">
+                <input
+                  type={showKey ? 'text' : 'password'}
+                  value={o.streamKey}
+                  placeholder="留空 = 不带密钥"
+                  onChange={(e) => props.onUpdateOutput({ streamKey: e.target.value })}
+                  spellCheck={false}
+                  autoComplete="off"
+                />
+                <button type="button" className="btn tiny ghost secret-toggle" onClick={() => setShowKey((v) => !v)}>
+                  {showKey ? '隐藏' : '显示'}
+                </button>
+              </div>
             </Field>
-
-            <div className="rtmp-target mono small">
-              推流目标：{o.rtmpUrl.replace(/\/+$/, '')}/{o.streamKey || '（未填写密钥）'}
-            </div>
 
             <div className="row-actions">
               <button className="btn primary" onClick={runTest} disabled={testState.running || props.busy}>
@@ -594,7 +619,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               </select>
             </Field>
 
-            <Field label="追加密码参数" hint="追加到输出参数中，例如 -flvflags no_duration_filesize（留空即可）">
+            <Field label="追加自定义参数" hint="原样追加到 ffmpeg 输出参数中，例如 -flvflags no_duration_filesize">
               <input
                 value={o.extraOutputArgs}
                 placeholder=""
@@ -741,6 +766,27 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 <code>{props.info?.userDataPath ?? '—'}</code>
               </div>
             </div>
+
+            <h3 className="section-title">日志留存</h3>
+            <div className="kv-list">
+              <div className="kv">
+                <span>日志目录</span>
+                <code>{props.logInfo?.dir ?? '—'}</code>
+              </div>
+              <div className="kv">
+                <span>当前占用</span>
+                <code>
+                  {props.logInfo
+                    ? `${props.logInfo.fileCount} 个文件 / ${(props.logInfo.totalBytes / 1024).toFixed(0)} KB · 上限 ${(props.logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB（超出自动清理最旧日志）`
+                    : '—'}
+                </code>
+              </div>
+            </div>
+            <div className="row-actions">
+              <button className="btn ghost" onClick={props.onOpenLogsDir}>
+                📂 打开日志目录
+              </button>
+            </div>
           </>
         )}
       </div>
@@ -755,6 +801,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 function PresetBar({
   presets,
   activePresetId,
+  locked,
   onSelectPreset,
   onSavePreset,
   onDeletePreset,
@@ -762,6 +809,7 @@ function PresetBar({
 }: {
   presets: PresetsPayload | null
   activePresetId: string
+  locked: boolean
   onSelectPreset: (preset: Preset) => void
   onSavePreset: (name: string) => void
   onDeletePreset: (presetId: string) => void
@@ -813,6 +861,7 @@ function PresetBar({
       <select
         className="preset-select"
         value={active?.id ?? ''}
+        disabled={locked}
         onChange={(e) => {
           const preset = all.find((p) => p.id === e.target.value)
           if (preset) onSelectPreset(preset)
@@ -825,7 +874,7 @@ function PresetBar({
 
       {active?.builtin && <span className="badge subtle">内置</span>}
 
-      <button className="btn tiny" onClick={() => setMenuOpen((v) => !v)} title="把当前所有设置保存为预设">
+      <button className="btn tiny" onClick={() => setMenuOpen((v) => !v)} disabled={locked} title="把当前所有设置保存为预设">
         💾 保存为预设
       </button>
 
@@ -833,6 +882,7 @@ function PresetBar({
         <button
           className="btn tiny danger"
           onClick={() => onDeletePreset(active.id)}
+          disabled={locked}
           title={`删除预设「${active.name}」`}
         >
           删除
@@ -884,14 +934,19 @@ function PresetBar({
  * Small building blocks
  * ------------------------------------------------------------------ */
 
+/**
+ * One labelled control.
+ *
+ * The optional hint is rendered *below* the control, not inside the label row:
+ * labels stay single-line, so every control in a `field-grid` row starts at the
+ * same offset no matter how long its explanation is.
+ */
 function Field({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }): React.JSX.Element {
   return (
     <label className="field">
-      <span className="field-label">
-        {label}
-        {hint && <em className="field-hint">{hint}</em>}
-      </span>
+      <span className="field-label">{label}</span>
       {children}
+      {hint && <em className="field-hint">{hint}</em>}
     </label>
   )
 }
@@ -1026,20 +1081,17 @@ function ResolutionField({
 
   return (
     <div className="field res-field">
-      <span className="field-label">
-        分辨率
-        <em className="field-hint">关闭则保持源分辨率；高度自适应时按源画面比例计算</em>
-      </span>
-
-      <label className="toggle compact res-enable">
-        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-        <span className="toggle-track" aria-hidden>
-          <span className="toggle-thumb" />
-        </span>
-        <span className="toggle-text">缩放输出</span>
-      </label>
+      <span className="field-label">分辨率</span>
 
       <div className="res-inputs">
+        <label className="toggle compact res-enable">
+          <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+          <span className="toggle-track" aria-hidden>
+            <span className="toggle-thumb" />
+          </span>
+          <span className="toggle-text">缩放输出</span>
+        </label>
+
         <select
           className="res-preset"
           value={activePreset?.label ?? ''}
@@ -1085,6 +1137,7 @@ function ResolutionField({
           高度自适应
         </label>
       </div>
+      <em className="field-hint">关闭「缩放输出」则保持源分辨率；高度自适应时按源画面比例计算</em>
     </div>
   )
 }

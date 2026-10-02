@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type {
   AppInfo,
   AppSettings,
@@ -6,6 +6,7 @@ import type {
   FfmpegCapabilities,
   LogEntry,
   MediaInfo,
+  PersistedLogInfo,
   PlaylistItem,
   PresetsPayload,
   ProbeResult,
@@ -55,6 +56,28 @@ const api: StreamerApi = {
   deletePreset: (presetId) => ipcRenderer.invoke(IPC.deletePreset, presetId) as Promise<PresetsPayload>,
   renamePreset: (presetId, name) => ipcRenderer.invoke(IPC.renamePreset, presetId, name) as Promise<PresetsPayload>,
   openConfigDir: () => ipcRenderer.invoke(IPC.openConfigDir) as Promise<void>,
+  openLogsDir: () => ipcRenderer.invoke(IPC.openLogsDir) as Promise<void>,
+  getLogFileInfo: () => ipcRenderer.invoke(IPC.getLogFileInfo) as Promise<PersistedLogInfo>,
+  /**
+   * Resolves the on-disk paths of dropped `File` objects.
+   *
+   * Electron 32 removed `File.path`, so the renderer cannot learn the path on
+   * its own. `webUtils.getPathForFile` must run on the real File object, which
+   * only exists in the renderer's world — contextBridge passes the object
+   * through to this function, so the lookup happens here.
+   */
+  getPathsForFiles: (files: File[]): string[] => {
+    const out: string[] = []
+    for (const file of files) {
+      try {
+        const p = webUtils.getPathForFile(file)
+        if (p) out.push(p)
+      } catch {
+        /* skip entries without a resolvable path */
+      }
+    }
+    return out
+  },
   previewCommand: () => ipcRenderer.invoke(IPC.previewCommand) as Promise<string>,
   onStatus: (cb) => subscribe<EngineStatus>(IPC.evtStatus, cb),
   onLog: (cb) => subscribe<LogEntry>(IPC.evtLog, cb),

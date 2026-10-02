@@ -49,6 +49,13 @@ if (!esbuild) {
 
 const targets = [
   {
+    // Shared RTMP target composition, exercised directly by the harness.
+    entry: 'src/shared/rtmp.ts',
+    out: '.test/rtmp.bundle.mjs',
+    format: 'esm',
+    platform: 'node'
+  },
+  {
     entry: 'src/main/ffmpeg/command.ts',
     out: '.test/builder.bundle.mjs',
     format: 'esm',

@@ -51,7 +51,7 @@ try {
 
 const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
 })
 
 /** Restores settings.json so later suites start from the state they expect. */
@@ -174,7 +174,7 @@ const setFieldValue = async (labelStartsWith, value) => {
   return ev(`(() => {
     const field = ${fieldExpr(labelStartsWith)}
     if (!field) return 'no-field'
-    const input = field.querySelector('input[type="number"], input[type="text"], input:not([type])')
+    const input = field.querySelector('input[type="number"], input[type="text"], input[type="password"], input:not([type])')
     if (!input) return 'no-input'
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
     setter.call(input, String(${JSON.stringify(String(value))}))
@@ -219,10 +219,11 @@ await openTab('字幕', '默认字幕处理方式')
 await setSelectByValue('默认字幕处理方式', 'off')
 await delay(200)
 
-// output tab: stream key
+// output tab: stream key + address
 const outputTabReady = await openTab('输出', '串流密钥')
 record('output tab renders its fields', outputTabReady)
 await setFieldValue('串流密钥', 'preset-key-test')
+await setFieldValue('RTMP 推流地址', 'rtmp://preset.example.com/live/')
 await delay(700)
 
 const sessionBefore = JSON.parse(
@@ -295,9 +296,9 @@ if (stored) {
     saved ? `bitrate=${saved.settings.video.bitrateKbps} fps=${saved.settings.video.fps} audio=${saved.settings.audio.bitrateKbps} subMode=${saved.settings.subtitles.mode}` : 'missing'
   )
   record(
-    'the preset does NOT store the RTMP destination',
-    saved?.settings?.output?.streamKey === 'test',
-    `stored key = ${saved?.settings?.output?.streamKey}`
+    'the preset DOES store the RTMP destination in plain text',
+    saved?.settings?.output?.streamKey === 'preset-key-test' && saved?.settings?.output?.rtmpUrl === 'rtmp://preset.example.com/live/',
+    `stored key = ${saved?.settings?.output?.streamKey}, url = ${saved?.settings?.output?.rtmpUrl}`
   )
 }
 
@@ -335,6 +336,11 @@ record(
     afterSaved.subtitles.mode === 'off' &&
     afterSaved.video.scale === '1600:-2',
   JSON.stringify({ v: afterSaved.video.bitrateKbps, fps: afterSaved.video.fps, a: afterSaved.audio.bitrateKbps, sub: afterSaved.subtitles.mode, scale: afterSaved.video.scale })
+)
+record(
+  'applying the saved preset restores the stream target',
+  afterSaved.output.streamKey === 'preset-key-test' && afterSaved.output.rtmpUrl === 'rtmp://preset.example.com/live/',
+  JSON.stringify({ url: afterSaved.output.rtmpUrl, key: afterSaved.output.streamKey })
 )
 
 /* ---------- delete ---------- */

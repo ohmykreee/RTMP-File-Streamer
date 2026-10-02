@@ -18,18 +18,6 @@ const FILE_VERSION = 1
 
 let cache: Preset[] | null = null
 
-/**
- * A preset captures encoding preferences only. The RTMP destination and stream
- * key are deliberately excluded: they are credentials for one specific channel
- * and must never be restored silently when a preset is applied.
- */
-function sanitiseSettings(settings: SessionSettings): SessionSettings {
-  return {
-    ...settings,
-    output: { ...settings.output, rtmpUrl: DEFAULT_SESSION.output.rtmpUrl, streamKey: DEFAULT_SESSION.output.streamKey }
-  }
-}
-
 interface StoredPresetShape {
   id?: unknown
   name?: unknown
@@ -42,18 +30,24 @@ interface StoredPresetShape {
   }>
 }
 
-/** Normalises a stored preset so missing keys fall back to the defaults. */
+/**
+ * Normalises a stored preset so missing keys fall back to the defaults.
+ *
+ * The RTMP destination and stream key ARE part of a preset and are stored in
+ * plain text: a preset is meant to capture "everything I configured", including
+ * where the stream goes, so applying it restores the full setup.
+ */
 function normalise(raw: unknown): Preset | null {
   if (!raw || typeof raw !== 'object') return null
   const p = raw as StoredPresetShape
   if (typeof p.name !== 'string' || !p.name.trim()) return null
   const s = p.settings ?? {}
-  const settings = sanitiseSettings({
+  const settings: SessionSettings = {
     video: { ...DEFAULT_SESSION.video, ...(s.video ?? {}) },
     audio: { ...DEFAULT_SESSION.audio, ...(s.audio ?? {}) },
     subtitles: { ...DEFAULT_SESSION.subtitles, ...(s.subtitles ?? {}) },
     output: { ...DEFAULT_SESSION.output, ...(s.output ?? {}) }
-  })
+  }
 
   return {
     id: typeof p.id === 'string' && p.id ? p.id : newPresetId(),
@@ -107,7 +101,7 @@ export function savePreset(input: SavePresetInput): Preset {
     id: index >= 0 ? presets[index].id : newPresetId(),
     name,
     savedAt: Date.now(),
-    settings: sanitiseSettings(input.settings)
+    settings: input.settings
   }
   if (index >= 0) presets[index] = preset
   else presets.push(preset)

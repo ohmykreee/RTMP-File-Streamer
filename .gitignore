@@ -11,6 +11,7 @@ node_modules/
 # Regenerated on demand by `node .test/make-fixtures.mjs`.
 .test/*.mp4
 .test/*.flv
+.test/*.h264
 .test/*.png
 .test/*.srt
 .test/*.json

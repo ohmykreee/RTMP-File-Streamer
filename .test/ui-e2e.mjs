@@ -130,7 +130,8 @@ try {
 }
 const output = {
   ...(savedSettings.session?.output ?? {}),
-  rtmpUrl: `rtmp://127.0.0.1:${LISTEN_PORT}/live`,
+  // The address carries the trailing `/`; the key is appended directly to it.
+  rtmpUrl: `rtmp://127.0.0.1:${LISTEN_PORT}/live/`,
   streamKey: 'test',
   container: 'flv',
   // Reset everything else explicitly: these tests must not depend on values a
@@ -153,7 +154,7 @@ note('app settings retargeted', output.rtmpUrl)
 /* ---------------- launch the real app ---------------- */
 const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined }
+  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
 })
 let appLog = ''
 appProc.stdout?.on('data', (d) => (appLog += d.toString()))

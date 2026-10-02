@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { EngineState, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
+import type { EngineState, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
 import { useStreamer } from './hooks/useStreamer'
 import PlaylistPanel from './components/PlaylistPanel'
 import SettingsPanel from './components/SettingsPanel'
@@ -33,7 +33,37 @@ export default function App(): React.JSX.Element {
 
   const currentItem: PlaylistItem | null = status.currentIndex >= 0 ? (playlist[status.currentIndex] ?? null) : null
   const isActive = status.state !== 'idle' && status.state !== 'error'
+  /**
+   * While a session runs, every setting is frozen: the encoder command was built
+   * from them, and silently ignoring edits mid-stream is worse than locking the
+   * controls outright.
+   */
+  const locked = isActive
   const canStart = playlist.length > 0 && Boolean(capabilities?.ffmpegPath) && !isActive
+
+  /* Persisted log usage, refreshed periodically for the log panel.
+     Depends on the stable callback (not the whole hook object): `st` gets a new
+     identity on every render, and an effect keyed on it would re-run — and fire
+     a fresh IPC round-trip — on every single render, starving the renderer. */
+  const [logInfo, setLogInfo] = useState<PersistedLogInfo | null>(null)
+  const getLogFileInfo = st.getLogFileInfo
+  useEffect(() => {
+    let alive = true
+    const load = async (): Promise<void> => {
+      try {
+        const info = await getLogFileInfo()
+        if (alive) setLogInfo((prev) => (prev && prev.totalBytes === info.totalBytes && prev.currentFile === info.currentFile ? prev : info))
+      } catch {
+        /* the bridge may not be ready yet */
+      }
+    }
+    void load()
+    const timer = window.setInterval(load, 15000)
+    return () => {
+      alive = false
+      window.clearInterval(timer)
+    }
+  }, [getLogFileInfo])
 
   const run = useCallback(
     async (fn: () => Promise<unknown>): Promise<void> => {
@@ -50,42 +80,51 @@ export default function App(): React.JSX.Element {
     []
   )
 
-  /* Settings editors wrap the hook's updates so manual edits deselect the preset. */
+  /* Settings editors wrap the hook's updates so manual edits deselect the preset.
+     While locked they are no-ops: the disabled fieldset stops real interaction,
+     but the guard also keeps the model frozen against programmatic events. */
   const editVideo = useCallback(
     (patch: Parameters<typeof st.updateVideo>[0]) => {
+      if (locked) return
       setActivePresetId('')
       void st.updateVideo(patch)
     },
-    [st]
+    [locked, st]
   )
   const editAudio = useCallback(
     (patch: Parameters<typeof st.updateAudio>[0]) => {
+      if (locked) return
       setActivePresetId('')
       void st.updateAudio(patch)
     },
-    [st]
+    [locked, st]
   )
   const editSubtitles = useCallback(
     (patch: Parameters<typeof st.updateSubtitles>[0]) => {
+      if (locked) return
       setActivePresetId('')
       void st.updateSubtitles(patch)
     },
-    [st]
+    [locked, st]
   )
   const editOutput = useCallback(
     (patch: Parameters<typeof st.updateOutput>[0]) => {
+      if (locked) return
       setActivePresetId('')
       void st.updateOutput(patch)
     },
-    [st]
+    [locked, st]
   )
 
   const selectPreset = useCallback(
     (preset: Preset) => {
+      // Applying a preset would rewrite the settings the running encoder was
+      // built from, so it is refused while a session is live.
+      if (locked) return
       setActivePresetId(preset.id)
       void run(() => st.applyPreset(preset))
     },
-    [run, st]
+    [locked, run, st]
   )
 
   /* Warn before closing while a stream is live. */
@@ -216,6 +255,7 @@ export default function App(): React.JSX.Element {
           currentIndex={status.currentIndex}
           active={isActive}
           busy={st.busy}
+          locked={locked}
           onAddVideos={() => void run(st.addVideoFiles)}
           onAddPaths={(paths) => void run(() => st.addPaths(paths))}
           onRemove={(id) => void run(() => st.removeItem(id))}
@@ -225,6 +265,7 @@ export default function App(): React.JSX.Element {
           onAttachSubtitle={(id) => void run(() => st.attachSubtitle(id))}
           onUpdateItem={(id, patch) => void run(() => st.updateItem(id, patch))}
           onReveal={(p) => void st.showItemInFolder(p)}
+          onResolveDroppedPaths={st.resolveDroppedPaths}
           onFilesDropped={(paths) => void run(() => st.addPaths(paths))}
         />
 
@@ -234,7 +275,9 @@ export default function App(): React.JSX.Element {
           capsLoading={st.capsLoading}
           info={st.info}
           busy={st.busy}
+          locked={locked}
           presets={st.presets}
+          logInfo={logInfo}
           activePresetId={activePresetId}
           onSelectPreset={selectPreset}
           onSavePreset={(name) => void run(() => st.savePreset(name))}
@@ -243,6 +286,7 @@ export default function App(): React.JSX.Element {
             void run(() => st.deletePreset(id))
           }}
           onOpenConfigDir={() => void run(st.openConfigDir)}
+          onOpenLogsDir={() => void run(st.openLogsDir)}
           onUpdateVideo={editVideo}
           onUpdateAudio={editAudio}
           onUpdateSubtitles={editSubtitles}
@@ -319,7 +363,7 @@ export default function App(): React.JSX.Element {
         </div>
       </footer>
 
-      <LogPanel logs={st.logs} onClear={() => void st.clearLogs()} expanded={logsOpen} onToggle={() => setLogsOpen((v) => !v)} />
+      <LogPanel logs={st.logs} onClear={() => void st.clearLogs()} expanded={logsOpen} onToggle={() => setLogsOpen((v) => !v)} logInfo={logInfo} onOpenLogsDir={() => void st.openLogsDir()} />
     </div>
   )
 }

@@ -32,6 +32,8 @@ export interface MediaStreamInfo {
   title?: string
   isDefault?: boolean
   isForced?: boolean
+  /** Video stream that is really embedded cover art (album/MV thumbnail). */
+  attachedPic?: boolean
 }
 
 export interface MediaInfo {
@@ -392,6 +394,16 @@ export interface AppInfo {
   userDataPath: string
 }
 
+/** Where the persisted run log is being written, and how much space it uses. */
+export interface PersistedLogInfo {
+  dir: string
+  currentFile: string
+  /** Bytes currently used by the whole Logs folder. */
+  totalBytes: number
+  fileCount: number
+  budgetBytes: number
+}
+
 /** Renderer -> main invocations (all promise based). */
 export interface StreamerApi {
   getAppInfo(): Promise<AppInfo>
@@ -435,6 +447,16 @@ export interface StreamerApi {
   renamePreset(presetId: string, name: string): Promise<PresetsPayload>
   /** Reveal the config folder that holds presets.json. */
   openConfigDir(): Promise<void>
+  /** Reveal the folder holding the persisted run logs. */
+  openLogsDir(): Promise<void>
+  /** Size/count of the persisted log files. */
+  getLogFileInfo(): Promise<PersistedLogInfo>
+  /**
+   * Resolve the filesystem paths of `File` objects coming from a drag-and-drop
+   * event. Needed because Electron no longer exposes `File.path`; the lookup
+   * (`webUtils.getPathForFile`) must happen in the preload world.
+   */
+  getPathsForFiles(files: File[]): string[]
   onStatus(cb: (status: EngineStatus) => void): () => void
   onLog(cb: (entry: LogEntry) => void): () => void
   onPlaylist(cb: (items: PlaylistItem[]) => void): () => void
@@ -465,6 +487,8 @@ export const IPC = {
   deletePreset: 'presets:delete',
   renamePreset: 'presets:rename',
   openConfigDir: 'presets:openDir',
+  openLogsDir: 'logs:openDir',
+  getLogFileInfo: 'logs:info',
   start: 'engine:start',
   pause: 'engine:pause',
   resume: 'engine:resume',
