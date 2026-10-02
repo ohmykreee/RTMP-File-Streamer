@@ -414,6 +414,19 @@ export class Playout {
     }
   }
 
+  /**
+   * Session-timeline position the encoder has reached, in seconds.
+   *
+   * `nextOffset` covers the passes that have been handed over; the pass still running
+   * adds whatever it has produced so far. This is what the buffer display needs: the
+   * distance between here and what the publisher has aired is the buffer depth, and
+   * unlike a position derived from a lead measurement it stays correct across a pass
+   * boundary — where the hand-off point jumps forward while the viewer does not.
+   */
+  getEncodedSec(): number {
+    return Math.max(this.nextOffset, this.encodedSec)
+  }
+
   /** Where the pusher has published up to (seconds on the session timeline). */
   getPublishedSec(): number {
     return this.publishedSec

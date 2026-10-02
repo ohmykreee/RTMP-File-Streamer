@@ -21,7 +21,7 @@ import type {
   VideoRateControl,
   VideoSettings
 } from '@shared/types'
-import { BUFFER_SEC_MAX, BUFFER_SEC_MIN, OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
+import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
 
 interface SettingsPanelProps {
   settings: AppSettings
@@ -762,20 +762,39 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {tab === 'advanced' && (
           <>
             <h3 className="section-title">串流控制</h3>
-            <div className="field-grid">
-              <Field
-                label="推流缓冲 (秒)"
-                hint={`编码领先推流这么多秒，用于吸收瞬时卡顿；越大越流畅、观众延迟越高（${BUFFER_SEC_MIN}–${BUFFER_SEC_MAX}，0 = 关闭）`}
-              >
-                <input
-                  type="number"
-                  min={BUFFER_SEC_MIN}
-                  max={BUFFER_SEC_MAX}
-                  step={0.5}
-                  value={o.bufferSec}
-                  onChange={(e) => props.onUpdateOutput({ bufferSec: clampNumber(Number(e.target.value), BUFFER_SEC_MIN, BUFFER_SEC_MAX, 2) })}
-                />
-              </Field>
+            {/*
+              The switch and its delay share a row, switch first: the delay only means
+              anything while buffering is on, and reading them side by side is what
+              makes that dependency visible. The delay stays in the DOM while disabled
+              rather than disappearing, so the row does not reflow when it is toggled.
+            */}
+            <div className="field-grid stream-mode-grid">
+              <Toggle
+                label="双引擎推流"
+                hint="编码 + 推流分离（推荐）"
+                checked={o.buffered}
+                onChange={(c) =>
+                  props.onUpdateOutput({
+                    buffered: c,
+                    // Switching it on with a delay the engine would refuse would leave
+                    // the setting looking enabled while nothing was actually buffered,
+                    // so the value is raised to the smallest one that works.
+                    ...(c ? { bufferSec: clampNumber(o.bufferSec, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT) } : {})
+                  })
+                }
+              />
+              <DelayField
+                label="推流延迟 (秒)"
+                hint={o.buffered ? `可用编码延迟/秒：${BUFFER_SEC_MIN}–${BUFFER_SEC_MAX}` : '需先开启双引擎推流'}
+                value={o.bufferSec}
+                min={BUFFER_SEC_MIN}
+                max={BUFFER_SEC_MAX}
+                disabled={!o.buffered}
+                // The floor is applied when the field is committed, not per keystroke:
+                // a delay of zero has no meaning while buffering, but the intermediate
+                // states of a number being typed are not numbers yet.
+                onCommit={(bufferSec) => props.onUpdateOutput({ bufferSec })}
+              />
             </div>
             <Toggle
               label="实时节奏推流 (-re)"
@@ -1091,6 +1110,84 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint && <em className="field-hint">{hint}</em>}
     </label>
+  )
+}
+
+/* ------------------------------------------------------------------ *
+ * Stream delay (buffered playout)
+ * ------------------------------------------------------------------ */
+
+/**
+ * Numeric field that lets the value be typed freely and clamps it on blur.
+ *
+ * Clamping on every keystroke fights the user: the intermediate states of a number
+ * are not valid numbers (clearing the box reads as 0, and "1" on the way to "12"
+ * trips a floor that is only meant for the committed value), so a floor applied per
+ * keystroke makes the field awkward for anything but a single digit. The committed
+ * value is what gets clamped, and the box is resynced to it so what is displayed is
+ * always what the engine will use.
+ */
+function DelayField({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  disabled,
+  onCommit
+}: {
+  label: string
+  hint: string
+  value: number
+  min: number
+  max: number
+  disabled: boolean
+  onCommit: (value: number) => void
+}): React.JSX.Element {
+  const [draft, setDraft] = useState(String(value))
+  // The stored value can change without the user typing (a preset, or the switch
+  // raising a delay the engine would refuse), so the box follows it while idle.
+  const [editing, setEditing] = useState(false)
+  useEffect(() => {
+    if (!editing) setDraft(String(value))
+  }, [value, editing])
+
+  const commit = (): void => {
+    setEditing(false)
+    // An emptied box falls back to the value already in force, not to the floor: the
+    // user cleared the field rather than asking for a tenth of a second, and silently
+    // dropping the delay to its minimum would look like a bug.
+    const next = clampNumber(Number(draft), min, max, value)
+    setDraft(String(next))
+    if (next !== value) onCommit(next)
+  }
+
+  return (
+    <Field label={label} hint={hint}>
+      <input
+        type="number"
+        min={min}
+        max={max}
+        step={0.1}
+        disabled={disabled}
+        value={draft}
+        onChange={(e) => {
+          setEditing(true)
+          setDraft(e.target.value)
+        }}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.currentTarget.blur()
+          // Escape abandons the edit rather than committing a value the user is
+          // halfway through typing.
+          if (e.key === 'Escape') {
+            setEditing(false)
+            setDraft(String(value))
+            e.currentTarget.blur()
+          }
+        }}
+      />
+    </Field>
   )
 }
 

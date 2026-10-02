@@ -55,6 +55,24 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
     return Math.max(0, Math.min(1, done / totalDuration))
   }, [status.completedSec, totalDuration])
 
+  /**
+   * How far the ENCODER has got, which in buffered mode is ahead of the viewer.
+   *
+   * The gap between the two is the buffer: material already encoded and waiting to
+   * be published. Showing it is what makes the cost of a jump legible — the buffer
+   * cannot be rewound, so a jump has to discard it and reopen the RTMP session. In
+   * the single-process pipeline there is no such gap and this collapses onto
+   * `playedFraction`.
+   */
+  const encodedFraction = useMemo(() => {
+    if (totalDuration <= 0) return 0
+    const encoded = Math.max(status.encodedSec ?? status.completedSec, status.completedSec)
+    return Math.max(0, Math.min(1, encoded / totalDuration))
+  }, [status.encodedSec, status.completedSec, totalDuration])
+
+  const bufferSec = Math.max(0, (status.encodedSec ?? status.completedSec) - status.completedSec)
+  const progressPct = totalDuration > 0 ? Math.max(0, Math.min(100, (status.completedSec / totalDuration) * 100)) : 0
+
   const fraction = dragFraction ?? playedFraction
 
   const fractionFromEvent = useCallback((clientX: number): number => {
@@ -143,6 +161,18 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
             )
           })}
           <div className="timeline-fill" style={{ width: `${fraction * 100}%` }} />
+          {/*
+            The encoder's own position, as a slim green strip along the BOTTOM EDGE of
+            this bar — not a bar of its own: it measures the same axis (position in the
+            playlist) as the blue fill, so it belongs inside the same control, where it
+            reads as "the same timeline, further along" rather than as an unrelated
+            meter. Only in buffered mode, where the encoder is genuinely ahead.
+          */}
+          {status.buffered && (
+            <div className="timeline-encoded" title={`编码进程已到 ${formatDuration(status.encodedSec ?? 0)}；跳转需要丢弃这段缓冲`}>
+              <span className="timeline-encoded-fill" style={{ width: `${encodedFraction * 100}%` }} />
+            </div>
+          )}
           {items.length > 1 &&
             segments.slice(0, -1).map((seg) => (
               <div key={`div-${seg.item.id}`} className="timeline-divider" style={{ left: `${seg.end * 100}%` }} />
@@ -162,6 +192,25 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
           )}
         </div>
         <span className="timeline-time mono">{formatDuration(totalDuration)}</span>
+      </div>
+      {/*
+        Readouts sit under the bar they describe, next to the strip that shows the
+        encoder's position, so the number and the thing it measures are read together.
+      */}
+      <div className="timeline-footer">
+        <div className="timeline-pct mono">
+          <strong>{progressPct.toFixed(1)}%</strong>
+          <span className="timeline-pct-label">总进度</span>
+        </div>
+        {status.buffered && (
+          <div className="buffer-note" title="绿条 = 编码进程已经跑到的位置；跳转需要丢弃这段缓冲，因此会有一次重连">
+            <span className="buffer-swatch" aria-hidden />
+            <span className="buffer-text">
+              缓冲领先 {bufferSec.toFixed(1)}s
+              {status.encoder ? ` · 编码 ${status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—'}` : ''}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   )

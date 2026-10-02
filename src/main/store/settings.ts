@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { AppSettings, OutputSettings } from '@shared/types'
-import { DEFAULT_SETTINGS } from '@shared/defaults'
+import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, DEFAULT_SETTINGS } from '@shared/defaults'
 import { dataDir, ensureDir } from './paths'
 
 let cached: AppSettings | null = null
@@ -40,17 +40,28 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
  * `rtmpUrl` was renamed to `server` when the OBS-compatible control endpoint
  * arrived (OBS calls the field "server"); the old key is still honoured so an
  * existing installation keeps pushing to the address it was configured with.
+ *
+ * The buffered playout used to be selected by a NON-ZERO `bufferSec`, and the delay
+ * had no floor. Both changed: the switch is its own field now and the delay has a
+ * minimum, so a stored file written under the old rule is migrated here — a non-zero
+ * delay means the operator wanted buffering, and a delay the engine would refuse is
+ * raised to the smallest one it accepts instead of silently disabling the feature.
  */
 export function normaliseOutput(raw: Partial<OutputSettings> & { rtmpUrl?: unknown }): OutputSettings {
   const fallback = DEFAULT_SETTINGS.session.output
   const legacy = typeof raw.rtmpUrl === 'string' ? raw.rtmpUrl : ''
   const server = typeof raw.server === 'string' && raw.server.trim() ? raw.server : legacy || fallback.server
   const obs = { ...fallback.obsWebSocket, ...(raw.obsWebSocket ?? {}) }
+  const storedDelay = Number(raw.bufferSec)
+  const buffered = typeof raw.buffered === 'boolean' ? raw.buffered : Number.isFinite(storedDelay) && storedDelay > 0
+  const delay = clampNumber(storedDelay, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT)
   return {
     ...fallback,
     ...raw,
     server,
     streamKey: typeof raw.streamKey === 'string' ? raw.streamKey : fallback.streamKey,
+    buffered,
+    bufferSec: buffered ? clampNumber(delay, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT) : delay,
     obsWebSocket: {
       enabled: obs.enabled === true,
       host: typeof obs.host === 'string' && obs.host.trim() ? obs.host.trim() : fallback.obsWebSocket.host,

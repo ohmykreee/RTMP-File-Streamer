@@ -169,19 +169,40 @@ const openTab = async (tabText, expectLabel, timeoutMs = 6000) => {
 const fieldExpr = (labelStartsWith) => `[...document.querySelectorAll('.settings-body .field')]
   .find(f => (f.querySelector('.field-label')?.textContent ?? '').trim().startsWith(${JSON.stringify(labelStartsWith)}))`
 
-/** Sets a numeric/native input inside the field whose label starts with `labelStartsWith`. */
+/**
+ * Sets a numeric/native input inside the field whose label starts with
+ * `labelStartsWith`, and does not return until the settings model agrees.
+ *
+ * The verify-and-retry is not decoration: `input`/`change` are delivered
+ * synchronously, but React commits asynchronously, so a write can land on an element
+ * whose re-render is still in flight and be dropped. Measured on the video bitrate
+ * field: it stayed at its default while the rest of the same batch of edits went
+ * through, which looked like a preset bug and was a race in this helper.
+ */
 const setFieldValue = async (labelStartsWith, value) => {
-  return ev(`(() => {
-    const field = ${fieldExpr(labelStartsWith)}
-    if (!field) return 'no-field'
-    const input = field.querySelector('input[type="number"], input[type="text"], input[type="password"], input:not([type])')
-    if (!input) return 'no-input'
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
-    setter.call(input, String(${JSON.stringify(String(value))}))
-    input.dispatchEvent(new Event('input', { bubbles: true }))
-    input.dispatchEvent(new Event('change', { bubbles: true }))
-    return 'ok'
-  })()`)
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    await ev(`(() => {
+      const field = ${fieldExpr(labelStartsWith)}
+      if (!field) return 'no-field'
+      const input = field.querySelector('input[type="number"], input[type="text"], input[type="password"], input:not([type])')
+      if (!input) return 'no-input'
+      input.focus()
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+      setter.call(input, String(${JSON.stringify(String(value))}))
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      input.blur()
+      return 'ok'
+    })()`)
+    await delay(200)
+    const applied = await ev(`(() => {
+      const field = ${fieldExpr(labelStartsWith)}
+      const input = field?.querySelector('input[type="number"], input[type="text"], input[type="password"], input:not([type])')
+      return input ? input.value : null
+    })()`)
+    if (applied === String(value)) return 'ok'
+  }
+  return 'not-applied'
 }
 
 const setSelectByValue = async (labelStartsWith, value) => {

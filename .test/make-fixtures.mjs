@@ -3,8 +3,8 @@
  *   clip_a.mp4  20s 1280x720@30 with audio, plus clip_a.srt sidecar subtitles
  *   clip_b.mp4  15s  854x480@25 with audio
  *   clip_c.mp4  12s 1280x720@30 blue with audio (available for manual tests)
- *   clip_d.mp4 120s  640x360@30 grey — long enough that the buffered playout
- *              cannot finish it before a UI skip arrives (see engine-run.cjs)
+ *   clip_d.mp4  45s  640x360@60 — long enough that the buffered playout cannot
+ *              finish it before a UI jump arrives (see engine-run.cjs)
  *
  * Usage: node .test/make-fixtures.mjs
  */

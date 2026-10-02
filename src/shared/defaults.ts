@@ -55,6 +55,20 @@ export const DEFAULT_SUBTITLES: SubtitleRenderSettings = {
   allowTranscodeCopy: false
 }
 
+/**
+ * Floor for the stream delay while the buffered playout is on.
+ *
+ * Not zero: with no material in hand the publisher has nothing to read, so a delay
+ * of zero would stall it on the first hiccup — the buffer exists precisely to be
+ * read from. The single-process pipeline is what "no delay" means, and that is what
+ * the `buffered` switch selects. Declared before `DEFAULT_SESSION` because that is
+ * where the default value comes from.
+ */
+export const BUFFER_SEC_MIN = 0.1
+export const BUFFER_SEC_MAX = 30
+/** Delay applied when the buffered playout is switched on from a smaller value. */
+export const BUFFER_SEC_DEFAULT = 2
+
 export const DEFAULT_SESSION: SessionSettings = {
   video: DEFAULT_VIDEO,
   audio: DEFAULT_AUDIO,
@@ -69,18 +83,21 @@ export const DEFAULT_SESSION: SessionSettings = {
     realtimePacing: true,
     // obs-websocket's own default endpoint, bound to the local machine only.
     obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
-    // How far the encoder may run ahead of the publisher, in seconds. A non-zero
-    // value selects the buffered two-process playout: the encoder runs flat out and
-    // a separate pusher publishes at exactly 1x, so a slow stretch of encoding (a
-    // hardware encoder warming up, a dense subtitle scene) is absorbed by the buffer
-    // instead of stalling every viewer. A new file only restarts the encoder, which
-    // leaves the RTMP session — and the viewers' connections — alone.
+    // Buffered two-process playout: the encoder runs flat out and a separate
+    // publisher puts the result out at exactly 1x, so a slow stretch of encoding is
+    // absorbed by the buffer instead of stalling every viewer. A new file only
+    // restarts the encoder, which leaves the RTMP session — and the viewers'
+    // connections — alone.
     //
     // A skip or a jump is different: the requested file is usually already inside the
     // buffer, behind content the viewer has not watched, and a published timeline
     // cannot be rewound. Those discard the buffer and reopen the RTMP session, so the
     // viewer waits for a reconnect but gets the file they asked for.
-    bufferSec: 2,
+    buffered: true,
+    // How far the encoder may lead the publisher. This is the viewers' extra delay
+    // behind the live edge, so it is kept small by default; raise it to ride out
+    // longer encoding stalls. The engine enforces the floor, not just the UI.
+    bufferSec: BUFFER_SEC_DEFAULT,
     loopPlaylist: false,
     reconnectDelaySec: 3,
     maxReconnectAttempts: 10,
@@ -93,8 +110,6 @@ export const DEFAULT_SESSION: SessionSettings = {
 /** Bounds enforced by the UI and the control server. */
 export const OBS_PORT_MIN = 1024
 export const OBS_PORT_MAX = 65535
-export const BUFFER_SEC_MIN = 0
-export const BUFFER_SEC_MAX = 10
 
 /**
  * How many log entries the run keeps in memory.

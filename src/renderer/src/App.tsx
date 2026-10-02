@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { EngineState, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
 import { useStreamer } from './hooks/useStreamer'
 import PlaylistPanel from './components/PlaylistPanel'
@@ -179,9 +179,6 @@ export default function App(): React.JSX.Element {
     [st]
   )
 
-  const totalDuration = useMemo(() => playlist.reduce((s, i) => s + (i.durationSec || 0), 0), [playlist])
-  const progressPct = totalDuration > 0 ? Math.min(100, (status.completedSec / totalDuration) * 100) : 0
-
   if (st.bridgeMissing) {
     return (
       <div className="boot">
@@ -347,7 +344,8 @@ export default function App(): React.JSX.Element {
         <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
 
         <div className="player-controls">
-          <div className="progress-pct mono">{progressPct.toFixed(1)}%</div>
+          {/* The transport buttons only: the progress percentage belongs to the bar
+              and is rendered under it (see `Timeline`), not among the buttons. */}
           <div className="controls">
             {!isActive ? (
               <button className="btn primary lg" onClick={() => void run(() => st.start())} disabled={!canStart || actionPending}>

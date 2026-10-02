@@ -138,6 +138,11 @@ const output = {
   // previous session (or a manual experiment) left behind in settings.json.
   extraOutputArgs: '',
   realtimePacing: true,
+  // The buffered two-process playout, which is what the app ships with. Stated
+  // explicitly because this file resets the output block: leaving it out would run
+  // the single-process pipeline and quietly stop covering the default path.
+  buffered: true,
+  bufferSec: 2,
   loopPlaylist: false,
   reconnectDelaySec: 2,
   maxReconnectAttempts: 1,
@@ -305,30 +310,89 @@ record('the start button is clickable through the UI', clicked === 'clicked', cl
 /* ---------------- observe live progress in the DOM ---------------- */
 let sawLivePill = false
 let maxPercent = 0
+let sawBufferedSpan = false
+let maxBufferedFraction = 0
+let bufferNote = ''
 const observeDeadline = Date.now() + 30000
 let firstSessionBytes = 0
 
 while (Date.now() < observeDeadline) {
   const snap = await evaluate(`(() => {
     const pill = document.querySelector('.topbar-right .pill[class*="state-"]')
-    const pct = parseFloat(document.querySelector('.progress-pct')?.textContent ?? '0')
+    // The readout lives under the progress bar, next to the bar it describes.
+    const pct = parseFloat(document.querySelector('.timeline-pct')?.textContent ?? '0')
     const stats = document.querySelector('.np-stats')?.innerText ?? ''
-    return JSON.stringify({ state: pill?.innerText ?? '', pct: Number.isFinite(pct) ? pct : 0, stats })
+    /* The encoder's position is a green strip along the bottom edge of the main bar,
+     * so its width is measured against that bar. Selectors are built from strings so
+     * no backslash escaping has to survive the eval. */
+    const STRIP = 'timeline-' + 'encoded'
+    const FILL = 'timeline-encoded-' + 'fill'
+    const NOTE = 'buffer-' + 'note'
+    const bar = document.querySelector('.timeline-bar')
+    const strip = document.querySelector('.' + STRIP)
+    const fill = document.querySelector('.' + FILL)
+    const barWidth = bar ? bar.getBoundingClientRect().width : 0
+    let fillWidth = 0
+    if (fill) {
+      // The fill animates its width, so read the computed value rather than the
+      // in-flight layout box.
+      const w = getComputedStyle(fill).width
+      fillWidth = w.endsWith('px') ? parseFloat(w) : 0
+    }
+    const note = document.querySelector('.' + NOTE)
+    return JSON.stringify({
+      state: pill ? pill.innerText : '',
+      pct: Number.isFinite(pct) ? pct : 0,
+      stats,
+      hasStrip: strip !== null,
+      fillWidth,
+      barWidth,
+      bufferNote: note ? note.innerText : ''
+    })
   })()`).catch(() => '{}')
   const s = JSON.parse(snap)
   if (/推流中|已连接/.test(s.state)) sawLivePill = true
   if (s.pct > maxPercent) maxPercent = s.pct
+  if (s.bufferNote) bufferNote = s.bufferNote
+  if (s.hasStrip && s.barWidth > 0) {
+    sawBufferedSpan = true
+    maxBufferedFraction = Math.max(maxBufferedFraction, s.fillWidth / s.barWidth)
+  }
   // ffmpeg writes the ingest FLV progressively, so the file grows while live.
   const liveFile = path.join(here, 'ui_recv_0.flv')
   if (fs.existsSync(liveFile)) firstSessionBytes = Math.max(firstSessionBytes, fs.statSync(liveFile).size)
   // Progress and on-disk bytes both take a moment to appear, so only stop early
-  // once all three signals have been observed.
-  if (sawLivePill && maxPercent > 12 && firstSessionBytes > 100000) break
+  // once every signal has been observed — including the buffer actually being drawn,
+  // which lags the others because the encoder has to get ahead first.
+  if (sawLivePill && maxPercent > 12 && firstSessionBytes > 100000 && sawBufferedSpan) break
   await delay(600)
 }
 
 record('UI reports the live streaming state', sawLivePill)
 record('progress percentage advances from the engine feed', maxPercent > 5, `${maxPercent.toFixed(1)}%`)
+/*
+ * Captured while the buffer is actually drawn: the end-of-run screenshot is taken
+ * after the session stops, when the bar is full and the buffered span is gone, so it
+ * cannot show the one thing this display exists for.
+ */
+try {
+  const liveShot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
+  fs.writeFileSync(path.join(here, 'gui-buffered.png'), Buffer.from(liveShot.data, 'base64'))
+  note('buffered screenshot saved', path.join(here, 'gui-buffered.png'))
+} catch (err) {
+  note('buffered screenshot failed', String(err))
+}
+/*
+ * The buffered span is the UI's own statement that the encoder is ahead of what has
+ * been published, which is what the two-process playout exists to give. Asserting it
+ * keeps the bar from silently collapsing back to a single fill, and the width says
+ * the buffer is a real quantity rather than a rounding artefact.
+ */
+record(
+  'the strip on the bar shows how far the encoder has run ahead',
+  sawBufferedSpan && maxBufferedFraction > 0.01,
+  `${(maxBufferedFraction * 100).toFixed(1)}% of the bar's width at the widest${bufferNote ? ` · ${bufferNote}` : ''}`
+)
 record(
   'ingest server receives data while the session is live',
   firstSessionBytes > 100000,

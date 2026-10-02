@@ -173,6 +173,8 @@ async function main() {
     return false
   }
 
+  const bufferedRequested = process.env.BUFFER_SEC !== undefined && Number(process.env.BUFFER_SEC) > 0
+
   /* ---- engine wiring ---- */
   let settings = {
     video: {
@@ -215,11 +217,21 @@ async function main() {
       container: 'flv',
       extraOutputArgs: '',
       realtimePacing: true,
-      // 0 = single-process pipeline, which is what the app ships by default. A
-      // non-zero BUFFER_SEC switches the engine to the buffered two-process playout
-      // (encoder ahead of a 1x pusher), which changes what the RTMP session looks
-      // like and therefore what this run can assert.
-      bufferSec: Number(process.env.BUFFER_SEC ?? 0),
+      /*
+       * Which playout to run.
+       *
+       * `BUFFER_SEC` set  -> the buffered two-process playout (encoder flat out ahead
+       *                      of a 1x pusher), with that delay;
+       * `BUFFER_SEC` unset -> the single-process pipeline the `buffered` switch
+       *                      turns off, which is the other half of what needs to keep
+       *                      working.
+       *
+       * Both the switch AND the delay have to be right: the engine requires
+       * `buffered === true` and a non-zero delay, so setting only one of them would
+       * silently run the pipeline this run is not asserting about.
+       */
+      buffered: bufferedRequested,
+      bufferSec: bufferedRequested ? Number(process.env.BUFFER_SEC) : 2,
       obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
       loopPlaylist: false,
       reconnectDelaySec: 2,
@@ -234,8 +246,13 @@ async function main() {
    * numbers: the single-process pipeline republishes to RTMP once per file, while
    * the buffered one keeps ONE publish session alive across every encoder restart.
    */
-  const buffered = settings.output.bufferSec > 0
-  note('playout mode', buffered ? `buffered two-process (bufferSec=${settings.output.bufferSec})` : 'single-process')
+  const buffered = bufferedRequested
+  note(
+    'playout mode',
+    buffered
+      ? `buffered two-process (BUFFER_SEC=${settings.output.bufferSec})`
+      : 'single-process (buffered switch off)'
+  )
 
   const mediaCache = new Map([
     [clipA, infoA],

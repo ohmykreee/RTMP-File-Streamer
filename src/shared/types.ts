@@ -237,12 +237,22 @@ export interface OutputSettings {
   /** obs-websocket compatible control server. */
   obsWebSocket: ObsWebSocketSettings
   /**
-   * Seconds of encoded material the pusher keeps in hand before publishing it.
+   * Run the buffered two-process playout (encoder + publisher).
    *
-   * The encoder runs ahead of the pusher by this much, so a short encoding
-   * stall is paid out of the buffer instead of starving the player. It is also
-   * the extra delay a viewer sits behind the live edge, so it is a trade-off,
-   * not a free win. 0 keeps the old single-process behaviour.
+   * The encoder then runs flat out into a buffer and a separate publisher puts it
+   * out at exactly 1x, so a slow stretch of encoding is absorbed instead of
+   * stalling every viewer. Off keeps the original single-process pipeline, where
+   * ffmpeg itself is paced by `-re` and any dip in encoding speed is felt live.
+   */
+  buffered: boolean
+  /**
+   * How far the encoder may run ahead of the publisher, in seconds.
+   *
+   * This is the viewers' extra delay behind the live edge, and it is a trade-off
+   * rather than a free win: more of it absorbs a longer stall, less of it keeps the
+   * stream closer to real time. Only meaningful when `buffered` is on, where it has
+   * a floor of {@link BUFFER_SEC_MIN} — a buffer of zero would leave the publisher
+   * with nothing to read and stall it immediately.
    */
   bufferSec: number
   /**
@@ -400,6 +410,15 @@ export interface EngineStatus {
     /** How far the encoder currently leads the publisher, in seconds. */
     leadSec: number
   }
+  /**
+   * Session-timeline position the ENCODER has reached, in seconds.
+   *
+   * Buffered mode only, and deliberately a separate figure from `completedSec`:
+   * that one is what the viewer has received, this one is how far ahead the buffer
+   * already extends. The difference is the buffer depth, and drawing both is what
+   * makes "why is a jump not instant" visible instead of surprising.
+   */
+  encodedSec?: number
   frame: number
   /** Item ids in playback order; used by the UI to render the queue. */
   order: string[]

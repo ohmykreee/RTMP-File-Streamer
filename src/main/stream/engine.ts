@@ -54,6 +54,18 @@ const DRAIN_STALL_MS = 45_000
  */
 const PASS_START_MARGIN_SEC = 0.25
 
+/**
+ * Whether this session runs the buffered two-process playout.
+ *
+ * The switch is the authority; the delay only decides how deep the buffer is. A
+ * delay below the floor is clamped rather than treated as "off", because a caller
+ * that asked for buffering and a tiny delay wants buffering — with the smallest
+ * buffer that actually works — not a silent fallback to a different pipeline.
+ */
+function bufferedMode(output: SessionSettings['output']): boolean {
+  return output.buffered === true && output.bufferSec > 0
+}
+
 export class StreamEngine {
   private readonly deps: EngineDeps
   private sink: EngineSink = { status: () => {}, log: () => {}, playlist: () => {} }
@@ -158,6 +170,7 @@ export class StreamEngine {
 
   getStatus(): EngineStatus {
     const total = this.items.reduce((sum, i) => sum + (i.durationSec || 0), 0)
+    const encoded = this.encodedSec()
     const itemStatus: Record<string, PlaylistItemStatus> = {}
     const itemError: Record<string, string> = {}
     for (const i of this.items) {
@@ -185,8 +198,23 @@ export class StreamEngine {
       startedAt: this.startedAt,
       elapsedSec: this.startedAt ? Math.round((Date.now() - this.startedAt) / 1000) : 0,
       buffered: this.playout !== null,
-      ...(this.playout && this.encoderStats ? { encoder: this.encoderStats } : {})
+      ...(this.playout && this.encoderStats ? { encoder: this.encoderStats } : {}),
+      ...(encoded !== null ? { encodedSec: encoded } : {})
     }
+  }
+
+  /**
+   * Session-timeline position the encoder has reached, for the buffer display.
+   *
+   * Taken from the playout rather than derived from a lead measurement: the playout
+   * knows how much it has handed over in total, which stays right across a pass
+   * boundary where the hand-off point jumps forward while the viewer does not. Never
+   * reported below what has already been published, so the buffer can only be drawn
+   * as a span ahead of the viewer. Buffered mode only.
+   */
+  private encodedSec(): number | null {
+    if (!this.playout || !this.encoderStats) return null
+    return Math.max(this.completedSec, this.playout.getEncodedSec())
   }
 
   private emitStatus(): void {
@@ -421,15 +449,43 @@ export class StreamEngine {
         }
       }
       this.log('info', '播放列表全部完成，串流结束。')
-      await this.finishSession()
+      await this.finishSession(true)
       return
     }
     await this.launchCurrentFrom(index, 0, reason)
   }
 
-  /** Closes the RTMP session and returns the engine to idle. */
-  private async finishSession(): Promise<void> {
+  /**
+   * Closes the RTMP session and returns the engine to idle.
+   *
+   * `playedOut` says whether the queue actually ran to the end. Entry statuses are
+   * driven by the published position (see `markPlayedThrough`), which by design marks
+   * an entry done only when the pusher moves PAST it — so the final entry is still
+   * `live` when the queue finishes. This is where that last one is closed out, and
+   * only when the queue really did play out: after a manual stop or a failure, an
+   * entry that never aired must not be reported as finished.
+   */
+  private async finishSession(playedOut = false): Promise<void> {
     this.drain = null
+    /*
+     * Resolve the queue BEFORE anything is awaited.
+     *
+     * `state = 'idle'` is what tells the UI (and the tests) the session is over, and
+     * it is reached only after the publisher is stopped. Marking the entries after
+     * that await leaves a window where the session already reads as finished while
+     * the queue still shows the last entry as `live` — a snapshot taken in that window
+     * says the run ended without playing its final file.
+     */
+    if (playedOut) {
+      let changed = false
+      for (const item of this.items) {
+        if (item.status === 'live' || item.status === 'preparing' || item.status === 'pending') {
+          item.status = 'done'
+          changed = true
+        }
+      }
+      if (changed) this.emitPlaylist()
+    }
     await this.killChild(true)
     // The playout owns the RTMP session, so ending the run has to end it too. It
     // must also be dropped here: a kept-but-stopped playout still holds its dead
@@ -509,11 +565,11 @@ export class StreamEngine {
 
     /* Two-process playout: encoder ahead of a pacing pusher.
      *
-     * With a buffer configured the session runs as encoder -> TS buffer ->
-     * pusher (see playout.ts). The pusher owns the RTMP session and outlives
-     * every encoder restart, which is what makes a seek cheap and absorbs short
-     * encoding stalls. */
-    if (settings.output.bufferSec > 0) {
+     * With buffering enabled the session runs as encoder -> TS buffer -> pusher
+     * (see playout.ts). The pusher owns the RTMP session and outlives every encoder
+     * restart, which is what makes a file change cheap and absorbs short encoding
+     * stalls. */
+    if (bufferedMode(settings.output)) {
       await this.launchBuffered(index, item, media, positionSec, reason, generation)
       return
     }
@@ -718,7 +774,16 @@ export class StreamEngine {
 
     this.state = 'live'
     this.connected = true
-    this.setItemStatus(index, 'live')
+    /*
+     * The entry is marked `preparing`, not `live`.
+     *
+     * "Live" means the viewer can see it, and in this pipeline being handed to the
+     * encoder is not that: the encoder runs ahead, so an entry can be fully encoded
+     * while the viewer is still several files back. `markPlayedThrough` promotes it
+     * to `live` when the publisher actually reaches it, which is the same rule that
+     * marks earlier entries `done`.
+     */
+    this.setItemStatus(index, 'preparing')
     this.emitStatus()
   }
 
@@ -742,6 +807,14 @@ export class StreamEngine {
    * position is that value minus the offset of the pass the pusher has reached.
    */
   private onPublished(seconds: number): void {
+    /*
+     * A publisher that is being torn down keeps reporting for a moment, and those
+     * late blocks still name the pass that just aired. Acting on them re-opens an
+     * entry the session already closed out — measured: the final entry was marked
+     * done by `finishSession` and then flipped straight back to `live` by the last
+     * report of the dead pusher, so the queue claimed the run ended mid-file.
+     */
+    if (this.stopping || this.state === 'idle') return
     // Progress, not elapsed time, is what proves the pusher is still working, so
     // the drain stall guard measures inactivity rather than duration.
     if (seconds > this.publishedSec && this.drain) this.drain.lastProgressAt = Date.now()
@@ -756,6 +829,7 @@ export class StreamEngine {
       this.itemDuration = live.itemDurationSec
       this.currentIndex = live.index
       this.setPosition(live.startSec + Math.max(0, seconds - live.tsOffset))
+      this.markPlayedThrough(live)
     }
     // In buffered mode the live figures belong to the *encoder* (which runs at its
     // own pace, above 1x), so they travel separately instead of being mixed into
@@ -764,6 +838,44 @@ export class StreamEngine {
     if (enc) this.encoderStats = enc
     this.emitStatus()
     this.checkDrainComplete()
+  }
+
+  /**
+   * Marks playlist entries as aired, driven ONLY by the published position.
+   *
+   * This is the viewer's progress, and it is the only progress a playlist status may
+   * reflect in either pipeline: what the encoder has finished is not what has been
+   * sent, and in buffered mode the two can be a long way apart — the encoder can have
+   * the whole queue done while the viewer is still in the first file. Marking on the
+   * encoder's exit used to paint the entire list "已完成" within seconds of starting
+   * and leave it there for the rest of the session.
+   *
+   * The current entry is reported `live`; every entry the pusher has passed is
+   * `done`. Entries already resolved by the user (`skipped`) or by an error keep
+   * whatever they were given — a skip is a decision, not a playback state, and
+   * overwriting it would make the queue look like it played everything.
+   */
+  private markPlayedThrough(live: { index: number; startSec: number; tsOffset: number }): void {
+    let changed = false
+    for (let i = 0; i < this.items.length; i += 1) {
+      const item = this.items[i]
+      /*
+       * The session timeline only moves forward, so an entry the viewer has already
+       * passed can never become current again. Holding onto `done` is what makes the
+       * queue immune to a report that arrives out of order or after the fact.
+       */
+      const desired: PlaylistItemStatus | null =
+        item.status === 'done' ? 'done' : i < live.index ? 'done' : i === live.index ? 'live' : null
+      // Entries the user resolved (`skipped`) or that failed keep what they were
+      // given: a skip is a decision, not a playback state, and overwriting it would
+      // make the queue claim it played something it never did.
+      if (desired === null || item.status === 'skipped' || item.status === 'error') continue
+      if (item.status !== desired) {
+        item.status = desired
+        changed = true
+      }
+    }
+    if (changed) this.emitPlaylist()
   }
 
   /**
@@ -798,8 +910,10 @@ export class StreamEngine {
     const drain = this.drain
     if (!drain || this.stopping) return
     const now = Date.now()
+    let playedOut = false
     if (this.publishedSec >= drain.waitingForSec - DRAIN_TOLERANCE_SEC) {
       this.log('info', `缓冲已全部播出（${this.publishedSec.toFixed(1)}s），串流结束。`)
+      playedOut = true
     } else if (now - drain.lastProgressAt > DRAIN_STALL_MS) {
       this.log(
         'warn',
@@ -810,7 +924,8 @@ export class StreamEngine {
     } else {
       return
     }
-    void this.finishSession()
+    // The drained queue itself is the queue played out; a stalled publisher is not.
+    void this.finishSession(playedOut)
   }
 
   /** An encoder pass ended: what it produced is now part of the stream. */
@@ -826,7 +941,15 @@ export class StreamEngine {
       this.emitStatus()
     }
     this.log('info', `✔ 「${item?.name ?? '文件'}」编码完成，已交给推流进程（${materialSec.toFixed(1)}s）。`)
-    this.setItemStatus(index, 'done')
+    /*
+     * Being encoded is NOT being streamed, so the entry is not marked done here.
+     *
+     * In buffered mode the encoder hands over a whole file long before the viewer
+     * finishes it — it can have the entire queue done while the viewer is still in
+     * the first entry. The status is advanced from the published position instead
+     * (see `markPlayedThrough`), which is what the viewer actually received and is
+     * equally right for the single-process pipeline.
+     */
     const gapMs = Math.max(0, Math.min(30, this.deps.getSettings().output.gapBetweenItemsSec ?? 1)) * 1000
     this.restartTimer = setTimeout(() => {
       void this.advanceTo(index + 1, 'finish')
