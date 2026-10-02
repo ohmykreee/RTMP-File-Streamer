@@ -555,7 +555,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   args.push('-progress', 'pipe:1', '-nostats')
 
   const format = CONTAINER_MUXER[out.container]
-  const target = req.outputOverride ?? buildRtmpTarget(out.rtmpUrl, out.streamKey)
+  const target = req.outputOverride ?? buildRtmpTarget(out.server, out.streamKey)
   if (!req.outputOverride) {
     // Let ffmpeg retry the socket instead of tearing the whole pipeline down.
     args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', String(Math.max(1, out.reconnectDelaySec)))

@@ -1,8 +1,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Preset, PresetLocation, SessionSettings } from '@shared/types'
+import type { OutputSettings, Preset, PresetLocation, SessionSettings } from '@shared/types'
 import { DEFAULT_SESSION } from '@shared/defaults'
 import { dataDir, ensureDir, getAppRoot } from './paths'
+import { normaliseOutput } from './settings'
 
 /** Presets live beside the other state files in `<app>/Data`. */
 export function getPresetsFile(): string {
@@ -46,7 +47,9 @@ function normalise(raw: unknown): Preset | null {
     video: { ...DEFAULT_SESSION.video, ...(s.video ?? {}) },
     audio: { ...DEFAULT_SESSION.audio, ...(s.audio ?? {}) },
     subtitles: { ...DEFAULT_SESSION.subtitles, ...(s.subtitles ?? {}) },
-    output: { ...DEFAULT_SESSION.output, ...(s.output ?? {}) }
+    // Same normalisation as the settings file, so a preset written before the
+    // delay / obs-websocket settings existed still loads with sane values.
+    output: normaliseOutput((s.output ?? {}) as Partial<OutputSettings>)
   }
 
   return {

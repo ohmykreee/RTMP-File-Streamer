@@ -2,7 +2,11 @@
  * Builds the artefacts the verification harnesses need:
  *   .test/builder.bundle.mjs  - command builder for the plain-node harness
  *   .test/probe.bundle.mjs    - ffprobe wrapper for the plain-node harness
+ *   .test/rtmp.bundle.mjs     - RTMP target composition for the same harness
  *   out/main/test-entry.cjs   - engine + builder for the Electron integration run
+ *
+ * (`.test/obs.bundle.mjs` is bundled by harness.mjs itself, next to the checks
+ * that use it.)
  *
  * Usage: node .test/build-bundles.mjs
  */

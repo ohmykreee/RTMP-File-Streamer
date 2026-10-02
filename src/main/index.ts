@@ -4,6 +4,7 @@ import type { AppSettings, LogEntry, PlaylistItem } from '@shared/types'
 import { IPC } from '@shared/types'
 import { resolveBinaries } from './ffmpeg/capabilities'
 import { registerIpc, type AppServices } from './ipc'
+import { ObsWebSocketServer } from './obs/websocket'
 import { StreamEngine } from './stream/engine'
 import { getSettingsPath, loadSettings, saveSettings } from './store/settings'
 import { getPresetLocation, listPresets } from './store/presets'
@@ -93,8 +94,7 @@ engine.setSink({
 const services: AppServices = {
   getWindow: () => mainWindow,
   getSettings: () => loadSettings(),
-  mergeSettings: (patch: Partial<AppSettings>) => saveSettings(patch),
-  getPlaylist: () => playlist,
+  mergeSettings: (patch: Partial<AppSettings>) => saveSettings(patch),  getPlaylist: () => playlist,
   addItems: async (paths: string[]) => {
     const s = loadSettings()
     const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)
@@ -169,8 +169,41 @@ const services: AppServices = {
   engineSkipNext: () => engine.skipNext(),
   engineSeek: (positionSec: number) => engine.seek(positionSec),
   engineJumpToItem: (itemId: string) => engine.jumpToItem(itemId),
-  enginePreviewCommand: () => engine.getCommandPreview()
+  enginePreviewCommand: () => engine.getCommandPreview(),
+  obsStatus: () => obs.status(),
+  obsApply: () => obs.apply()
 }
+
+/* ------------------------------------------------------------------ *
+ * obs-websocket compatible control server
+ * ------------------------------------------------------------------ */
+
+/**
+ * Remote control for the stream, so OBS clients can drive this app.
+ *
+ * It shares the engine and the settings store with the UI: `StartStream` starts
+ * the same session the 「开始串流」 button does, and `SetStreamServiceSettings`
+ * writes the address/key straight into the session settings (which the renderer
+ * picks up on its next settings read).
+ */
+const obs = new ObsWebSocketServer({
+  settings: () => loadSettings().session.output.obsWebSocket,
+  streamTarget: () => {
+    const out = loadSettings().session.output
+    return { server: out.server, streamKey: out.streamKey }
+  },
+  applyStreamTarget: (patch) => {
+    const current = loadSettings()
+    saveSettings({ session: { ...current.session, output: { ...current.session.output, ...patch } } })
+    // The renderer keeps its own copy of the settings, so tell it to re-read
+    // them; otherwise the RTMP tab would still show the old destination.
+    mainWindow?.webContents.send(IPC.evtSettings, saveSettings({}))
+  },
+  engineState: () => engine.getStatus().state,
+  startStream: () => engine.start(),
+  stopStream: () => engine.stop(),
+  log: (level, message) => pushLog(level, message)
+})
 
 /* ------------------------------------------------------------------ *
  * Window
@@ -251,6 +284,10 @@ if (!app.requestSingleInstanceLock()) {
     createWindow()
     registerIpc(services)
 
+    // Bring the control endpoint up if it was left enabled; errors are reported
+    // through the log and surfaced in the RTMP tab.
+    obs.apply()
+
     /* Restore the queue and re-validate each entry. */
     const persisted = loadPersistedPlaylist()
     if (persisted.length > 0) {
@@ -323,6 +360,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('window-all-closed', () => {
+    obs.stop()
     void engine.stop().finally(() => {
       if (process.platform !== 'darwin') app.quit()
     })
@@ -336,5 +374,6 @@ if (!app.requestSingleInstanceLock()) {
     persistPlaylist(playlist)
     pushLog('info', '应用退出，日志会话已关闭。')
     closeLogSession()
+    obs.stop()
   })
 }

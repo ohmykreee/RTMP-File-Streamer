@@ -12,8 +12,14 @@ interface LogPanelProps {
   onOpenLogsDir: () => void
 }
 
-const LEVELS: { key: LogLevel | 'all'; label: string }[] = [
-  { key: 'all', label: '全部' },
+/**
+ * The level filters, in button order.
+ *
+ * 「全部」 is not one of them: it is the "no filter" state and is handled
+ * separately from the level toggles below it in the toolbar.
+ */
+const LEVELS: { key: LogLevel; label: string }[] = [
+  { key: 'debug', label: '调试' },
   { key: 'info', label: '信息' },
   { key: 'warn', label: '警告' },
   { key: 'error', label: '错误' },
@@ -28,21 +34,43 @@ const LEVEL_TAG: Record<LogLevel, string> = {
   ffmpeg: 'FFM'
 }
 
-export default function LogPanel({ logs, onClear, expanded, onToggle, logInfo, onOpenLogsDir }: LogPanelProps): React.JSX.Element {
-  const [filter, setFilter] = useState<LogLevel | 'all'>('all')
+export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogsDir }: LogPanelProps): React.JSX.Element {
+  /**
+   * Selected levels. An empty set means 「全部」 is active, which makes the two
+   * states mutually exclusive by construction:
+   *   - pressing 「全部」 clears every level button;
+   *   - pressing a level leaves the "all" state (there is nothing to unselect
+   *     there) and toggles that single level on or off.
+   * Levels combine as OR, so 「警告」+「错误」 shows both.
+   */
+  const [levels, setLevels] = useState<Set<LogLevel>>(() => new Set())
   const [autoscroll, setAutoscroll] = useState(true)
   const endRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
 
+  const showingAll = levels.size === 0
+
   const visible = useMemo(() => {
-    if (filter === 'all') return logs
-    if (filter === 'info') return logs.filter((l) => l.level === 'info' || l.level === 'debug')
-    return logs.filter((l) => l.level === filter)
-  }, [logs, filter])
+    if (showingAll) return logs
+    // `debug` is a level of its own: 「信息」 no longer pulls it in.
+    return logs.filter((l) => levels.has(l.level))
+  }, [logs, levels, showingAll])
 
   useEffect(() => {
     if (expanded && autoscroll) endRef.current?.scrollIntoView({ block: 'end' })
   }, [visible, expanded, autoscroll])
+
+  const toggleLevel = (key: LogLevel): void => {
+    setLevels((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  /** Visible / total, so an active filter cannot look like a lost log. */
+  const countLabel = showingAll ? `${logs.length}` : `${visible.length}/${logs.length}`
 
   return (
     <section className={`logs${expanded ? ' expanded' : ' collapsed'}`}>
@@ -50,12 +78,28 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, logInfo, o
         <span className="logs-title">
           <span className={`chevron${expanded ? ' open' : ''}`}>▸</span>
           运行日志
-          <span className="muted small">({logs.length})</span>
+          <span className="muted small">({countLabel})</span>
         </span>
-        <div className="logs-actions" onClick={(e) => e.stopPropagation()}>
+        {/* The toolbar belongs to the log body: while the panel is collapsed it
+            is hidden, and the header is only the affordance to open it. */}
+        <div className="logs-actions" hidden={!expanded} onClick={(e) => e.stopPropagation()}>
           <div className="seg">
+            <button
+              type="button"
+              className={`seg-btn${showingAll ? ' active' : ''}`}
+              onClick={() => setLevels(new Set())}
+              title="显示全部日志（同时取消下面所有等级筛选）"
+            >
+              全部
+            </button>
             {LEVELS.map((l) => (
-              <button key={l.key} className={`seg-btn${filter === l.key ? ' active' : ''}`} onClick={() => setFilter(l.key)}>
+              <button
+                key={l.key}
+                type="button"
+                className={`seg-btn${levels.has(l.key) ? ' active' : ''}`}
+                onClick={() => toggleLevel(l.key)}
+                title={`只看「${l.label}」日志（可多选）`}
+              >
                 {l.label}
               </button>
             ))}

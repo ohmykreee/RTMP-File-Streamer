@@ -90,7 +90,7 @@ fs.writeFileSync(
       ffprobePath: '',
       session: {
         output: {
-          rtmpUrl: `rtmp://127.0.0.1:${STREAM_PORT}/live/`,
+          server: `rtmp://127.0.0.1:${STREAM_PORT}/live/`,
           streamKey: 'lock-test-key',
           container: 'flv',
           extraOutputArgs: '',

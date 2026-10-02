@@ -43,7 +43,7 @@
 - 保存时把**视频编码、音频编码、字幕、输出、高级五个选项卡的全部设置**写入一个命名预设
 - **推流目标（RTMP 地址与串流密钥）随预设一起明文保存**：套用预设会完整还原整组配置，包括往哪里推流
 - 同名保存即覆盖；应用预设会一次性替换全部设置
-- 手动改动任意设置后，下拉框自动回到「（当前设置为自定义）」，不会假装仍匹配某个预设
+- 手动改动任意设置后，下拉框自动回到「（自定义）」，不会假装仍匹配某个预设
 
 存储位置：所有状态（设置 / 播放列表 / 预设）都写在**程序目录下的 `Data` 文件夹**，不使用系统漫游配置目录：
 
@@ -205,13 +205,16 @@ src/
     src/components/      PlaylistPanel / SettingsPanel / Timeline / LogPanel
     src/styles.css       深色主题样式
 .test/                   自动化验证
+  unit.mjs               非 Electron 测试入口：fixtures → 打包 → 断言
+  harness.mjs            断言主体（命令层 / 真实转码 / 本地 RTMP ingest / 时间戳）
+  obs-websocket.mjs      obs-websocket 端点验证（真实 TCP 客户端跑完整握手与请求）
+  e2e.mjs                Electron 测试入口：node .test/e2e.mjs [ui|features|presets|layout|datadir|engine]
   make-fixtures.mjs      生成测试视频
-  build-bundles.mjs      打包被测模块
-  harness.mjs            命令层验证（真实转码/字幕渲染）
-  engine-run.cjs         引擎集成验证（Electron 内驱动）
+  build-bundles.mjs      打包被测模块（命令构建器 / ffprobe 封装 / 引擎测试入口）
+  engine-run.cjs         引擎集成验证（Electron 内驱动，不建窗口）
   features-e2e.mjs       拖入/锁定/密钥掩码/对齐/日志留存 端到端验证
-  ui-e2e.mjs             UI 端到端验证（CDP 驱动真实窗口）
-  preset-e2e.mjs         预设读写与分辨率/码率控件验证
+  ui-e2e.mjs             UI 端到端验证（CDP 驱动真实窗口，含日志面板与筛选行为）
+  preset-e2e.mjs         预设读写、RTMP/obs-websocket 控件与分辨率/码率控件验证
   data-dir-e2e.mjs       Data 目录位置验证（开发构建 + 打包版 + 移动后）
   layout-e2e.mjs         切换选项卡时播放区不位移的布局回归验证
   harness-util.mjs       测试看门狗（防卡死）与残留进程清理
@@ -227,25 +230,26 @@ data/                    运行期状态（不入库，见 .gitignore 的 Data/�
 ## 7. 自动化验证
 
 ```bash
-pnpm test                # 全套：类型检查 → 构建 → 命令层 → 引擎 → 功能 → UI → 预设/目录/布局
-pnpm run test:unit       # 命令构建 + 真实转码/字幕渲染校验
-pnpm run test:engine     # 在 Electron 内驱动真实 StreamEngine 推流到本地 ingest
-pnpm run test:features   # 拖入路径解析 / 串流锁定 / 密钥掩码 / 对齐 / 日志留存
-pnpm run test:ui         # 启动真实应用窗口，用 CDP 模拟点击并校验收到的流
-pnpm run test:presets    # 预设 + Data 目录 + 布局，共三组
-pnpm run test:layout     # 只跑布局回归
-pnpm run test:datadir    # 只跑 Data 目录位置验证
+pnpm test                # 默认跑 test:unit
+pnpm run test:unit       # 非 Electron 全部：命令构建 + 真实转码/字幕渲染 + 本地推流 + obs-websocket
+pnpm run test:e2e        # Electron 全部套件（ui → features → presets → layout → datadir → engine）
+pnpm run test:e2e ui     # 只跑指定套件，可写多个：node .test/e2e.mjs ui presets
+pnpm run test:ci         # 类型检查 → 构建 → test:unit → test:e2e
 ```
 
-测试自行生成 fixture 视频（`node .test/make-fixtures.mjs`），并用 `ffmpeg -listen 1` 充当下游 RTMP 服务器，因此不需要外部流媒体服务。所有端到端测试都装有**看门狗**（超时即杀掉残留进程并以退出码 3 报告卡住的步骤），UI 驱动全部走 CDP 程序化调用；测试启动的应用以 `STREAMER_E2E=1` 运行——窗口移出屏幕并开启点击穿透，物理鼠标不会干扰测试。
+`test:unit` 会按需生成 fixture、打包被测模块，再跑断言；`test:e2e` 需要先 `pnpm build`（`test:ci` 已包含）。两套都会在首个失败处停下并给出失败项，`e2e` 还带看门狗：某个套件超时会被杀掉并以非零码报告，不会挂住整轮。
 
-已验证内容（`pnpm test` 全绿，共 147 项）：
+测试用 `ffmpeg -listen 1` 充当下游 RTMP 服务器，因此不需要外部流媒体服务。所有端到端测试都装有**看门狗**（超时即杀掉残留进程并以退出码 3 报告卡住的步骤），UI 驱动全部走 CDP 程序化调用；测试启动的应用以 `STREAMER_E2E=1` 运行——窗口移出屏幕并开启点击穿透，物理鼠标不会干扰测试。
 
-- **命令层 42 项**：媒体探测、外挂字幕自动关联、字幕滤镜转义（Windows 盘符冒号、样式逗号）、分辨率三态（关闭 / 显式宽高 / 高度自适应）与非法几何回退、CBR/VBR/CRF 参数、硬件编码器与像素格式映射、跳转与音画偏移的时间戳语义、RTMP 地址拼接，并**实际执行生成的命令**再解码校验产出
+已验证内容（`pnpm run test:unit` 74 项 + `pnpm run test:e2e` 全绿）：
+
+- **命令层与转码**：媒体探测、外挂字幕自动关联、字幕滤镜转义（Windows 盘符冒号、样式逗号）、分辨率三态（关闭 / 显式宽高 / 高度自适应）与非法几何回退、CBR/VBR/CRF 参数、硬件编码器与像素格式映射、跳转与音画偏移的时间戳语义、RTMP 地址拼接，并**实际执行生成的命令**再解码校验产出
 - **字幕渲染**：抽取烧录后画面，用 `signalstats` 验证字幕区域出现高亮字形像素（YMAX 235，中文正常渲染，见 `docs/subtitle-burn-in.png`）
+- **本地推流**：`ffmpeg -listen 1` 接收真实推送，校验进度单调递增、`-re` 实时节奏、收到可解码的音视频
+- **obs-websocket 端点 22 项**：用真实 TCP 客户端完成 obs-websocket v5 握手（Hello/Identify/Identified、RFC 6455 accept key、子协议协商、密码 SHA256 挑战与错误密码拒绝），校验 `SetStreamServiceSettings` 写入推流地址与密钥、`StartStream`/`StopStream` 驱动引擎、`GetStreamStatus` 反映实时状态、未实现的请求返回通用成功、未掩码帧以 1002 关闭连接
 - **引擎 19 项**：两文件自动续播（20s + 15s 全部送达并解码）、进度单调递增、`-re` 实时节奏、跳转后仅重推剩余 8 秒、跳过目标完整送达、无错误日志
-- **UI 端到端 22 项**：窗口启动、播放列表与字幕关联恢复、点击「开始串流」→ RTMP ingest 收到 5.8MB、进度百分比推进、点击「下一个文件」切换到第二项、会话结束回到空闲、渲染进程无未捕获异常，以及状态确实写在 `Data/` 且未写入 Roaming
-- **预设 23 项**：预设栏渲染、在五个选项卡里改设置后保存、`presets.json` 落在 `Data/`、预设含全部四组设置且**不含 RTMP 凭据**、套用内置预设覆盖设置、套用自定义预设完整还原、删除后从磁盘消失、分辨率控件结构（高度框在勾选后禁用、宽度框仍可编辑）、码率单位切换与 Mbps→kbps 换算
+- **UI 端到端 27 项**：窗口启动、播放列表与字幕关联恢复、点击「开始串流」→ RTMP ingest 收到数据、进度百分比推进、点击「下一个文件」切换到第二项、会话结束回到空闲、**日志面板收起时工具栏隐藏 / 展开后出现「全部 + 调试/信息/警告/错误/FFmpeg」**、等级筛选多选与「全部」互斥、渲染进程无未捕获异常，以及状态确实写在 `Data/` 且未写入 Roaming
+- **预设 32 项**：预设栏渲染、在五个选项卡里改设置后保存、`presets.json` 落在 `Data/`、预设含全部四组设置（推流地址与密钥按设计以明文保存）、套用内置预设覆盖设置、套用自定义预设完整还原、**obs-websocket 开关/地址/端口/密码落盘并随预设还原**、开关能启停端点且改端口会重新绑定、删除后从磁盘消失、分辨率控件结构（高度框在勾选后禁用、宽度框仍可编辑）、码率单位切换与 Mbps→kbps 换算
 - **Data 目录 33 项**：分别在开发构建、打包后的 `win-unpacked`、以及**整体复制到别处后的目录**三种情况下，校验 `Data/` 位于程序目录内、`settings.json`/`playlist.json`/`presets.json` 确实写入其中、缓存也在 `Data/Cache`、且 Roaming 目录完全没有被写入
 - **布局回归 8 项**：在五个选项卡间切换时逐次测量播放条与进度条的 `getBoundingClientRect`，要求位置与高度**完全一致**（播放条固定在 746px、进度条固定在 786px），同时确认各选项卡内容高度确实不同（611 / 171 / 88 / 427 / 331 px）以证明测量有效，并验证高内容选项卡是在面板内部滚动而不是把播放区推下去
 

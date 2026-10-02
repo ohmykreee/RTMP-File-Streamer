@@ -62,11 +62,13 @@ export const DEFAULT_SESSION: SessionSettings = {
   output: {
     // The address carries the full application path (trailing `/` included);
     // the stream key is appended directly to it, with no extra separator.
-    rtmpUrl: 'rtmp://127.0.0.1/live/',
+    server: 'rtmp://127.0.0.1/live/',
     streamKey: '',
     container: 'flv',
     extraOutputArgs: '',
     realtimePacing: true,
+    // obs-websocket's own default endpoint, bound to the local machine only.
+    obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' },
     loopPlaylist: false,
     reconnectDelaySec: 3,
     maxReconnectAttempts: 10,
@@ -75,6 +77,10 @@ export const DEFAULT_SESSION: SessionSettings = {
     dropLateFrames: false
   }
 }
+
+/** Bounds enforced by the UI and the control server. */
+export const OBS_PORT_MIN = 1024
+export const OBS_PORT_MAX = 65535
 
 /** Resolution presets offered by the two-field scale control. */
 export const SCALE_PRESETS: { label: string; width: number; height: number }[] = [

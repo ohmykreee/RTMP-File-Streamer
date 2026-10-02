@@ -200,6 +200,12 @@ code {
   background: transparent;
 }
 
+/* Live "server is listening" badge of the obs-websocket block. */
+.pill.ok {
+  border-color: rgba(63, 185, 80, 0.5);
+  color: var(--success);
+}
+
 .state-dot {
   width: 7px;
   height: 7px;
@@ -1435,6 +1441,12 @@ input[type='color'] {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+/* The toolbar is part of the log body: collapsed, the header is only the
+   affordance to open the panel, so the filter row goes away with it. */
+.logs-actions[hidden] {
+  display: none;
 }
 
 .seg {

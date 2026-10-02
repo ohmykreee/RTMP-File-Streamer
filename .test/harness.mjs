@@ -3,16 +3,21 @@
  *
  * It loads the REAL command builder that the app bundles (out/main/index.js
  * contains it, but that file also imports electron, so we re-bundle just the
- * builder with esbuild first — see .test/build-builder.mjs) and executes the
+ * builder with esbuild first — see .test/build-bundles.mjs) and executes the
  * resulting ffmpeg argument vectors against real media files.
  *
- * Usage: node --experimental-strip-types .test/harness.mjs
+ * Sections: command vectors, real transcodes, a local RTMP ingest, sync-offset
+ * measurements, and the obs-websocket endpoint (`.test/obs-websocket.mjs`).
+ * Run it through `.test/unit.mjs`, which prepares the fixtures and bundles.
+ *
+ * Usage: node .test/harness.mjs
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { installWatchdog, phase } from './harness-util.mjs'
+import { obsWebSocketChecks } from './obs-websocket.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -22,6 +27,32 @@ const FFPROBE = process.env.FFPROBE_BIN ?? 'ffprobe'
 // The harness runs real transcodes; a wedged ffmpeg must abort the run rather
 // than hang the suite forever (exit code 3 = timed out).
 const disarmWatchdog = installWatchdog(600000, 'test:unit')
+
+/*
+ * `src/main/obs/websocket.ts` is TypeScript with the repo's `@shared` aliases,
+ * so it is bundled here the same way build-bundles.mjs bundles the builder.
+ */
+function bundle(entry, outfile) {
+  const candidates = ['@esbuild+win32-x64@0.25.12', '@esbuild+win32-x64@0.28.2']
+  const store = path.join(root, 'node_modules', '.pnpm')
+  let exe = null
+  const dirs = fs.existsSync(store) ? fs.readdirSync(store).filter((d) => d.startsWith('@esbuild+win32-x64@')) : []
+  for (const dir of [...candidates.filter((c) => dirs.includes(c)), ...dirs]) {
+    const candidate = path.join(store, dir, 'node_modules', '@esbuild', 'win32-x64', 'esbuild.exe')
+    if (fs.existsSync(candidate)) {
+      exe = candidate
+      break
+    }
+  }
+  if (!exe) throw new Error('esbuild not found; run `pnpm install` first')
+  const res = spawnSync(
+    exe,
+    [entry, '--bundle', '--platform=node', '--format=esm', `--outfile=${outfile}`, '--alias:@shared=./src/shared', '--alias:@main=./src/main', '--log-level=warning'],
+    { cwd: root, encoding: 'utf8' }
+  )
+  if (res.status !== 0) throw new Error(`bundle failed for ${entry}:\n${res.stderr || res.stdout}`)
+  return outfile
+}
 
 const builderUrl = pathToFileURL(path.join(here, 'builder.bundle.mjs')).href
 const { buildStreamCommand, buildTestCommand } = await import(builderUrl)
@@ -93,7 +124,7 @@ const baseSession = {
     allowTranscodeCopy: false
   },
   output: {
-    rtmpUrl: 'rtmp://127.0.0.1:1935/live',
+    server: 'rtmp://127.0.0.1:1935/live',
     streamKey: 'test',
     container: 'flv',
     extraOutputArgs: '',
@@ -260,7 +291,7 @@ const builtRtmp = buildStreamCommand({
   ffmpegPath: FFMPEG,
   media: infoB,
   item: { ...itemB, mode: 'off' },
-  settings: { ...baseSession, output: { ...baseSession.output, rtmpUrl: 'rtmp://a.example.com/live/', streamKey: 'KEY-123' } },
+  settings: { ...baseSession, output: { ...baseSession.output, server: 'rtmp://a.example.com/live/', streamKey: 'KEY-123' } },
   startPositionSec: 0
 })
 record('address with trailing slash + key stays a single slash', builtRtmp.args.at(-1) === 'rtmp://a.example.com/live/KEY-123', builtRtmp.args.at(-1))
@@ -428,7 +459,7 @@ await new Promise((r) => setTimeout(r, 1200))
 
 const rtmpSettings = {
   ...baseSession,
-  output: { ...baseSession.output, rtmpUrl: `rtmp://127.0.0.1:${listenPort}/live/`, streamKey: 'test', realtimePacing: true, maxReconnectAttempts: 0 }
+  output: { ...baseSession.output, server: `rtmp://127.0.0.1:${listenPort}/live/`, streamKey: 'test', realtimePacing: true, maxReconnectAttempts: 0 }
 }
 const builtRtmpPush = buildStreamCommand({
   ffmpegPath: FFMPEG,
@@ -650,6 +681,16 @@ const offItem = { ...itemA, mode: 'off' }
   const ok = measured && Math.abs(measured.contentSec - 12) < 1.2
   record('seek to 8s with burn-in yields ~12s', Boolean(ok), measured ? `content=${measured.contentSec?.toFixed(2)}s` : 'no output')
 }
+
+/* ------------------------------------------------------------------ *
+ * 8. obs-websocket endpoint (the control API OBS clients speak)
+ * ------------------------------------------------------------------ */
+
+console.log('\n=== 8. obs-websocket endpoint ===')
+await obsWebSocketChecks({
+  bundlePath: bundle('src/main/obs/websocket.ts', path.join(here, 'obs.bundle.mjs')),
+  record
+})
 
 console.log('\n=== summary ===')
 const passed = results.filter((r) => r.ok).length

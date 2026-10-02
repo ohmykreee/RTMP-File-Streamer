@@ -6,6 +6,7 @@ import type {
   FfmpegCapabilities,
   LogEntry,
   MediaInfo,
+  ObsWebSocketStatus,
   PersistedLogInfo,
   PlaylistItem,
   PresetsPayload,
@@ -58,6 +59,8 @@ const api: StreamerApi = {
   openConfigDir: () => ipcRenderer.invoke(IPC.openConfigDir) as Promise<void>,
   openLogsDir: () => ipcRenderer.invoke(IPC.openLogsDir) as Promise<void>,
   getLogFileInfo: () => ipcRenderer.invoke(IPC.getLogFileInfo) as Promise<PersistedLogInfo>,
+  getObsWebSocketStatus: () => ipcRenderer.invoke(IPC.getObsWebSocketStatus) as Promise<ObsWebSocketStatus>,
+  applyObsWebSocket: () => ipcRenderer.invoke(IPC.applyObsWebSocket) as Promise<ObsWebSocketStatus>,
   /**
    * Resolves the on-disk paths of dropped `File` objects.
    *
@@ -81,7 +84,8 @@ const api: StreamerApi = {
   previewCommand: () => ipcRenderer.invoke(IPC.previewCommand) as Promise<string>,
   onStatus: (cb) => subscribe<EngineStatus>(IPC.evtStatus, cb),
   onLog: (cb) => subscribe<LogEntry>(IPC.evtLog, cb),
-  onPlaylist: (cb) => subscribe<PlaylistItem[]>(IPC.evtPlaylist, cb)
+  onPlaylist: (cb) => subscribe<PlaylistItem[]>(IPC.evtPlaylist, cb),
+  onSettings: (cb) => subscribe<AppSettings>(IPC.evtSettings, cb)
 }
 
 contextBridge.exposeInMainWorld('streamer', api)

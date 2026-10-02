@@ -196,14 +196,46 @@ export interface SubtitleRenderSettings {
   allowTranscodeCopy: boolean
 }
 
+/**
+ * The subset of the obs-websocket v5 protocol this app implements: OBS
+ * remote-control clients can drive it, but only stream control is real — any
+ * other request that expects no payload gets a generic success.
+ */
+export interface ObsWebSocketSettings {
+  enabled: boolean
+  /** Bind address; the default keeps the server on the local machine only. */
+  host: string
+  port: number
+  /** Empty = authentication disabled (the handshake then sends no challenge). */
+  password: string
+}
+
+export interface ObsWebSocketStatus {
+  running: boolean
+  host: string
+  port: number
+  /** Address clients should connect to, e.g. `ws://127.0.0.1:4455`. */
+  url: string
+  /** Clients that completed the obs-websocket handshake. */
+  clients: number
+  /** Why the server is not running, e.g. the port is already in use. */
+  error: string
+}
+
 export interface OutputSettings {
-  rtmpUrl: string
+  /**
+   * RTMP application address including its trailing `/` (OBS calls this the
+   * "server"). The stream key is appended to it directly.
+   */
+  server: string
   streamKey: string
   container: ContainerName
   /** Extra ffmpeg output options, e.g. `-flvflags no_duration_filesize`. */
   extraOutputArgs: string
   /** Additional `-re`-style pacing: throttle input to real time. */
   realtimePacing: boolean
+  /** obs-websocket compatible control server. */
+  obsWebSocket: ObsWebSocketSettings
   /**
    * Loop the final playlist instead of stopping. Off by default: the stream ends
    * when the last file finishes.
@@ -451,6 +483,10 @@ export interface StreamerApi {
   openLogsDir(): Promise<void>
   /** Size/count of the persisted log files. */
   getLogFileInfo(): Promise<PersistedLogInfo>
+  /** Live state of the obs-websocket compatible control server. */
+  getObsWebSocketStatus(): Promise<ObsWebSocketStatus>
+  /** Restarts the control server after its settings changed. */
+  applyObsWebSocket(): Promise<ObsWebSocketStatus>
   /**
    * Resolve the filesystem paths of `File` objects coming from a drag-and-drop
    * event. Needed because Electron no longer exposes `File.path`; the lookup
@@ -460,6 +496,8 @@ export interface StreamerApi {
   onStatus(cb: (status: EngineStatus) => void): () => void
   onLog(cb: (entry: LogEntry) => void): () => void
   onPlaylist(cb: (items: PlaylistItem[]) => void): () => void
+  /** Settings were changed outside the UI (obs-websocket stream address). */
+  onSettings(cb: (settings: AppSettings) => void): () => void
 }
 
 export const IPC = {
@@ -489,6 +527,8 @@ export const IPC = {
   openConfigDir: 'presets:openDir',
   openLogsDir: 'logs:openDir',
   getLogFileInfo: 'logs:info',
+  getObsWebSocketStatus: 'obs:status',
+  applyObsWebSocket: 'obs:apply',
   start: 'engine:start',
   pause: 'engine:pause',
   resume: 'engine:resume',
@@ -500,7 +540,12 @@ export const IPC = {
   previewCommand: 'engine:previewCommand',
   evtStatus: 'evt:status',
   evtLog: 'evt:log',
-  evtPlaylist: 'evt:playlist'
+  evtPlaylist: 'evt:playlist',
+  /**
+   * Sent when the main process changes settings on its own (the obs-websocket
+   * endpoint writing the stream address), so the renderer re-reads them.
+   */
+  evtSettings: 'evt:settings'
 } as const
 
 export const SUPPORTED_VIDEO_EXT = ['.mp4', '.mkv', '.mov', '.avi', '.flv', '.ts', '.m2ts', '.webm', '.wmv', '.mpg', '.mpeg', '.m4v', '.vob', '.ogv', '.mxf']

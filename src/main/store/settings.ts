@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { AppSettings } from '@shared/types'
+import type { AppSettings, OutputSettings } from '@shared/types'
 import { DEFAULT_SETTINGS } from '@shared/defaults'
 import { dataDir, ensureDir } from './paths'
 
@@ -21,6 +21,7 @@ function settingsFile(): string {
 function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const s = stored ?? {}
   const session = { ...DEFAULT_SETTINGS.session, ...(s.session ?? {}) }
+  const output = (session.output ?? {}) as Partial<OutputSettings> & { rtmpUrl?: unknown }
   return {
     ffmpegPath: typeof s.ffmpegPath === 'string' ? s.ffmpegPath : '',
     ffprobePath: typeof s.ffprobePath === 'string' ? s.ffprobePath : '',
@@ -28,9 +29,41 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
       video: { ...DEFAULT_SETTINGS.session.video, ...(session.video ?? {}) },
       audio: { ...DEFAULT_SETTINGS.session.audio, ...(session.audio ?? {}) },
       subtitles: { ...DEFAULT_SETTINGS.session.subtitles, ...(session.subtitles ?? {}) },
-      output: { ...DEFAULT_SETTINGS.session.output, ...(session.output ?? {}) }
+      output: normaliseOutput(output)
     }
   }
+}
+
+/**
+ * Normalises the output block.
+ *
+ * `rtmpUrl` was renamed to `server` when the OBS-compatible control endpoint
+ * arrived (OBS calls the field "server"); the old key is still honoured so an
+ * existing installation keeps pushing to the address it was configured with.
+ */
+export function normaliseOutput(raw: Partial<OutputSettings> & { rtmpUrl?: unknown }): OutputSettings {
+  const fallback = DEFAULT_SETTINGS.session.output
+  const legacy = typeof raw.rtmpUrl === 'string' ? raw.rtmpUrl : ''
+  const server = typeof raw.server === 'string' && raw.server.trim() ? raw.server : legacy || fallback.server
+  const obs = { ...fallback.obsWebSocket, ...(raw.obsWebSocket ?? {}) }
+  return {
+    ...fallback,
+    ...raw,
+    server,
+    streamKey: typeof raw.streamKey === 'string' ? raw.streamKey : fallback.streamKey,
+    obsWebSocket: {
+      enabled: obs.enabled === true,
+      host: typeof obs.host === 'string' && obs.host.trim() ? obs.host.trim() : fallback.obsWebSocket.host,
+      port: Math.round(clampNumber(obs.port, 1, 65535, fallback.obsWebSocket.port)),
+      password: typeof obs.password === 'string' ? obs.password : ''
+    }
+  }
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, n))
 }
 
 export function loadSettings(): AppSettings {

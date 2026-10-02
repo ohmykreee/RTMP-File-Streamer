@@ -131,7 +131,7 @@ try {
 const output = {
   ...(savedSettings.session?.output ?? {}),
   // The address carries the trailing `/`; the key is appended directly to it.
-  rtmpUrl: `rtmp://127.0.0.1:${LISTEN_PORT}/live/`,
+  server: `rtmp://127.0.0.1:${LISTEN_PORT}/live/`,
   streamKey: 'test',
   container: 'flv',
   // Reset everything else explicitly: these tests must not depend on values a
@@ -149,7 +149,7 @@ fs.writeFileSync(
   settingsFile,
   JSON.stringify({ ...savedSettings, session: { ...(savedSettings.session ?? {}), output } }, null, 2)
 )
-note('app settings retargeted', output.rtmpUrl)
+note('app settings retargeted', output.server)
 
 /* ---------------- launch the real app ---------------- */
 const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
@@ -365,15 +365,93 @@ while (Date.now() < finishDeadline) {
 }
 record('session returned to idle after the queue finished', idleReached)
 
-const logsText = await evaluate(`(() => {
-  const btn = [...document.querySelectorAll('button')].find(b => b.textContent.includes('日志'))
-  btn?.click()
+/* ---------------- the log panel, now opened from its own header ----------------
+ * The duplicate 「📋 日志」 button in the player bar is gone; the panel header is
+ * the only toggle, and the filter toolbar only exists while the panel is open. */
+const collapsed = JSON.parse(
+  await evaluate(`(() => {
+    const actions = document.querySelector('.logs-actions')
+    return JSON.stringify({
+      expanded: document.querySelector('.logs')?.classList.contains('expanded') ?? null,
+      toolbarVisible: actions ? getComputedStyle(actions).display !== 'none' : null,
+      header: document.querySelector('.logs-title')?.textContent?.trim() ?? null
+    })
+  })()`)
+)
+record('the log panel starts collapsed with its toolbar hidden', collapsed.expanded === false && collapsed.toolbarVisible === false, JSON.stringify(collapsed))
+
+await evaluate(`(() => {
+  document.querySelector('.logs-head')?.click()
   return 'ok'
 })()`)
-void logsText
 await delay(800)
-const logLines = await evaluate('document.querySelectorAll(".log-line").length')
-record('the in-app log panel has entries', logLines > 3, `${logLines} lines`)
+const expanded = JSON.parse(
+  await evaluate(`(() => {
+    const actions = document.querySelector('.logs-actions')
+    const buttons = [...document.querySelectorAll('.logs-actions .seg-btn')].map(b => b.textContent.trim())
+    return JSON.stringify({
+      expanded: document.querySelector('.logs')?.classList.contains('expanded') ?? null,
+      toolbarVisible: actions ? getComputedStyle(actions).display !== 'none' : null,
+      buttons
+    })
+  })()`)
+)
+record('clicking the header expands the panel and reveals the toolbar', expanded.expanded === true && expanded.toolbarVisible === true, JSON.stringify(expanded))
+record(
+  'the filter row is 全部 plus five levels including 调试',
+  JSON.stringify(expanded.buttons) === JSON.stringify(['全部', '调试', '信息', '警告', '错误', 'FFmpeg']),
+  JSON.stringify(expanded.buttons)
+)
+
+// 「全部」 is active by default (no level selected); pressing 调试 must drop it.
+const filterStates = JSON.parse(
+  await evaluate(`(() => {
+    const btns = [...document.querySelectorAll('.logs-actions .seg-btn')]
+    const active = () => btns.filter(b => b.classList.contains('active')).map(b => b.textContent.trim())
+    const before = active()
+    btns.find(b => b.textContent.trim() === '调试')?.click()
+    return JSON.stringify({ before })
+  })()`)
+)
+await delay(300)
+const afterDebug = JSON.parse(
+  await evaluate(`JSON.stringify([...document.querySelectorAll('.logs-actions .seg-btn')].filter(b => b.classList.contains('active')).map(b => b.textContent.trim()))`)
+)
+record('pressing 全部 is the default and 调试 deselects it', JSON.stringify(filterStates.before) === JSON.stringify(['全部']) && JSON.stringify(afterDebug) === JSON.stringify(['调试']), `${JSON.stringify(filterStates.before)} -> ${JSON.stringify(afterDebug)}`)
+
+// A second level adds to the set (multi-select), pressing it again clears it.
+await evaluate(`(() => {
+  const btns = [...document.querySelectorAll('.logs-actions .seg-btn')]
+  btns.find(b => b.textContent.trim() === '警告')?.click()
+  return 'ok'
+})()`)
+await delay(250)
+const afterWarn = JSON.parse(
+  await evaluate(`JSON.stringify([...document.querySelectorAll('.logs-actions .seg-btn')].filter(b => b.classList.contains('active')).map(b => b.textContent.trim()))`)
+)
+record('level filters are multi-select', JSON.stringify(afterWarn) === JSON.stringify(['调试', '警告']), JSON.stringify(afterWarn))
+await evaluate(`(() => {
+  const btns = [...document.querySelectorAll('.logs-actions .seg-btn')]
+  btns.find(b => b.textContent.trim() === '调试')?.click()
+  btns.find(b => b.textContent.trim() === '警告')?.click()
+  return 'ok'
+})()`)
+await delay(400)
+const backToAll = JSON.parse(
+  await evaluate(`(() => {
+    const btns = [...document.querySelectorAll('.logs-actions .seg-btn')]
+    return JSON.stringify({
+      active: btns.filter(b => b.classList.contains('active')).map(b => b.textContent.trim()),
+      lines: document.querySelectorAll('.log-line').length
+    })
+  })()`)
+)
+record(
+  'clearing every level returns to 全部 and shows all logs',
+  JSON.stringify(backToAll.active) === JSON.stringify(['全部']) && backToAll.lines > 3,
+  JSON.stringify(backToAll)
+)
+
 const errorLines = await evaluate(
   'JSON.stringify([...document.querySelectorAll(".log-line.lv-error .log-msg")].map(e => e.textContent).slice(0,3))'
 )

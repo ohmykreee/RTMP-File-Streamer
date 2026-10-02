@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Local file to RTMP live streaming desktop app powered by FFmpeg",
   "main": "./out/main/index.js",
-  "author": "StreamingTools",
+  "author": "TurboKre",
   "license": "MIT",
   "private": true,
   "type": "module",
@@ -16,15 +16,10 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "build": "electron-vite build",
     "dist": "electron-vite build && electron-builder --win --x64 --dir --config electron-builder.config.cjs",
-    "test:bundles": "node .test/build-bundles.mjs",
-    "test:unit": "node .test/harness.mjs",
-    "test:engine": "node .test/run-engine-test.mjs",
-    "test:ui": "node .test/run-ui-test.mjs",
-    "test:features": "node .test/run-features-test.mjs",
-    "test:presets": "node .test/run-preset-test.mjs",
-    "test:layout": "node .test/layout-e2e.mjs",
-    "test:datadir": "node .test/data-dir-e2e.mjs",
-    "test": "pnpm run typecheck && pnpm run build && pnpm run test:bundles && pnpm run test:unit && pnpm run test:engine && pnpm run test:features && pnpm run test:ui && pnpm run test:presets"
+    "test:unit": "node .test/unit.mjs",
+    "test:e2e": "node .test/e2e.mjs",
+    "test:ci": "pnpm run typecheck && pnpm run build && pnpm run test:unit && pnpm run test:e2e",
+    "test": "pnpm run test:unit"
   },
   "dependencies": {},
   "devDependencies": {

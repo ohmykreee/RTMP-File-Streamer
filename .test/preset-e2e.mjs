@@ -242,6 +242,95 @@ record(
 )
 record('resolution switched to explicit width with auto height', sessionBefore.video.scale === '1600:-2', sessionBefore.video.scale)
 
+/* ---------- the obs-websocket block of the RTMP tab ---------- */
+// These controls are part of the output settings, so they must be reachable in
+// the rendered form AND survive the preset round-trip below.
+note('configuring the obs-websocket control endpoint')
+
+/**
+ * The endpoint restarts on a debounce and `listen()` completes asynchronously,
+ * so a fixed sleep would be a race. Polls the IPC status instead.
+ */
+const waitForObs = async (predicate, timeoutMs = 6000) => {
+  const deadline = Date.now() + timeoutMs
+  let status = null
+  while (Date.now() < deadline) {
+    status = JSON.parse(await ev('window.streamer.getObsWebSocketStatus().then(s => JSON.stringify(s))'))
+    if (predicate(status)) return status
+    await delay(150)
+  }
+  return status
+}
+
+/** Reads the labels/toggles currently rendered in the settings body. */
+const readSettingsDom = () =>
+  ev(`JSON.stringify({
+    labels: [...document.querySelectorAll('.settings-body .field-label')].map(e => e.textContent.trim()),
+    toggles: [...document.querySelectorAll('.settings-body .toggle-text')].map(e => e.textContent.trim()),
+    activeTab: document.querySelector('.tab.active')?.textContent?.trim() ?? null
+  })`)
+
+const obsBefore = JSON.parse(await readSettingsDom())
+record(
+  'obs-websocket switch renders in the RTMP tab',
+  obsBefore.activeTab?.includes('输出') === true && obsBefore.toggles.some((t) => t.includes('obs-websocket')),
+  JSON.stringify({ tab: obsBefore.activeTab, toggles: obsBefore.toggles })
+)
+
+// Enable it through the UI: the address/port/password fields only exist while
+// the feature is on, and switching it on must bind the endpoint.
+await ev(`(() => {
+  const row = [...document.querySelectorAll('.settings-body .toggle')].find(t => t.textContent.includes('obs-websocket'))
+  const box = row?.querySelector('input[type="checkbox"]')
+  if (!box) return 'no-toggle'
+  if (!box.checked) box.click()
+  return 'ok'
+})()`)
+const enabledStatus = await waitForObs((s) => s.running)
+record('enabling the switch starts the endpoint', enabledStatus?.running === true, JSON.stringify(enabledStatus))
+
+const obsAfter = JSON.parse(await readSettingsDom())
+record(
+  'obs-websocket address/port/password fields render once enabled',
+  obsAfter.labels.includes('监听地址') && obsAfter.labels.includes('端口') && obsAfter.labels.some((l) => l.startsWith('密码')),
+  JSON.stringify(obsAfter.labels)
+)
+
+await setFieldValue('监听地址', '127.0.0.1')
+await setFieldValue('端口', '14455')
+await setFieldValue('密码', 'preset-secret')
+await delay(600)
+const sessionWithObs2 = JSON.parse(await ev('window.streamer.getSettings().then(s => JSON.stringify(s.session.output.obsWebSocket))'))
+record(
+  'obs-websocket address/port/password reach the settings model',
+  sessionWithObs2.host === '127.0.0.1' && sessionWithObs2.port === 14455 && sessionWithObs2.password === 'preset-secret',
+  JSON.stringify(sessionWithObs2)
+)
+
+// Changing the port has to move the listening socket with it.
+const rebound = await waitForObs((s) => s.running && s.port === 14455)
+record('changing the port rebinds the endpoint', rebound?.running === true && rebound.port === 14455, JSON.stringify(rebound))
+
+// ...and switching the feature off must release it again.
+await ev(`(() => {
+  const row = [...document.querySelectorAll('.settings-body .toggle')].find(t => t.textContent.includes('obs-websocket'))
+  const box = row?.querySelector('input[type="checkbox"]')
+  if (box?.checked) box.click()
+  return 'ok'
+})()`)
+const stopped = await waitForObs((s) => !s.running)
+record('disabling the switch stops the endpoint', stopped?.running === false, JSON.stringify(stopped))
+
+// Turn it back on for the preset round-trip below: the endpoint settings are
+// part of the session, so a saved+applied preset must carry them.
+await ev(`(() => {
+  const row = [...document.querySelectorAll('.settings-body .toggle')].find(t => t.textContent.includes('obs-websocket'))
+  const box = row?.querySelector('input[type="checkbox"]')
+  if (box && !box.checked) box.click()
+  return 'ok'
+})()`)
+await waitForObs((s) => s.running)
+
 /* ---------- save the preset through the UI ---------- */
 note('saving a preset through the UI')
 await ev(`(() => {
@@ -297,8 +386,15 @@ if (stored) {
   )
   record(
     'the preset DOES store the RTMP destination in plain text',
-    saved?.settings?.output?.streamKey === 'preset-key-test' && saved?.settings?.output?.rtmpUrl === 'rtmp://preset.example.com/live/',
-    `stored key = ${saved?.settings?.output?.streamKey}, url = ${saved?.settings?.output?.rtmpUrl}`
+    saved?.settings?.output?.streamKey === 'preset-key-test' && saved?.settings?.output?.server === 'rtmp://preset.example.com/live/',
+    `stored key = ${saved?.settings?.output?.streamKey}, server = ${saved?.settings?.output?.server}`
+  )
+  record(
+    'the preset stores the obs-websocket block',
+    saved?.settings?.output?.obsWebSocket?.enabled === true &&
+      saved?.settings?.output?.obsWebSocket?.port === 14455 &&
+      saved?.settings?.output?.obsWebSocket?.password === 'preset-secret',
+    JSON.stringify(saved?.settings?.output?.obsWebSocket)
   )
 }
 
@@ -339,8 +435,13 @@ record(
 )
 record(
   'applying the saved preset restores the stream target',
-  afterSaved.output.streamKey === 'preset-key-test' && afterSaved.output.rtmpUrl === 'rtmp://preset.example.com/live/',
-  JSON.stringify({ url: afterSaved.output.rtmpUrl, key: afterSaved.output.streamKey })
+  afterSaved.output.streamKey === 'preset-key-test' && afterSaved.output.server === 'rtmp://preset.example.com/live/',
+  JSON.stringify({ server: afterSaved.output.server, key: afterSaved.output.streamKey })
+)
+record(
+  'applying the saved preset restores the obs-websocket block',
+  afterSaved.output.obsWebSocket?.enabled === true && afterSaved.output.obsWebSocket?.port === 14455,
+  JSON.stringify(afterSaved.output.obsWebSocket)
 )
 
 /* ---------- delete ---------- */

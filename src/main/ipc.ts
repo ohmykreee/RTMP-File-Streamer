@@ -7,6 +7,7 @@ import type {
   EngineStatus,
   FfmpegCapabilities,
   LogEntry,
+  ObsWebSocketStatus,
   PersistedLogInfo,
   PlaylistItem,
   PresetsPayload,
@@ -48,6 +49,10 @@ export interface AppServices {
   engineSeek: (positionSec: number) => Promise<EngineStatus>
   engineJumpToItem: (itemId: string) => Promise<EngineStatus>
   enginePreviewCommand: () => string
+  /** Live state of the obs-websocket compatible control server. */
+  obsStatus: () => ObsWebSocketStatus
+  /** Restarts that server from the current settings. */
+  obsApply: () => ObsWebSocketStatus
 }
 
 export function registerIpc(services: AppServices): void {
@@ -240,6 +245,11 @@ export function registerIpc(services: AppServices): void {
   })
 
   ipcMain.handle(IPC.getLogFileInfo, (): PersistedLogInfo => getPersistedLogInfo())
+
+  /* ---------------- obs-websocket compatible control server ---------------- */
+
+  ipcMain.handle(IPC.getObsWebSocketStatus, (): ObsWebSocketStatus => services.obsStatus())
+  ipcMain.handle(IPC.applyObsWebSocket, (): ObsWebSocketStatus => services.obsApply())
 
   /* ---------------- RTMP connection test ---------------- */
 

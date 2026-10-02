@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AppInfo,
   AppSettings,
@@ -7,6 +7,8 @@ import type {
   AudioSettings,
   ContainerName,
   FfmpegCapabilities,
+  ObsWebSocketSettings,
+  ObsWebSocketStatus,
   OutputSettings,
   PersistedLogInfo,
   Preset,
@@ -19,7 +21,7 @@ import type {
   VideoRateControl,
   VideoSettings
 } from '@shared/types'
-import { SCALE_PRESETS } from '@shared/defaults'
+import { OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
 
 interface SettingsPanelProps {
   settings: AppSettings
@@ -32,6 +34,8 @@ interface SettingsPanelProps {
   presets: PresetsPayload | null
   logInfo: PersistedLogInfo | null
   activePresetId: string
+  /** Live state of the obs-websocket compatible endpoint. */
+  obsStatus: ObsWebSocketStatus | null
   onSelectPreset: (preset: Preset) => void
   onSavePreset: (name: string) => void
   onDeletePreset: (presetId: string) => void
@@ -46,6 +50,8 @@ interface SettingsPanelProps {
   onRefreshCapabilities: (force?: boolean) => void
   onTestRtmp: (url: string, key: string) => Promise<RtmpTestResult>
   onPreviewCommand: () => Promise<string>
+  /** Restart the control endpoint after its settings changed. */
+  onApplyObsWebSocket: () => Promise<ObsWebSocketStatus | null>
 }
 
 type TabKey = 'video' | 'audio' | 'subtitle' | 'output' | 'advanced'
@@ -127,12 +133,50 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
       )
     )
     try {
-      const result = await Promise.race([props.onTestRtmp(o.rtmpUrl, o.streamKey), guard])
+      const result = await Promise.race([props.onTestRtmp(o.server, o.streamKey), guard])
       setTestState({ running: false, result })
     } catch (err) {
       setTestState({ running: false, result: { ok: false, message: String(err), detail: '', elapsedMs: 0 } })
     }
   }
+
+  /** Writes the obs-websocket block of the output settings. */
+  const updateObs = (patch: Partial<ObsWebSocketSettings>): void => {
+    props.onUpdateOutput({ obsWebSocket: { ...o.obsWebSocket, ...patch } })
+  }
+
+  /**
+   * Restarts the control endpoint.
+   *
+   * The main process reads the *persisted* settings when it (re)binds the port,
+   * and writing them goes through IPC, so the restart has to wait for the write
+   * to land — otherwise it would restart with the previous values (turning the
+   * switch off would leave the old server listening). Only one restart is kept
+   * in flight: typing in the port field would otherwise queue one per keystroke.
+   */
+  const [obsRestarting, setObsRestarting] = useState(false)
+  const obsTimer = useRef<number | null>(null)
+  const applyObsNow = async (): Promise<void> => {
+    setObsRestarting(true)
+    try {
+      await props.onApplyObsWebSocket()
+    } finally {
+      setObsRestarting(false)
+    }
+  }
+  const applyObs = (): void => {
+    if (obsTimer.current !== null) window.clearTimeout(obsTimer.current)
+    obsTimer.current = window.setTimeout(() => {
+      obsTimer.current = null
+      void applyObsNow()
+    }, 250)
+  }
+  useEffect(
+    () => () => {
+      if (obsTimer.current !== null) window.clearTimeout(obsTimer.current)
+    },
+    []
+  )
 
   const showCommand = async (): Promise<void> => {
     const cmd = await props.onPreviewCommand()
@@ -536,11 +580,11 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* --------------------------------------------------------- OUTPUT */}
         {tab === 'output' && (
           <>
-            <Field label="RTMP 推流地址" hint="填到应用路径为止（含结尾 /）">
+            <Field label="RTMP 推流地址">
               <input
-                value={o.rtmpUrl}
+                value={o.server}
                 placeholder="rtmp://127.0.0.1/live/"
-                onChange={(e) => props.onUpdateOutput({ rtmpUrl: e.target.value })}
+                onChange={(e) => props.onUpdateOutput({ server: e.target.value })}
                 spellCheck={false}
               />
             </Field>
@@ -550,7 +594,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 <input
                   type={showKey ? 'text' : 'password'}
                   value={o.streamKey}
-                  placeholder="留空 = 不带密钥"
+                  placeholder="无"
                   onChange={(e) => props.onUpdateOutput({ streamKey: e.target.value })}
                   spellCheck={false}
                   autoComplete="off"
@@ -627,6 +671,90 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 spellCheck={false}
               />
             </Field>
+
+            {/* ------------------------------------- OBS WebSocket ---------- */}
+            <h3 className="section-title">OBS WebSocket 控制</h3>
+            <Toggle
+              label="启用 obs-websocket 兼容接口"
+              hint="使用 obs-websocket 控制本应用"
+              checked={o.obsWebSocket.enabled}
+              onChange={(c) => {
+                updateObs({ enabled: c })
+                // Both directions restart the endpoint: enabling binds the port,
+                // disabling must release it again.
+                applyObs()
+              }}
+            />
+
+            {o.obsWebSocket.enabled && (
+              <>
+                <div className="field-grid">
+                  <Field label="监听地址">
+                    <input
+                      value={o.obsWebSocket.host}
+                      placeholder="127.0.0.1"
+                      onChange={(e) => {
+                        updateObs({ host: e.target.value })
+                        applyObs()
+                      }}
+                      spellCheck={false}
+                    />
+                  </Field>
+                  <Field label="端口">
+                    <input
+                      type="number"
+                      min={OBS_PORT_MIN}
+                      max={OBS_PORT_MAX}
+                      value={o.obsWebSocket.port}
+                      onChange={(e) => {
+                        updateObs({ port: clampNumber(Number(e.target.value), OBS_PORT_MIN, OBS_PORT_MAX, 4455) })
+                        applyObs()
+                      }}
+                    />
+                  </Field>
+                  <Field label="密码" hint="无则客户端无需认证直接连接">
+                    <div className="secret-row">
+                      <input
+                        type={showKey ? 'text' : 'password'}
+                        value={o.obsWebSocket.password}
+                        placeholder="无"
+                        onChange={(e) => {
+                          updateObs({ password: e.target.value })
+                          applyObs()
+                        }}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                      <button type="button" className="btn tiny ghost secret-toggle" onClick={() => setShowKey((v) => !v)}>
+                        {showKey ? '隐藏' : '显示'}
+                      </button>
+                    </div>
+                  </Field>
+                </div>
+
+                <div className="row-actions">
+                  <button className="btn" onClick={() => void applyObsNow()} disabled={obsRestarting}>
+                    {obsRestarting ? '正在应用…' : '应用并重启接口'}
+                  </button>
+                  <span className={`pill ${props.obsStatus?.running ? 'ok' : 'subtle'}`}>
+                    {props.obsStatus?.running
+                      ? `● 运行中 ${props.obsStatus.url}`
+                      : props.obsStatus?.error
+                        ? `● 未运行：${props.obsStatus.error}`
+                        : '○ 未运行'}
+                  </span>
+                  {props.obsStatus?.running && props.obsStatus.clients > 0 && (
+                    <span className="pill subtle">已连接 {props.obsStatus.clients}</span>
+                  )}
+                </div>
+
+                <p className="hint small">
+                  兼容 obs-websocket 5.x 握手。已实现
+                  <code> SetStreamServiceSettings</code>（推流地址 / 串流密钥）、<code>StartStream</code>、<code>StopStream</code>，
+                  以及客户端连接时会询问的 GetVersion / GetStreamStatus 等只读请求；其余请求一律返回成功，不会报错。
+                </p>
+              </>
+            )}
           </>
         )}
 
@@ -868,7 +996,7 @@ function PresetBar({
         }}
         title="应用一个预设（覆盖当前所有选项卡的设置）"
       >
-        <option value="">（当前设置为自定义）</option>
+        <option value="">（自定义）</option>
         {presetOptions}
       </select>
 
@@ -1021,6 +1149,12 @@ function BitrateField({
 
 function trimZeros(n: number): string {
   return String(Math.round(n * 1000) / 1000)
+}
+
+/** Keeps a numeric field inside its documented range without ever being NaN. */
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, value))
 }
 
 /* ------------------------------------------------------------------ *

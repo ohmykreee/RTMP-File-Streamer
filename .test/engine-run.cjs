@@ -173,7 +173,7 @@ async function main() {
       allowTranscodeCopy: false
     },
     output: {
-      rtmpUrl: `rtmp://127.0.0.1:${LISTEN_PORT}/live/`,
+      server: `rtmp://127.0.0.1:${LISTEN_PORT}/live/`,
       streamKey: 'test',
       container: 'flv',
       extraOutputArgs: '',

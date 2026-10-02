@@ -296,6 +296,8 @@ export default function App(): React.JSX.Element {
           onRefreshCapabilities={(force) => void st.refreshCapabilities(force)}
           onTestRtmp={testRtmp}
           onPreviewCommand={() => st.previewCommand()}
+          obsStatus={st.obsStatus}
+          onApplyObsWebSocket={st.applyObsWebSocket}
         />
       </main>
 
@@ -356,9 +358,6 @@ export default function App(): React.JSX.Element {
                 </button>
               </>
             )}
-            <button className={`btn ghost${logsOpen ? ' active' : ''}`} onClick={() => setLogsOpen((v) => !v)}>
-              📋 日志
-            </button>
           </div>
         </div>
       </footer>

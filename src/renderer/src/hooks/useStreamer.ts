@@ -6,6 +6,7 @@ import type {
   EngineStatus,
   FfmpegCapabilities,
   LogEntry,
+  ObsWebSocketStatus,
   OutputSettings,
   PlaylistItem,
   Preset,
@@ -131,6 +132,9 @@ export function useStreamer() {
 
     const offStatus = api.onStatus((s) => setStatus(s))
     const offPlaylist = api.onPlaylist((items) => setPlaylist(items))
+    // The obs-websocket endpoint can rewrite the stream address outside the UI,
+    // so the renderer re-reads the settings whenever the main process says so.
+    const offSettings = api.onSettings((s) => setSettings(s))
     const offLog = api.onLog((entry) => {
       logBuf.current.push(entry)
       if (logBuf.current.length > 60) {
@@ -151,6 +155,7 @@ export function useStreamer() {
       alive = false
       offStatus()
       offPlaylist()
+      offSettings()
       offLog()
       window.clearInterval(flush)
     }
@@ -200,6 +205,40 @@ export function useStreamer() {
     setSettings(s)
     await refreshCapabilities(true)
   }, [refreshCapabilities, requireBridge])
+
+  /* ---------------- obs-websocket control server ---------------- */
+
+  const [obsStatus, setObsStatus] = useState<ObsWebSocketStatus | null>(null)
+
+  const refreshObsStatus = useCallback(async (): Promise<ObsWebSocketStatus | null> => {
+    const api = bridge()
+    if (!api) return null
+    try {
+      const status = await api.getObsWebSocketStatus()
+      setObsStatus(status)
+      return status
+    } catch {
+      return null
+    }
+  }, [bridge])
+
+  /**
+   * Restarts the control server from the current settings. Called after the
+   * enable switch, address or port change, so the badge in the RTMP tab always
+   * describes the server that is actually listening.
+   */
+  const applyObsWebSocket = useCallback(async (): Promise<ObsWebSocketStatus | null> => {
+    const api = requireBridge()
+    const status = await api.applyObsWebSocket()
+    setObsStatus(status)
+    return status
+  }, [requireBridge])
+
+  useEffect(() => {
+    void refreshObsStatus()
+    const timer = window.setInterval(() => void refreshObsStatus(), 5000)
+    return () => window.clearInterval(timer)
+  }, [refreshObsStatus])
 
   /* ---------------- playlist actions ---------------- */
 
@@ -376,7 +415,10 @@ export function useStreamer() {
     applyPreset,
     savePreset,
     deletePreset,
-    openConfigDir
+    openConfigDir,
+    obsStatus,
+    refreshObsStatus,
+    applyObsWebSocket
   }
 }
 

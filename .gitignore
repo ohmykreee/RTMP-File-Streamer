@@ -17,7 +17,7 @@ node_modules/
 .test/*.json
 .test/*.log
 .test/*.bundle.mjs
-.test/capture-window.ps1
+.test/*.ps1
 
 # --------------------------------------------------- optional bundled ffmpeg
 # See README: drop ffmpeg.exe/ffprobe.exe into bin/ to ship them with the app.

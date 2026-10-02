@@ -178,7 +178,7 @@ export class StreamEngine {
     this.emitPlaylist()
 
     const settings = this.deps.getSettings()
-    const target = buildRtmpTarget(settings.output.rtmpUrl, settings.output.streamKey)
+    const target = buildRtmpTarget(settings.output.server, settings.output.streamKey)
     // The full target (which contains the stream key) is only shown in the debug
     // log, not in the UI and not in the info log.
     this.log('info', '开始串流会话。')
