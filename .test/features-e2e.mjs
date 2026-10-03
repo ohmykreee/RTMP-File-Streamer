@@ -99,7 +99,6 @@ fs.writeFileSync(
           reconnectDelaySec: 2,
           maxReconnectAttempts: 0,
           gapBetweenItemsSec: 0.5,
-          seekAccuracy: 'fast',
           dropLateFrames: false
         }
       }

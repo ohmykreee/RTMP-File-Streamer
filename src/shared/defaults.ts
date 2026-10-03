@@ -102,7 +102,6 @@ export const DEFAULT_SESSION: SessionSettings = {
     reconnectDelaySec: 3,
     maxReconnectAttempts: 10,
     gapBetweenItemsSec: 1,
-    seekAccuracy: 'fast',
     dropLateFrames: false
   }
 }

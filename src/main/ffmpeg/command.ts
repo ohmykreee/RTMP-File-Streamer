@@ -102,6 +102,10 @@ function buildForceStyle(s: SubtitleRenderSettings): string {
 /**
  * Build the `subtitles=` filter argument.
  *
+ * `source` is a path libass opens for itself, and `streamIndex` is an index among
+ * THAT file's *subtitle* streams (see {@link resolveTextBurnSource}) — it is not
+ * ffprobe's absolute stream index and not an ffmpeg input number.
+ *
  * The single quotes are required — without them the filtergraph parser treats
  * the commas inside `force_style` as filter separators. Colons and commas inside
  * the quoted values still have to be backslash-escaped.
@@ -114,6 +118,49 @@ function subtitlesFilterArg(source: string, streamIndex: number, s: SubtitleRend
     parts.push(`force_style='${style}'`)
   }
   return `subtitles=${parts.join(':')}`
+}
+
+/** A file libass should read for a text burn-in, plus which of its tracks to use. */
+interface TextBurnSource {
+  /** Path of the file handed to libass, escaped for the filtergraph. */
+  filename: string
+  /** Index among that file's subtitle streams (`si`), or -1 for its first one. */
+  streamIndex: number
+}
+
+/**
+ * Decide what a text burn-in reads from, and which subtitle stream inside it.
+ *
+ * The `subtitles` filter opens a file of its own, so a track that is muxed into the
+ * media has to be read back out of the media file — with its index translated into
+ * that file's subtitle numbering. Both halves of that were wrong and each fails on
+ * its own, measured on a file laid out `0:v 1:a 2:s`:
+ *  - `filename='0'`, the shape that shipped, makes libass try to open a file named
+ *    `0` ("Unable to open 0"), which aborts filter init and with it the whole
+ *    encode — every embedded-subtitle item died about a second after it started;
+ *  - `si` counts subtitle streams, not ffprobe indexes: on `0:v 1:a 2:s 3:s`,
+ *    `si=2` is rejected with "Unable to locate subtitle stream" while `si=0`
+ *    renders stream 2 and `si=1` renders stream 3.
+ *
+ * Returns null when an embedded track cannot be found in the probed subtitle
+ * streams — the caller skips the burn and says so rather than quietly rendering a
+ * different language than the one that was picked.
+ */
+function resolveTextBurnSource(media: MediaInfo, filePath: string, track: SubtitleTrackRef): TextBurnSource | null {
+  if (track.source === 'external') {
+    return track.path ? { filename: escapeFilterPath(track.path), streamIndex: -1 } : null
+  }
+  if (track.streamIndex === undefined) return null
+  const relative = media.subtitleStreams.findIndex((s) => s.index === track.streamIndex)
+  if (relative < 0) return null
+  return { filename: escapeFilterPath(filePath), streamIndex: relative }
+}
+
+/** What to tell the user when {@link resolveTextBurnSource} found nothing to read. */
+function burnSourceMissingWarning(track: SubtitleTrackRef): string {
+  return track.source === 'embedded'
+    ? `无法在源文件中定位所选内嵌字幕轨（#${track.streamIndex ?? '?'}），已跳过字幕烧录。`
+    : '所选外部字幕文件无法读取，已跳过字幕烧录。'
 }
 
 /**
@@ -411,8 +458,10 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   const args: string[] = ['-hide_banner', '-nostdin', '-loglevel', 'info']
   if (out.realtimePacing) args.push('-re')
   if (startPos > 0.05) {
+    // Seeking accuracy is left at ffmpeg's default (frame accurate) now that the
+    // per-item accuracy setting is gone. Restarts are the only thing that seek
+    // inside a file — the playlist starts every entry at its beginning.
     args.push('-ss', String(round2(startPos)))
-    args.push(out.seekAccuracy === 'accurate' ? '-accurate_seek' : '-noaccurate_seek')
     summary.push(`起点 ${round2(startPos)}s`)
   }
   if (hasOffset) {
@@ -463,16 +512,16 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   if (mode === 'burn' && track && isTextTrack) {
     if (copyVideo) {
       warnings.push('视频为“直接复制”模式，无法烧录字幕；如需字幕请改为重新编码。')
-    } else if (track.source === 'embedded') {
-      filters.push(subtitlesFilterArg('0', track.streamIndex ?? -1, sub))
-      burnText = true
-    } else if (externalSubInput >= 0 && track.path) {
-      // libass reads the sidecar directly from disk; the extra input only feeds
-      // the bitmap-overlay path below.
-      filters.push(subtitlesFilterArg(escapeFilterPath(track.path), -1, sub))
-      burnText = true
+    } else {
+      const burn = resolveTextBurnSource(media, item.path, track)
+      if (burn) {
+        filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
+        burnText = true
+      } else {
+        warnings.push(burnSourceMissingWarning(track))
+      }
+      if (burnText) summary.push(`烧录字幕${track.source === 'embedded' ? ` (内挂 #${track.streamIndex})` : ''}`)
     }
-    if (burnText) summary.push(`烧录字幕${track.source === 'embedded' ? ` (内挂 #${track.streamIndex})` : ''}`)
   } else if (mode === 'burn' && track && !isTextTrack && !hasExternalSub && !copyVideo) {
     warnings.push('内挂位图字幕（PGS/DVD/DVB）无法用滤镜烧录，已跳过字幕。')
   }
@@ -660,12 +709,12 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
 
   let burnText = false
   if (mode === 'burn' && track && isTextTrack && !copyVideo) {
-    if (track.source === 'embedded') {
-      filters.push(subtitlesFilterArg('0', track.streamIndex ?? -1, sub))
+    const burn = resolveTextBurnSource(media, item.path, track)
+    if (burn) {
+      filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
       burnText = true
-    } else if (track.path) {
-      filters.push(subtitlesFilterArg(escapeFilterPath(track.path), -1, sub))
-      burnText = true
+    } else {
+      warnings.push(burnSourceMissingWarning(track))
     }
     if (burnText) summary.push(`烧录字幕${track.source === 'embedded' ? ` (内挂 #${track.streamIndex})` : ''}`)
   }

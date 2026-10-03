@@ -147,7 +147,6 @@ const output = {
   reconnectDelaySec: 2,
   maxReconnectAttempts: 1,
   gapBetweenItemsSec: 0.5,
-  seekAccuracy: 'fast',
   dropLateFrames: false
 }
 fs.writeFileSync(

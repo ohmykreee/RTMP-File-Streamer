@@ -5,6 +5,9 @@
  *   clip_c.mp4  12s 1280x720@30 blue with audio (available for manual tests)
  *   clip_d.mp4  45s  640x360@60 — long enough that the buffered playout cannot
  *              finish it before a UI jump arrives (see engine-run.cjs)
+ *   clip_emb.mkv  clip_a.mp4 with clip_a.srt muxed INTO the container, so the
+ *              burn-in checks cover an internal (`0:v 1:a 2:s`) track as well as a
+ *              sidecar — the two need different addressing
  *
  * Usage: node .test/make-fixtures.mjs
  */
@@ -67,4 +70,58 @@ clip('clip_c.mp4', { size: '1280x720', fps: 30, seconds: 12, freq: 880, color: '
  * as clip_a's, which made a correct skip look like a failure.
  */
 clip('clip_d.mp4', { size: '640x360', fps: 60, seconds: 45, freq: 550, videoOnly: true })
+
+/*
+ * clip_a.srt is the sidecar the burn-in checks sample: the first cue runs 2s→8s and
+ * the second 9s→16s. Written here because `.test/*.srt` is ignored, so a fresh
+ * checkout has to be able to rebuild it with the same cue windows.
+ */
+const srtPath = path.join(here, 'clip_a.srt')
+if (!fs.existsSync(srtPath)) {
+  fs.writeFileSync(
+    srtPath,
+    '1\n00:00:02,000 --> 00:00:08,000\nHELLO 字幕测试 中文渲染检查\n\n2\n00:00:09,000 --> 00:00:16,000\nSECOND CUE LINE 第二条\n',
+    'utf8'
+  )
+  console.log('  clip_a.srt (cues at 2s–8s and 9s–16s)')
+}
+
+/*
+ * clip_emb.mkv carries those same subtitles INSIDE the container: `0:v 1:a 2:s`, the
+ * layout that made libass try to open a file called "0". A sidecar is addressed by
+ * path and an internal track is not, so the two have to be checked separately.
+ */
+const embOut = path.join(here, 'clip_emb.mkv')
+if (!fs.existsSync(embOut)) {
+  run(
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      path.join(here, 'clip_a.mp4'),
+      '-i',
+      srtPath,
+      '-map',
+      '0:v',
+      '-map',
+      '0:a',
+      '-map',
+      '1:0',
+      '-c:v',
+      'copy',
+      '-c:a',
+      'copy',
+      '-c:s',
+      'srt',
+      '-metadata:s:s:0',
+      'language=chi',
+      '-metadata:s:s:0',
+      'title=简体',
+      embOut
+    ],
+    'clip_emb.mkv (clip_a.mp4 with the sidecar muxed in as stream #2)'
+  )
+}
 console.log('fixtures ready')

@@ -236,7 +236,6 @@ async function main() {
       loopPlaylist: false,
       reconnectDelaySec: 2,
       maxReconnectAttempts: 2,
-      seekAccuracy: 'fast',
       dropLateFrames: false
     }
   }

@@ -269,8 +269,6 @@ export interface OutputSettings {
    * reopened, so servers need a moment to release the stream key.
    */
   gapBetweenItemsSec: number
-  /** Fractional seek accuracy when restarting inside a file; kept for stored settings. */
-  seekAccuracy: 'fast' | 'accurate'
   /** Optional https/http query parameters appended to the RTMP url. */
   dropLateFrames: boolean
 }
@@ -445,11 +443,6 @@ export interface ProbeRequest {
 export interface ProbeResult {
   info: MediaInfo
   subtitles: SubtitleTrackRef[]
-}
-
-export interface SeekRequest {
-  /** Absolute position inside the current file, in seconds. */
-  positionSec: number
 }
 
 export interface RtmpTestRequest {

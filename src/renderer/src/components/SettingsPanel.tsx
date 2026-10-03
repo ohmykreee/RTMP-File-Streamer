@@ -816,15 +816,6 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             />
 
             <div className="field-grid">
-              <Field label="跳转精度" hint="快速跳转按关键帧定位（推荐）；精确跳转会从文件头解码，重启较慢">
-                <select
-                  value={o.seekAccuracy}
-                  onChange={(e) => props.onUpdateOutput({ seekAccuracy: e.target.value as OutputSettings['seekAccuracy'] })}
-                >
-                  <option value="fast">快速（关键帧）</option>
-                  <option value="accurate">精确（逐帧解码）</option>
-                </select>
-              </Field>
               <Field label="断线重连间隔 (秒)">
                 <input
                   type="number"

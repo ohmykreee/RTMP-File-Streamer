@@ -55,7 +55,7 @@ function bundle(entry, outfile) {
 }
 
 const builderUrl = pathToFileURL(path.join(here, 'builder.bundle.mjs')).href
-const { buildStreamCommand, buildTestCommand } = await import(builderUrl)
+const { buildStreamCommand, buildTestCommand, buildEncoderArgs } = await import(builderUrl)
 const { buildRtmpTarget } = await import(pathToFileURL(path.join(here, 'rtmp.bundle.mjs')).href)
 
 const { probeMedia, embeddedSubtitleRefs, probeSubtitleFile } = await import(pathToFileURL(path.join(here, 'probe.bundle.mjs')).href)
@@ -132,7 +132,6 @@ const baseSession = {
     loopPlaylist: false,
     reconnectDelaySec: 3,
     maxReconnectAttempts: 3,
-    seekAccuracy: 'fast',
     dropLateFrames: false
   }
 }
@@ -173,6 +172,20 @@ record('probe clip_a.mp4', infoA.videoStreams.length === 1 && infoA.audioStreams
 record('sidecar subtitle auto-discovery', itemA.subtitleTracks.length === 1 && itemA.subtitleTracks[0].source === 'external', JSON.stringify(itemA.subtitleTracks.map((t) => `${t.source}:${t.codec}:${t.family}`)))
 record('selected subtitle defaults to the text track', itemA.selectedSubtitleId === itemA.subtitleTracks[0].id)
 
+/*
+ * The same subtitles, muxed INSIDE the container instead of sitting next to it.
+ * Every burn-in path has to be checked twice: a sidecar is addressed by its path,
+ * an internal track is not, and the failure the two produce is different in kind
+ * (silent wrong-file vs. an aborted encode).
+ */
+const clipEmb = path.join(here, 'clip_emb.mkv')
+const { info: infoEmb, item: itemEmb } = await makeItem(clipEmb)
+record(
+  'embedded subtitle track is probed as an internal track',
+  infoEmb.subtitleStreams.length === 1 && infoEmb.subtitleStreams[0].index === 2 && itemEmb.subtitleTracks[0]?.source === 'embedded',
+  `subtitleStreams=${JSON.stringify(infoEmb.subtitleStreams.map((s) => `#${s.index}:${s.codec}`))} selected=${itemEmb.selectedSubtitleId}`
+)
+
 console.log('\n=== 2. command generation ===')
 const { info: infoB, item: itemB } = await makeItem(clipB)
 
@@ -200,6 +213,90 @@ record(
 record('scale filter applied', builtBurn.args.some((a) => a.includes('scale=1280:-2')), builtBurn.args.find((a) => a.includes('scale=')))
 record('subtitle application reported as burn-text', builtBurn.subtitleApplied === 'burn-text', builtBurn.subtitleApplied)
 record('CBR rate control flags', builtBurn.args.includes('-maxrate') && builtBurn.args.includes('-minrate') && builtBurn.args.includes('-bufsize'))
+
+// 2a-ter. Burn-in from an EMBEDDED track.
+//
+// libass opens a file of its own, so an internal track has to be read back out of
+// the media file — with its index translated, because `si` counts subtitle streams
+// while ffprobe indexes every stream. The shape that shipped passed the ffmpeg input
+// number instead (`filename='0'`): libass looked for a file literally named "0",
+// filter init failed and the whole encode of that item died with it.
+const builtEmbBurn = buildStreamCommand({
+  ffmpegPath: FFMPEG,
+  media: infoEmb,
+  item: itemEmb,
+  settings: burnSession,
+  startPositionSec: 0,
+  outputOverride: path.join(here, 'out_burn_emb.mp4')
+})
+const embVf = builtEmbBurn.args[builtEmbBurn.args.indexOf('-vf') + 1] ?? ''
+const embSubFilter = embVf.split(',').find((f) => f.startsWith('subtitles='))
+record(
+  'embedded burn-in points libass at the media file, not at input 0',
+  Boolean(embSubFilter) && embSubFilter.includes('clip_emb.mkv') && !embSubFilter.includes("filename='0'"),
+  embSubFilter
+)
+record(
+  'embedded burn-in addresses the track by subtitle-stream position',
+  Boolean(embSubFilter) && embSubFilter.includes('si=0') && !embSubFilter.includes('si=2'),
+  embSubFilter
+)
+{
+  // Two internal tracks with the second one selected: the index must come out as 1
+  // even though its ffprobe index is 3, or the burn shows the wrong language.
+  const mediaTwo = {
+    ...infoEmb,
+    subtitleStreams: [
+      { index: 2, type: 'subtitle', codec: 'subrip', subtitleFamily: 'text' },
+      { index: 3, type: 'subtitle', codec: 'subrip', subtitleFamily: 'text' }
+    ]
+  }
+  const itemTwo = {
+    ...itemEmb,
+    subtitleTracks: [{ id: 'emb:3', source: 'embedded', streamIndex: 3, codec: 'subrip', family: 'text' }],
+    selectedSubtitleId: 'emb:3'
+  }
+  const builtTwo = buildStreamCommand({
+    ffmpegPath: FFMPEG,
+    media: mediaTwo,
+    item: itemTwo,
+    settings: burnSession,
+    startPositionSec: 0,
+    outputOverride: path.join(here, 'out_burn_two.mp4')
+  })
+  const vf = builtTwo.args[builtTwo.args.indexOf('-vf') + 1] ?? ''
+  record('selected second embedded track maps to si=1', vf.includes('si=1'), vf)
+}
+{
+  // A track the probe cannot find must not be swapped for whichever track happens to
+  // be first: burning the wrong language quietly is worse than skipping it out loud.
+  const itemGone = {
+    ...itemEmb,
+    subtitleTracks: [{ id: 'emb:9', source: 'embedded', streamIndex: 9, codec: 'subrip', family: 'text' }],
+    selectedSubtitleId: 'emb:9'
+  }
+  const builtGone = buildStreamCommand({
+    ffmpegPath: FFMPEG,
+    media: infoEmb,
+    item: itemGone,
+    settings: burnSession,
+    startPositionSec: 0,
+    outputOverride: path.join(here, 'out_burn_gone.mp4')
+  })
+  const vf = builtGone.args[builtGone.args.indexOf('-vf') + 1] ?? ''
+  record(
+    'an embedded track missing from the probe is skipped with a warning',
+    !vf.includes('subtitles=') && builtGone.subtitleApplied === 'none' && builtGone.warnings.some((w) => w.includes('内嵌字幕')),
+    builtGone.warnings.join(' | ') || '(no warning)'
+  )
+}
+{
+  // The buffered playout burns through buildEncoderArgs, and that is the pipeline the
+  // app streams with; the vector above is the single-process one.
+  const encEmb = buildEncoderArgs({ ffmpegPath: FFMPEG, media: infoEmb, item: itemEmb, settings: burnSession, startPositionSec: 0 })
+  const vf = encEmb.args[encEmb.args.indexOf('-vf') + 1] ?? ''
+  record('buffered encoder pass burns embedded subtitles the same way', vf.includes("subtitles=filename='") && vf.includes('si=0'), vf)
+}
 
 // 2a-bis. resolution controls: off / auto height / explicit height
 {
@@ -384,6 +481,10 @@ const burnOut = path.join(here, 'out_burn.mp4')
 fs.rmSync(burnOut, { force: true })
 await execute('burn-in transcode (H.264 CBR + subtitles filter)', builtBurn.args, burnOut)
 
+const embBurnOut = path.join(here, 'out_burn_emb.mp4')
+fs.rmSync(embBurnOut, { force: true })
+await execute('embedded burn-in transcode (same filters, internal track)', builtEmbBurn.args, embBurnOut)
+
 const seekOut = path.join(here, 'out_seek.mp4')
 fs.rmSync(seekOut, { force: true })
 await execute('seek + itsoffset transcode', builtSeek.args, seekOut)
@@ -397,53 +498,64 @@ fs.rmSync(hwOut, { force: true })
 const hwRes = await execute(`hardware encode with ${builtHw.vencName}`, builtHw.args, hwOut)
 
 console.log('\n=== 4. verifying subtitles were actually rendered ===')
-if (fs.existsSync(burnOut)) {
-  // The first cue is visible from t=2s to t=8s, so sample inside it and before it.
-  const frameSub = path.join(here, 'frame_sub.png')
-  const frameNoSub = path.join(here, 'frame_nosub.png')
-  await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '4', '-i', burnOut, '-frames:v', '1', frameSub], {})
-  await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '0.5', '-i', burnOut, '-frames:v', '1', frameNoSub], {})
-  record('subtitle frame extracted', fs.existsSync(frameSub) && fs.existsSync(frameNoSub))
+// libass draws white glyphs with a black outline, so the subtitle band gains both
+// very bright and very dark pixels only when a cue is on screen. The first cue runs
+// from t=2s to t=8s, so the samples go inside it and before it.
+const bandStats = async (png) => {
+  const res = await run(
+    FFMPEG,
+    [
+      '-hide_banner',
+      '-loglevel',
+      'info',
+      '-i',
+      png,
+      '-vf',
+      `crop=iw:160:0:ih-170,signalstats,metadata=print:file=-`,
+      '-frames:v',
+      '1',
+      '-f',
+      'null',
+      '-'
+    ],
+    {}
+  )
+  const ymax = Number(/YMAX=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
+  const ymin = Number(/YMIN=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
+  const yavg = Number(/YAVG=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
+  return { ymax, ymin, yavg }
+}
 
-  // libass draws white glyphs with a black outline, so the subtitle band gains
-  // both very bright and very dark pixels only when a cue is on screen.
-  const bandStats = async (png) => {
-    const res = await run(
-      FFMPEG,
-      [
-        '-hide_banner',
-        '-loglevel',
-        'info',
-        '-i',
-        png,
-        '-vf',
-        `crop=iw:160:0:ih-170,signalstats,metadata=print:file=-`,
-        '-frames:v',
-        '1',
-        '-f',
-        'null',
-        '-'
-      ],
-      {}
-    )
-    const ymax = Number(/YMAX=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
-    const ymin = Number(/YMIN=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
-    const yavg = Number(/YAVG=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
-    return { ymax, ymin, yavg }
-  }
+/**
+ * Proves a burn-in really rendered, for either subtitle source.
+ *
+ * A command vector can look right and still produce a picture without subtitles —
+ * that is exactly what `filename='0'` did — so the output is sampled rather than
+ * trusted.
+ */
+async function renderedBurnChecks(label, outFile, tag) {
+  if (!outFile || !fs.existsSync(outFile)) return
+  const frameSub = path.join(here, `frame_${tag}_sub.png`)
+  const frameNoSub = path.join(here, `frame_${tag}_nosub.png`)
+  await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '4', '-i', outFile, '-frames:v', '1', frameSub], {})
+  await run(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '0.5', '-i', outFile, '-frames:v', '1', frameNoSub], {})
+  record(`${label}: subtitle frame extracted`, fs.existsSync(frameSub) && fs.existsSync(frameNoSub))
   const subStats = await bandStats(frameSub)
   const cleanStats = await bandStats(frameNoSub)
   record(
-    'subtitle band has bright glyph pixels while the cue is active',
+    `${label}: band has bright glyph pixels while the cue is active`,
     subStats.ymax >= 200,
     `with cue: YMAX=${subStats.ymax} YMIN=${subStats.ymin} YAVG=${subStats.yavg?.toFixed(1)}`
   )
   record(
-    'subtitle band is measurably different before the cue starts',
+    `${label}: band is measurably different before the cue starts`,
     Math.abs(subStats.yavg - cleanStats.yavg) > 0.05 || subStats.ymax !== cleanStats.ymax,
     `no cue: YMAX=${cleanStats.ymax} YAVG=${cleanStats.yavg?.toFixed(1)}`
   )
 }
+
+await renderedBurnChecks('sidecar burn', burnOut, 'sub')
+await renderedBurnChecks('embedded burn', embBurnOut, 'emb')
 
 console.log('\n=== 5. RTMP push against a listening ffmpeg endpoint ===')
 // ffmpeg can act as the ingest side with `-listen 1`, which is a real TCP RTMP handshake.
