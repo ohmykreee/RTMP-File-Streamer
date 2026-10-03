@@ -1016,6 +1016,10 @@ export class Playout {
     // while a file change is in flight.
     this.clearEncoderHold()
     this.holdReported = false
+    // Baseline for the burst accounting in the hold log: a pass that is never released
+    // must not report a duration measured from the epoch (Date.now() default of 0).
+    this.burstFromSec = this.encodedSec
+    this.burstFromMs = Date.now()
     const args = [
       '-hide_banner',
       '-nostdin',

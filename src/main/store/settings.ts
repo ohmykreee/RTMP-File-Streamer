@@ -25,6 +25,9 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   return {
     ffmpegPath: typeof s.ffmpegPath === 'string' ? s.ffmpegPath : '',
     ffprobePath: typeof s.ffprobePath === 'string' ? s.ffprobePath : '',
+    // Absent in a file written before the switch existed; debug detail is the useful
+    // default, so an old configuration keeps what it always had.
+    debugLogging: typeof s.debugLogging === 'boolean' ? s.debugLogging : DEFAULT_SETTINGS.debugLogging,
     session: {
       video: { ...DEFAULT_SETTINGS.session.video, ...(session.video ?? {}) },
       audio: { ...DEFAULT_SETTINGS.session.audio, ...(session.audio ?? {}) },

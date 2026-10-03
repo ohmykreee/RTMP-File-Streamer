@@ -98,7 +98,6 @@ fs.writeFileSync(
           loopPlaylist: false,
           reconnectDelaySec: 2,
           maxReconnectAttempts: 0,
-          gapBetweenItemsSec: 0.5,
           dropLateFrames: false
         }
       }

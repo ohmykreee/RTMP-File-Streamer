@@ -269,11 +269,6 @@ export interface OutputSettings {
   reconnectDelaySec: number
   /** 0 disables automatic reconnection attempts. */
   maxReconnectAttempts: number
-  /**
-   * Pause between two playlist entries. The RTMP publish session is closed and
-   * reopened, so servers need a moment to release the stream key.
-   */
-  gapBetweenItemsSec: number
   /** Optional https/http query parameters appended to the RTMP url. */
   dropLateFrames: boolean
 }
@@ -317,6 +312,15 @@ export interface AppSettings {
   ffmpegPath: string
   /** Explicit ffprobe path; empty = auto-detect. */
   ffprobePath: string
+  /**
+   * Write `debug` entries to the log panel and to the session log file.
+   *
+   * Debug is the bulk of the volume — per-chunk relay accounting, per-pass details,
+   * the buffer health line — and the panel is a memory-capped ring buffer, so it is
+   * written only while it is asked for. `info` and above are always written, which is
+   * what makes switching this off visible in the log itself.
+   */
+  debugLogging: boolean
   session: SessionSettings
 }
 

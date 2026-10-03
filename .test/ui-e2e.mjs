@@ -146,7 +146,6 @@ const output = {
   loopPlaylist: false,
   reconnectDelaySec: 2,
   maxReconnectAttempts: 1,
-  gapBetweenItemsSec: 0.5,
   dropLateFrames: false
 }
 fs.writeFileSync(

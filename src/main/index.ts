@@ -47,6 +47,16 @@ let saveTimer: NodeJS.Timeout | null = null
  * renderer re-keys every entry when it appends it.
  */
 function emitLog(entry: LogEntry, context?: { itemName?: string; itemPath?: string }): void {
+  /*
+   * Debug detail is opt-in. It is by far the largest part of the volume (relay
+   * accounting per chunk, per-pass diagnostics, the buffer health line) and both
+   * consumers are limited — the panel is a ring buffer, the file a rotated one — so a
+   * long unattended run would otherwise spend that room on it. The gate is here, at the
+   * single point every entry passes through, because the panel and the file have to
+   * agree about what was dropped; `info` and above are never filtered, so the moment
+   * the switch is turned off is itself in the log.
+   */
+  if (entry.level === 'debug' && !loadSettings().debugLogging) return
   logs.push(entry)
   if (logs.length > LOG_HISTORY_LIMIT) logs.splice(0, logs.length - LOG_HISTORY_LIMIT)
   mainWindow?.webContents.send(IPC.evtLog, entry)
@@ -98,7 +108,22 @@ engine.setSink({
 const services: AppServices = {
   getWindow: () => mainWindow,
   getSettings: () => loadSettings(),
-  mergeSettings: (patch: Partial<AppSettings>) => saveSettings(patch),  getPlaylist: () => playlist,
+  mergeSettings: (patch: Partial<AppSettings>) => {
+    const before = loadSettings()
+    const next = saveSettings(patch)
+    // Written at `info` so the log always records which detail level it was collected
+    // at — a log with no debug entries should say why, not look like a quiet run.
+    if (before.debugLogging !== next.debugLogging) {
+      pushLog(
+        'info',
+        next.debugLogging
+          ? '已开启调试输出：debug 级日志将写入界面与日志文件。'
+          : '已关闭调试输出：debug 级日志不再写入界面与日志文件（info 及以上仍然记录）。'
+      )
+    }
+    return next
+  },
+  getPlaylist: () => playlist,
   addItems: async (paths: string[]) => {
     const s = loadSettings()
     const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)

@@ -838,16 +838,6 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                   onChange={(e) => props.onUpdateOutput({ maxReconnectAttempts: Number(e.target.value) })}
                 />
               </Field>
-              <Field label="文件间停顿 (秒)" hint="切换文件会重新建立 RTMP 连接，留一点时间让服务器释放串流密钥">
-                <input
-                  type="number"
-                  min={0}
-                  max={30}
-                  step={0.5}
-                  value={o.gapBetweenItemsSec}
-                  onChange={(e) => props.onUpdateOutput({ gapBetweenItemsSec: Number(e.target.value) })}
-                />
-              </Field>
             </div>
 
             <h3 className="section-title">FFmpeg</h3>
@@ -925,6 +915,12 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             </div>
 
             <h3 className="section-title">日志留存</h3>
+            <Toggle
+              label="调试输出 (debug)"
+              hint="把 debug 级日志写进界面与日志文件；关闭后只保留 info 及以上——排查串流问题需要它，长期挂机可以关掉以减小日志体积"
+              checked={props.settings.debugLogging}
+              onChange={(c) => void props.onSaveSettings({ debugLogging: c })}
+            />
             <div className="kv-list">
               <div className="kv">
                 <span>日志目录</span>

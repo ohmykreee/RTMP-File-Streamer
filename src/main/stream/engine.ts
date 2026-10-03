@@ -55,6 +55,27 @@ const DRAIN_STALL_MS = 45_000
 const PASS_START_MARGIN_SEC = 0.25
 
 /**
+ * Delay before the next encoder pass is spawned, in buffered mode.
+ *
+ * Not a pause between files: the publisher keeps airing through a file change, so the
+ * only thing a delay does here is spend the buffer that exists to cover the hand-over.
+ * It is kept purely so the next pass is not spawned inside the exit handler of the one
+ * before it.
+ */
+const NEXT_PASS_DELAY_MS = 150
+
+/**
+ * Pause before the next file in the single-process pipeline, in milliseconds.
+ *
+ * That pipeline closes and reopens the RTMP publish session for every file, so the
+ * server has to release the stream key first; connecting into a key that is still held
+ * makes the ingest reject the publish. It used to be a user setting ("文件间停顿"),
+ * which could only ever be wrong: too small and the publish is refused, larger and it
+ * is dead air. One second is the value that setting defaulted to.
+ */
+const REPUBLISH_DELAY_MS = 1000
+
+/**
  * Whether this session runs the buffered two-process playout.
  *
  * The switch is the authority; the delay only decides how deep the buffer is. A
@@ -144,6 +165,13 @@ export class StreamEngine {
    * events that belong to neither the session that ended nor the one that is coming.
    */
   private restartingSession = false
+  /**
+   * A pass that finished while the session was being replaced (see `onEncoderExit`).
+   *
+   * Replayed once the restart has finished, because dropping it leaves the queue stuck
+   * on a file that is already fully encoded.
+   */
+  private deferredEncoderExit: { index: number; code: number | null; materialSec: number } | null = null
   /**
    * Every pass handed to the pusher, in timeline order.
    *
@@ -807,6 +835,17 @@ export class StreamEngine {
       // The new pass has been handed over and will air from the start of the file.
       this.pass = { index, startSec: positionSec, itemDurationSec: this.itemDuration, tsOffset }
       this.airedPasses = [{ ...this.pass }]
+      /*
+       * A pass that finished during the restart was held back (see `onEncoderExit`) and
+       * has to be accounted for now: the new publisher is up, so this is the point at
+       * which "the file is finished" can be acted on without tearing down the session
+       * that was just opened.
+       */
+      const deferred = this.deferredEncoderExit
+      if (deferred) {
+        this.deferredEncoderExit = null
+        this.handleEncoderExit(deferred.index, deferred.code, deferred.materialSec)
+      }
     } else if (this.playout.isPusherRunning()) {
       this.playout.restartEncoder(pass)
     } else {
@@ -971,10 +1010,27 @@ export class StreamEngine {
 
   /** An encoder pass ended: what it produced is now part of the stream. */
   private onEncoderExit(code: number | null, materialSec: number): void {
-    // A restart is tearing this pass down; the parts belong to the session that is
-    // being closed, not to the queue (see `restartingSession`).
-    if (this.stopping || this.restartingSession || !this.pass) return
+    if (this.stopping || !this.pass) return
     const index = this.pass.index
+    /*
+     * A pass that ends while the session is being replaced cannot be acted on yet: the
+     * publisher that is coming up has not connected, and advancing the queue would
+     * treat a restart that has not finished as a completed file. It cannot simply be
+     * dropped either — a fast encoder finishes a short file inside the restart window
+     * (measured: the whole 15 s fixture, while the republish waits for the server to
+     * release the key), and a dropped completion leaves the run sitting on a finished
+     * file with an empty buffer, never advancing and never ending. So it is held here
+     * and replayed when the restart finishes (see `launchBuffered`).
+     */
+    if (this.restartingSession) {
+      this.deferredEncoderExit = { index, code, materialSec }
+      return
+    }
+    this.handleEncoderExit(index, code, materialSec)
+  }
+
+  /** Accounts for a finished pass: reports it, then queues the next file. */
+  private handleEncoderExit(index: number, code: number | null, materialSec: number): void {
     const item = this.items[index]
     if (code !== 0) {
       this.log('warn', `「${item?.name ?? '文件'}」编码进程异常结束（退出码 ${code ?? '未知'}），已产出的部分仍会继续播放。`)
@@ -991,10 +1047,14 @@ export class StreamEngine {
      * (see `markPlayedThrough`), which is what the viewer actually received and is
      * equally right for the single-process pipeline.
      */
-    const gapMs = Math.max(0, Math.min(30, this.deps.getSettings().output.gapBetweenItemsSec ?? 1)) * 1000
+    // Buffered mode publishes this file's successor through the SAME RTMP session, so
+    // there is nothing to wait for: any pause here is airtime taken out of the buffer
+    // that exists to cover the hand-over (measured 5.8–7.5 s of encoder restart). The
+    // short delay that remains only keeps the next pass from being spawned inside this
+    // pass's own exit handler.
     this.restartTimer = setTimeout(() => {
       void this.advanceTo(index + 1, 'finish')
-    }, Math.max(150, gapMs))
+    }, NEXT_PASS_DELAY_MS)
   }
 
   /** The pusher died: that *is* the RTMP session, so the run is over. */
@@ -1199,14 +1259,14 @@ export class StreamEngine {
       this.positionSec = item?.durationSec ?? this.positionSec
       this.emitStatus()
       this.log('info', `✔ 「${item?.name ?? '文件'}」串流完成。`)
-      // Advancing opens a fresh RTMP publish session, so give the server a moment
-      // to release the stream key before the next ffmpeg connects.
-      const gapMs = Math.max(0, Math.min(30, settings.output.gapBetweenItemsSec ?? 1)) * 1000 + 300
+      // Single-process only: each file is its own RTMP publish session, so the server
+      // needs a moment to release the stream key before the next publish takes it. The
+      // buffered pipeline never republishes at a file change and does not wait at all.
       this.state = 'preparing'
       this.emitStatus()
       this.restartTimer = setTimeout(() => {
         void this.advanceTo(index + 1, 'finish')
-      }, gapMs)
+      }, REPUBLISH_DELAY_MS)
       return
     }
 

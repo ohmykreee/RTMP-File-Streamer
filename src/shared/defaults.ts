@@ -116,7 +116,6 @@ export const DEFAULT_SESSION: SessionSettings = {
     loopPlaylist: false,
     reconnectDelaySec: 3,
     maxReconnectAttempts: 10,
-    gapBetweenItemsSec: 1,
     dropLateFrames: false
   }
 }
@@ -209,6 +208,10 @@ export const BUILTIN_PRESETS: Preset[] = [
 export const DEFAULT_SETTINGS: AppSettings = {
   ffmpegPath: '',
   ffprobePath: '',
+  // On by default: off would silently drop the relay/buffer accounting that makes a
+  // stream failure diagnosable after the fact. The switch exists to keep a long
+  // unattended run's log small, not to hide the default detail level.
+  debugLogging: true,
   session: DEFAULT_SESSION
 }
 
