@@ -56,18 +56,30 @@ export const DEFAULT_SUBTITLES: SubtitleRenderSettings = {
 }
 
 /**
- * Floor for the stream delay while the buffered playout is on.
+ * Bounds for how far the encoder may run ahead of the publisher, in seconds.
  *
- * Not zero: with no material in hand the publisher has nothing to read, so a delay
- * of zero would stall it on the first hiccup — the buffer exists precisely to be
- * read from. The single-process pipeline is what "no delay" means, and that is what
- * the `buffered` switch selects. Declared before `DEFAULT_SESSION` because that is
- * where the default value comes from.
+ * The floor is not a taste decision: the publisher is paced at 1x and takes what the
+ * encoder handed over, so a file change is only seamless if the buffer covers it.
+ * Measured on a real 12-file buffered session, the gap between one pass ending and
+ * the next producing its first packets was 5.8–7.5 s (engine gap + ffmpeg start +
+ * AMF/filter init), so anything below ~12 s starves the publisher at every entry
+ * boundary.
+ *
+ * Above the floor it is a straight trade, and the ceiling is deliberately high: every
+ * second of lead is `bitrate / 8` KB held in memory until the publisher has aired it
+ * (300 s at 4 Mbps ≈ 150 MB) and buys one second of tolerance for an encoder that dips
+ * under 1x. Five minutes is enough to ride out a slow file without the buffer ever
+ * reaching the size the unbounded queue used to.
+ *
+ * The single-process pipeline is what "no buffer" means, and that is what the
+ * `buffered` switch selects — not a delay of zero, which would leave the publisher
+ * with nothing to read. Declared before `DEFAULT_SESSION` because that is where the
+ * default value comes from.
  */
-export const BUFFER_SEC_MIN = 0.1
-export const BUFFER_SEC_MAX = 30
-/** Delay applied when the buffered playout is switched on from a smaller value. */
-export const BUFFER_SEC_DEFAULT = 2
+export const BUFFER_SEC_MIN = 12
+export const BUFFER_SEC_MAX = 300
+/** Lead applied when the buffered playout is switched on from a smaller value. */
+export const BUFFER_SEC_DEFAULT = BUFFER_SEC_MIN
 
 export const DEFAULT_SESSION: SessionSettings = {
   video: DEFAULT_VIDEO,
@@ -89,14 +101,17 @@ export const DEFAULT_SESSION: SessionSettings = {
     // restarts the encoder, which leaves the RTMP session — and the viewers'
     // connections — alone.
     //
-    // A skip or a jump is different: the requested file is usually already inside the
-    // buffer, behind content the viewer has not watched, and a published timeline
-    // cannot be rewound. Those discard the buffer and reopen the RTMP session, so the
-    // viewer waits for a reconnect but gets the file they asked for.
+    /*
+     * The requested file is usually already inside the buffer, behind content the
+     * viewer has not watched, and a published timeline cannot be rewound — but the
+     * buffer is bounded by `bufferSec`, so what a skip discards is seconds, not the
+     * hours the old unbounded queue used to hold.
+     */
     buffered: true,
-    // How far the encoder may lead the publisher. This is the viewers' extra delay
-    // behind the live edge, so it is kept small by default; raise it to ride out
-    // longer encoding stalls. The engine enforces the floor, not just the UI.
+    // How far the encoder may lead the publisher: it is held back once it is further
+    // ahead than this (see `BUFFER_SEC_MIN`), which is what keeps the queue from
+    // growing into the whole playlist. The publisher is the clock, so this is memory
+    // and stall tolerance rather than viewer latency.
     bufferSec: BUFFER_SEC_DEFAULT,
     loopPlaylist: false,
     reconnectDelaySec: 3,

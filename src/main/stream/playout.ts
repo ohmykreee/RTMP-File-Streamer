@@ -76,6 +76,26 @@ import type { LogLevel } from '@shared/types'
  * Because the published timeline cannot move backwards, content requested from
  * earlier in a file cannot be reached without opening a new publish session — that
  * is the whole reason a skip restarts both processes rather than only the encoder.
+ *
+ * ## The buffer is bounded, and that is what keeps the session alive
+ *
+ * The encoder runs FLAT OUT and the publisher only takes material at 1x, so the
+ * difference has to be held somewhere in this process. Nothing used to limit it:
+ * `relay` fed the publisher's stdin as fast as the encoder produced, the write queue
+ * absorbed the backlog, and the buffer was therefore the rest of the playlist.
+ * Measured on a 12-file (4h51m) buffered session: 7.2 GB relayed against 488 MB
+ * published, i.e. ~6.7 GB queued in memory, until libuv's write to the pipe failed
+ * with ENOBUFS. The publisher then saw EOF and exited 0 — exactly what a clean end
+ * of stream looks like — and the engine, reading that as a dead RTMP session,
+ * reconnected from the viewer's position and threw the pre-encoded hours away.
+ *
+ * Pausing the encoder's stdout is the cheapest backpressure available: it stops
+ * reading, the pipe fills, and ffmpeg blocks in `write()` until it is resumed. The
+ * lead is therefore capped at `leadLimitSec` and the queue stays a few seconds deep
+ * instead of hours. That cap is also what makes the playout file-granular in
+ * practice: the encoder can never be more than `leadLimitSec` into the next entry,
+ * so a file is only ever rendered while the one before it is on air — never two
+ * files ahead, and never the whole queue.
  */
 
 export interface PlayoutCallbacks {
@@ -132,6 +152,67 @@ const TS_PACKET = 188
  */
 const PASS_SPLICE_MARGIN_SEC = 0.05
 
+/**
+ * How much of the buffer is spent before a held encoder is released again.
+ *
+ * The release is driven by the publisher's own progress — it resumes when the buffer
+ * has actually drained to this mark — rather than by a timer. A timer has to predict
+ * how long that takes, and the prediction is made from a lead that is up to one
+ * `-progress` interval stale, so the hold ends up a little too long every cycle: the
+ * encoder drifts below 1x, the publisher has nothing to read, and a live viewer
+ * starves. Measured on a real 19-minute session that drift cost 10–23% of real time
+ * (0.77–0.90x of material produced per wall second), which is exactly what a client
+ * sees as stuttering with the position jumping around.
+ *
+ * The margin has to exceed what the publisher keeps inside itself (its demuxer and
+ * pipe hold a second or two), or the mark is never reached and the hold never ends;
+ * the floor of 4 s covers that, and 25% keeps it proportional on a large buffer.
+ */
+function leadReleaseMarginSec(leadLimitSec: number): number {
+  return Math.max(4, leadLimitSec * 0.25)
+}
+
+/**
+ * A hold that outlives this is not throttle hysteresis, it is a publisher that has
+ * stopped sending: the buffer cannot drain if nothing is being aired. The hold is
+ * lifted anyway so the pipeline keeps trying, and the caller reports it.
+ */
+function leadHoldBackstopSec(leadLimitSec: number): number {
+  return leadLimitSec * 2 + 10
+}
+
+/** How often the buffered pipeline reports its own health. */
+const HEALTH_INTERVAL_MS = 30_000
+/**
+ * Head start the encoder gets over the publisher on a first start, in milliseconds.
+ *
+ * Hard-coded and short on purpose: it is not a user-facing delay, it is the warm-up
+ * the encoder needs (ffmpeg start, hardware encoder init, first frames) so that the
+ * publisher begins with material already queued instead of opening an RTMP session and
+ * then stalling on its first read. The queue cannot run away while nobody is reading
+ * it: the lead limit is enforced during this window too.
+ */
+const PUSHER_HEAD_START_MS = 600
+/**
+ * The same head start after a publisher failure or a skip: longer, because the server
+ * has to release the previous publish session before a new one can take the key.
+ */
+const PUSHER_HEAD_START_RETRY_MS = 1500
+/**
+ * Production below this share of real time starves the publisher: it can only air
+ * what it is given, and it is paced at 1x.
+ */
+const HEALTH_MIN_RATE = 0.98
+/**
+ * How long the publisher may go without reporting progress before it counts as
+ * blocked rather than merely pacing.
+ *
+ * It reports every ~0.5s while it is moving — `-re` pacing still reads and muxes a
+ * packet at a time — so several seconds of silence is a write to the server that is
+ * not completing, which is what a network stall looks like from here.
+ */
+const PUSHER_SILENCE_WARN_SEC = 5
+
 /** Prefix of this class's scratch folders in the OS temp area. */
 const TEMP_PREFIX = 'rtmp-streamer-'
 
@@ -175,6 +256,15 @@ function passStartOffset(tsOffset: number): number {
 export class Playout {
   private readonly ffmpegPath: string
   private readonly outputArgs: string[]
+  /**
+   * How far the encoder may run ahead of the publisher, in seconds.
+   *
+   * Below one file change's worth of material the publisher starves at every entry
+   * boundary — measured on a real 12-file session: 5.8–7.5 s from the previous pass
+   * ending to the next one producing its first packets — so the engine floors this
+   * value (see `BUFFER_SEC_MIN`).
+   */
+  private readonly leadLimitSec: number
   private readonly callbacks: PlayoutCallbacks
   /** Scratch folder for anything a pass needs on disk (logs, sidecars). */
   private readonly dir: string
@@ -196,24 +286,33 @@ export class Playout {
   private stopping = false
   /** The pass whose encoder is currently running, for reporting decisions. */
   private currentPass: EncoderPass | null = null
-  /** True while a publisher is being stopped on purpose (see `stopPusher`). */
-  private suppressPusherExit = false
+  /** True while the encoder's stdout is paused to keep the buffer bounded. */
+  private encoderHeld = false
+  /** When the current hold started, and the backstop that ends it regardless. */
+  private holdStartedAt = 0
+  private holdBackstop: NodeJS.Timeout | null = null
+  /** The hold is worth one log line per pass, not one per pause/resume cycle. */
+  private holdReported = false
+  /** Encoder position when the last hold ended, for the burst accounting in the log. */
+  private burstFromSec = 0
+  private burstFromMs = 0
+  /** Counters behind the periodic health line. */
+  private holdCount = 0
+  private healthAt = 0
+  private healthEncodedSec = 0
+  private healthPublishedSec = 0
+  private healthWallMs = 0
+  private lowRateWindows = 0
+  /** What the publisher itself reports: its own pace and how much it has sent. */
+  private pusherSpeed = 0
+  private pusherSentBytes = 0
+  private pusherLastReportAt = 0
+  /** True once the "publisher has gone quiet" warning was written for this silence. */
+  private pusherSilenceReported = false
   /**
-   * True between spawning an encoder and spawning its publisher.
-   *
-   * The encoder's stdout is PAUSED for this window. The encoder runs as fast as it
-   * can, so a relay that accepts "just until the publisher is up" will happily
-   * swallow the whole file — measured: a 1.5s publisher delay let a 15s file finish
-   * encoding before the publisher existed, after which there was nothing left to
-   * publish and the pass reported completion for material nobody had aired.
-   *
-   * Pausing (rather than dropping or buffering) is what makes the wait bounded: the
-   * bytes stay in the pipe, the pipe fills, and ffmpeg blocks in `write()` — the same
-   * backpressure the design relies on everywhere else.
+   * True while the publisher is being stopped on purpose (see `stopPusher`).
    */
-  private awaitingPusher = false
-  /** The stream to un-pause once the publisher is up (see `awaitingPusher`). */
-  private pausedStdout: Readable | null = null
+  private suppressPusherExit = false
   private pusherProgressBuf = ''
   private encoderProgressBuf = ''
   /** Bytes accepted from the encoder but not yet taken by the publisher. */
@@ -234,9 +333,10 @@ export class Playout {
    */
   private tsPts = { pass: 0, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
 
-  constructor(ffmpegPath: string, outputArgs: string[], callbacks: PlayoutCallbacks) {
+  constructor(ffmpegPath: string, outputArgs: string[], leadLimitSec: number, callbacks: PlayoutCallbacks) {
     this.ffmpegPath = ffmpegPath
     this.outputArgs = outputArgs
+    this.leadLimitSec = Math.max(0, leadLimitSec)
     this.callbacks = callbacks
     this.dir = fs.mkdtempSync(path.join(os.tmpdir(), TEMP_PREFIX))
   }
@@ -247,6 +347,13 @@ export class Playout {
 
   /**
    * Starts the publisher and the first encoder pass.
+   *
+   * The encoder goes first and the publisher follows a fixed, short moment later (see
+   * `PUSHER_HEAD_START_MS`): the encoder needs a warm-up before it produces at speed
+   * (ffmpeg start, hardware encoder init, first frames through the filters), and a
+   * publisher that starts on an empty pipe spends that time as an open RTMP session
+   * receiving nothing, then plays catch-up once the data arrives — stutter at exactly
+   * the moment the two-process playout exists to prevent it.
    *
    * `retry` is set when this follows a publisher that failed rather than a first
    * start: a session restart (a skip or a jump) has to re-establish the RTMP
@@ -261,25 +368,16 @@ export class Playout {
     if (this.isPusherRunning()) return
     this.pusher = null
     this.stopping = false
-    // `-re` means the publisher paces the read; until it exists the encoder must be
-    // held by the pipe rather than by this process's memory (see `awaitingPusher`).
-    // Set BEFORE the encoder spawns, because that is where the pause is applied.
-    this.awaitingPusher = true
-    // The encoder goes first: a reader that starts on an empty pipe would sit
-    // waiting for a stream header, and it costs nothing to have the first packets
-    // already in flight.
+    // The encoder goes first. Its output is read and queued as it comes (bounded by
+    // the lead limit, which is enforced while the publisher is still starting), so the
+    // publisher finds material already waiting the moment it exists.
     this.startEncoder(pass)
     // A session restart has to re-establish the RTMP connection, and the server may
     // still be tearing the previous publish down; a first start only has to let the
-    // ingest come up.
-    const waitMs = retry ? 1500 : 400
+    // encoder come up to speed.
+    const waitMs = retry ? PUSHER_HEAD_START_RETRY_MS : PUSHER_HEAD_START_MS
     await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
-    if (this.stopping) {
-      this.pausedStdout = null
-      this.awaitingPusher = false
-      return
-    }
-    this.awaitingPusher = false
+    if (this.stopping) return
     this.startPusher()
   }
 
@@ -458,6 +556,7 @@ export class Playout {
   }
 
   private cleanup(): void {
+    this.clearEncoderHold()
     try {
       fs.rmSync(this.dir, { recursive: true, force: true })
     } catch {
@@ -470,10 +569,6 @@ export class Playout {
    * ------------------------------------------------------------ */
 
   private startPusher(): void {
-    // Un-pause the encoder first: from here on the publisher is what paces it, and
-    // either the pipe or the publisher's `-re` throttling provides the backpressure.
-    this.pausedStdout?.resume()
-    this.pausedStdout = null
     const args = [
       '-hide_banner',
       '-nostdin',
@@ -516,6 +611,9 @@ export class Playout {
     this.pusher = child
     this.pusherProgressBuf = ''
     this.callbacks.log('info', `推流进程已启动（pid ${child.pid ?? '?'}），编码进程可在其背后重启。`)
+    // Hand over whatever the encoder produced during the head start. Nothing else will:
+    // this only runs on a `drain`, and the queue was filled before the publisher existed.
+    this.pump()
     child.stdout?.on('data', () => {})
     // fd 3 is the progress pipe (`stdio: ['pipe','pipe','pipe','pipe']`), so it is
     // a readable stream here even though `ChildProcess['stdio']` is typed loosely.
@@ -532,8 +630,18 @@ export class Playout {
     // A publisher that dies mid-write (or is stopped) makes its stdin fail. That
     // is a normal teardown path here, not an exception: without a handler the
     // error escapes as an uncaught exception and takes the whole app down.
+    //
+    // It is NOT a quiet path though: the publisher reads the failed pipe as a clean
+    // end of stream, so it exits 0 and the engine sees "the RTMP session ended"
+    // rather than a write failure. A long buffered session died this way (ENOBUFS on
+    // a queue of ~6.7 GB), so the code is reported as an error.
     child.stdin?.on('error', (err) => {
-      this.callbacks.log('debug', `推流进程输入已关闭（${(err as NodeJS.ErrnoException).code ?? err.message}）。`)
+      // An intentional teardown closes this pipe from under an in-flight write, which
+      // surfaces here as EOF/EPIPE on every stop and every jump; only a failure while
+      // the session is supposed to be running means anything (see below).
+      if (this.stopping || this.suppressPusherExit) return
+      const code = (err as NodeJS.ErrnoException).code ?? err.message
+      this.callbacks.log('error', `写入推流进程失败（${code}）：推流进程会读到流结束而退出，本次发布会话将中断。`)
     })
     child.on('error', (err) => {
       this.callbacks.log('error', `推流进程错误: ${err.message}`)
@@ -554,6 +662,12 @@ export class Playout {
 
   /** Hands encoder bytes to the publisher, keeping MPEG-TS packets aligned. */
   private relay(raw: Buffer | Uint8Array | string): void {
+    // A session being torn down will never take another byte: queueing here would only
+    // grow this process's memory with material nobody can publish (that path is what
+    // ended a long session: ~6.7 GB queued, then the write failed). A publisher that
+    // simply does not exist yet is different — that queue IS the head start — and it
+    // stays bounded because the lead limit applies to it too.
+    if (this.stopping) return
     // The pipe must be handled as bytes: if the chunk ever arrives as a string
     // (an encoding set somewhere upstream), converting it back keeps `subarray`
     // valid and the 188-byte alignment intact. Note that this conversion is lossy
@@ -572,6 +686,163 @@ export class Playout {
     this.relayedBytes += ready.length
     this.pending = this.pending ? Buffer.concat([this.pending, ready]) : ready
     this.pump()
+    this.updateEncoderHold()
+  }
+
+  /**
+   * Holds the encoder back while it is further ahead of the publisher than allowed.
+   *
+   * The publisher is the clock — it takes material at exactly 1x — so anything the
+   * encoder produces beyond the buffer is material this process has to keep in
+   * memory until its turn comes, hours later on a long playlist. Pausing the
+   * encoder's stdout is the backpressure that bounds it (see the class header).
+   *
+   * A hold ends when the publisher has actually drained the buffer back to the release
+   * mark (see `leadReleaseMarginSec`). That feedback is what keeps the encoder at 1x on
+   * average: a hold that ends early merely announces itself again, while one that ends
+   * late takes real time out of the stream and starves every viewer. A timer cannot do
+   * this — it has to predict how long the drain takes from a lead that is up to one
+   * `-progress` interval stale, which is how a real session ended up producing only
+   * 0.77–0.90s per wall second.
+   */
+  private updateEncoderHold(): void {
+    /*
+     * `publishedSec` stays at 0 until the publisher exists and reports, so the same
+     * limit bounds the head start: a publisher that never comes up (a failed spawn)
+     * cannot leave the encoder filling this process's memory, it just means the hold
+     * ends on its backstop instead of on the publisher catching up.
+     */
+    const stdout = this.encoder?.stdout
+    if (!stdout) return
+    const lead = this.encodedSec - this.publishedSec
+    if (!this.encoderHeld) {
+      if (lead <= this.leadLimitSec) return
+      this.encoderHeld = true
+      this.holdStartedAt = Date.now()
+      this.holdCount += 1
+      stdout.pause()
+      const burstSec = this.encodedSec - this.burstFromSec
+      const burstWallSec = Math.max(0.001, (this.holdStartedAt - this.burstFromMs) / 1000)
+      if (!this.holdReported) {
+        this.holdReported = true
+        this.callbacks.log(
+          'debug',
+          `编码已领先推流 ${lead.toFixed(1)}s（上限 ${this.leadLimitSec.toFixed(1)}s），暂停编码进程输出等待推流追平——缓冲不再随播放列表增长。`
+        )
+      }
+      this.callbacks.log(
+        'debug',
+        `第 ${this.seq} 段突发产出 ${burstSec.toFixed(1)}s / 用时 ${burstWallSec.toFixed(2)}s（≈${(burstSec / burstWallSec).toFixed(1)}×），当前领先 ${lead.toFixed(1)}s；等推流把领先吃到 ${(this.leadLimitSec - leadReleaseMarginSec(this.leadLimitSec)).toFixed(1)}s 以内再恢复编码。`
+      )
+      // Backstop only: a publisher that has stopped reporting cannot drain anything.
+      this.holdBackstop = setTimeout(() => {
+        this.holdBackstop = null
+        if (!this.encoderHeld) return
+        const heldSec = (Date.now() - this.holdStartedAt) / 1000
+        this.callbacks.log(
+          'warn',
+          `编码已暂停 ${heldSec.toFixed(1)}s 仍未见推流进程推进（领先 ${(this.encodedSec - this.publishedSec).toFixed(1)}s）：推流端可能已卡住或网络中断，先恢复编码继续排空缓冲。`
+        )
+        this.releaseEncoderHold()
+      }, leadHoldBackstopSec(this.leadLimitSec) * 1000)
+      return
+    }
+    if (lead > this.leadLimitSec - leadReleaseMarginSec(this.leadLimitSec)) return
+    const heldSec = (Date.now() - this.holdStartedAt) / 1000
+    this.releaseEncoderHold()
+    this.callbacks.log(
+      'debug',
+      `推流已把缓冲吃到领先 ${lead.toFixed(1)}s，恢复编码进程输出（本次暂停 ${heldSec.toFixed(1)}s）。`
+    )
+  }
+
+  /** Lifts a hold and starts the burst accounting for the next one. */
+  private releaseEncoderHold(): void {
+    if (this.holdBackstop) {
+      clearTimeout(this.holdBackstop)
+      this.holdBackstop = null
+    }
+    this.encoderHeld = false
+    this.burstFromSec = this.encodedSec
+    this.burstFromMs = Date.now()
+    this.encoder?.stdout?.resume()
+  }
+
+  /** Cancels a hold: the encoder it applied to is gone (see `startEncoder`). */
+  private clearEncoderHold(): void {
+    if (this.holdBackstop) {
+      clearTimeout(this.holdBackstop)
+      this.holdBackstop = null
+    }
+    this.encoderHeld = false
+  }
+
+  /**
+   * Periodic account of what the buffered pipeline is actually doing.
+   *
+   * The number that matters is the publisher's own rate: it is paced at 1x, so if it
+   * airs less material per wall second than that, the stream itself is running slow —
+   * a live client then runs out of data and stutters no matter how full the buffer is.
+   * That state is invisible without this line, because nothing is in error: the buffer
+   * stays at its limit, the encoder is merely held to match, and the only symptom is
+   * on the viewer's screen. Two different things produce it, and both are reported
+   * separately:
+   *  - the publisher sends slower than real time (a saturated link or a server that
+   *    cannot take the bitrate) — its own `speed` figure says so;
+   *  - the publisher stops reporting at all, which means it is blocked inside a write
+   *    (a network stall) rather than pacing.
+   */
+  private reportHealth(): void {
+    const now = Date.now()
+    if (this.healthAt === 0) {
+      this.healthAt = now
+      this.healthEncodedSec = this.encodedSec
+      this.healthPublishedSec = this.publishedSec
+      this.healthWallMs = now
+      return
+    }
+    const silentSec = this.pusherLastReportAt > 0 ? (now - this.pusherLastReportAt) / 1000 : 0
+    if (silentSec > PUSHER_SILENCE_WARN_SEC) {
+      if (!this.pusherSilenceReported) {
+        this.pusherSilenceReported = true
+        this.callbacks.log(
+          'warn',
+          `推流进程已 ${silentSec.toFixed(0)}s 没有上报进度：它多半卡在向服务器写入（网络拥塞或服务器不收），此时缓冲区是满的、编码进程也被暂停，观众端会先缓冲再突然快进。`
+        )
+      }
+    } else {
+      this.pusherSilenceReported = false
+    }
+    if (now - this.healthAt < HEALTH_INTERVAL_MS) return
+    const wallSec = (now - this.healthWallMs) / 1000
+    const producedSec = this.encodedSec - this.healthEncodedSec
+    const airedSec = this.publishedSec - this.healthPublishedSec
+    const encodeRate = wallSec > 0 ? producedSec / wallSec : 0
+    const airRate = wallSec > 0 ? airedSec / wallSec : 0
+    const relay = this.getRelayStats()
+    // `writableLength` is what libuv has accepted from us but the publisher has not
+    // read yet. It separates the two ways the egress can stall: a queue that keeps
+    // growing means the publisher is not reading (it is stuck inside a write to the
+    // server), while an empty queue with a flat published position means it is reading
+    // and simply cannot send any faster.
+    const pusherQueuedKb = (this.pusher?.stdin?.writableLength ?? 0) / 1024
+    this.callbacks.log(
+      'debug',
+      `缓冲状态：推流已播 ${this.publishedSec.toFixed(1)}s（本窗口 ${airedSec.toFixed(1)}s ÷ ${wallSec.toFixed(1)}s = ${airRate.toFixed(2)}×，推流进程自报 ${this.pusherSpeed.toFixed(2)}×，已发送 ${(this.pusherSentBytes / 1048576).toFixed(1)}MB）；编码已产 ${this.encodedSec.toFixed(1)}s（本窗口 ${encodeRate.toFixed(2)}×），领先 ${(this.encodedSec - this.publishedSec).toFixed(1)}s / 上限 ${this.leadLimitSec.toFixed(1)}s，暂停 ${this.holdCount} 次；转发 ${(relay.relayedBytes / 1048576).toFixed(1)}MB，写入推流进程 ${(relay.pumpedBytes / 1048576).toFixed(1)}MB（其内部待写 ${pusherQueuedKb.toFixed(0)}KB / 我方待写 ${(relay.pendingBytes / 1024).toFixed(0)}KB）。`
+    )
+    if (airRate < HEALTH_MIN_RATE) {
+      this.lowRateWindows += 1
+      this.callbacks.log(
+        'warn',
+        `推流端本窗口只送出 ${airedSec.toFixed(1)}s / ${wallSec.toFixed(1)}s = ${airRate.toFixed(2)}×（低于实时，连续 ${this.lowRateWindows} 个窗口）：缓冲是满的、编码也在等它，所以瓶颈在推流链路（上行带宽 / 服务器接收 / 网络抖动），观众端会卡顿并在缓冲后用快进追赶。建议降低码率，或检查到服务器的链路质量。`
+      )
+    } else {
+      this.lowRateWindows = 0
+    }
+    this.healthAt = now
+    this.healthEncodedSec = this.encodedSec
+    this.healthPublishedSec = this.publishedSec
+    this.healthWallMs = now
   }
 
   /** Writes what the publisher will accept; the rest waits for its next drain. */
@@ -618,15 +889,27 @@ export class Playout {
       const pid = ((buf[i + 1] & 0x1f) << 8) | buf[i + 2]
       if (pid !== 256) continue // pinned video PID (see `-mpegts_start_pid`)
       const afc = (buf[i + 3] >> 4) & 0x03
-      if (afc !== 2 && afc !== 3) continue
-      const afLen = buf[i + 4]
-      if (afLen < 5 || (buf[i + 5] & 0x10) === 0) continue // need the PTS field
+      /*
+       * The PTS lives in the PES header, NOT in the adaptation field: what that field
+       * carries here is a PCR (ffmpeg writes one every ~20 ms), and reading its bytes as
+       * a PTS is what made this diagnostic report nonsense — "on-wire video PTS
+       * 22427–44006s" for a 23-minute pass, numbers an operator reasonably reads as a
+       * timestamp fault in the stream. So: skip packets without a payload, step over the
+       * adaptation field, then read PTS_DTS_flags from the PES header.
+       */
+      if (afc === 0 || afc === 2) continue // adaptation only: no payload, no PES header
+      const afLen = afc === 3 ? buf[i + 4] : 0
+      const pes = i + 4 + (afc === 3 ? 1 + afLen : 0)
+      if (pes + 14 > i + TS_PACKET) continue
+      if (buf[pes] !== 0 || buf[pes + 1] !== 0 || buf[pes + 2] !== 1) continue // start code
+      if (((buf[pes + 7] >> 6) & 0x03) < 2) continue // PTS_DTS_flags: no PTS present
+      const s = pes + 9
       const raw =
-        (BigInt(buf[i + 6] & 0x0e) << 29n) |
-        (BigInt(buf[i + 7]) << 22n) |
-        (BigInt(buf[i + 8] & 0xfe) << 14n) |
-        (BigInt(buf[i + 9]) << 7n) |
-        (BigInt(buf[i + 10]) >> 1n)
+        (BigInt(buf[s] & 0x0e) << 29n) |
+        (BigInt(buf[s + 1]) << 22n) |
+        (BigInt(buf[s + 2] & 0xfe) << 14n) |
+        (BigInt(buf[s + 3]) << 7n) |
+        (BigInt(buf[s + 4]) >> 1n)
       const seconds = Number(raw) / 90_000
       this.tsPts.packets += 1
       // Video PES headers arrive one per frame, so their count is the frame count.
@@ -682,6 +965,10 @@ export class Playout {
       if (eq <= 0) continue
       const key = line.slice(0, eq).trim()
       const value = line.slice(eq + 1).trim()
+      // The publisher reports every ~0.5s whether or not it is moving, which makes it
+      // the only clock the health line can rely on while the encoder is held.
+      this.pusherLastReportAt = Date.now()
+      this.reportHealth()
       if (key === 'out_time_us' || key === 'out_time_ms') {
         const micro = Number(value)
         if (!Number.isFinite(micro)) continue
@@ -689,7 +976,21 @@ export class Playout {
         if (sec > this.publishedSec) {
           this.publishedSec = sec
           this.callbacks.onPublished(sec)
+          // A publisher that is falling further behind is what starts a hold; one
+          // already in flight ends on its own when the buffer has drained (see
+          // `updateEncoderHold`).
+          this.updateEncoderHold()
         }
+      } else if (key === 'total_size') {
+        // Bytes the publisher has actually handed to the muxer, i.e. what left the
+        // process towards the server.
+        const bytes = Number(value)
+        if (Number.isFinite(bytes) && bytes > 0) this.pusherSentBytes = bytes
+      } else if (key === 'speed') {
+        // The publisher's own pace. `-re` should hold it at ~1x; anything below that
+        // is the stream running slow, whatever the buffer looks like.
+        const v = Number(value.replace('x', ''))
+        if (Number.isFinite(v) && v > 0) this.pusherSpeed = v
       } else if (key === 'progress' && value === 'end') {
         // The publisher has caught up with the encoder; it simply waits for the
         // next datagram, which is why this transport survives encoder restarts.
@@ -710,6 +1011,11 @@ export class Playout {
     // matched against the pass it belongs to rather than against a shared counter.
     pass.seq = this.seq
     this.passOffsetSec = pass.tsOffset
+    // A fresh pass starts unheld, whatever the pass before it was doing: it has to be
+    // free to produce its first packets, which is precisely what the publisher needs
+    // while a file change is in flight.
+    this.clearEncoderHold()
+    this.holdReported = false
     const args = [
       '-hide_banner',
       '-nostdin',
@@ -805,14 +1111,6 @@ export class Playout {
      * by the wrong amount and ended the whole playlist.
      */
     const isCurrent = (): boolean => this.encoder === child
-    // Pause BEFORE attaching the reader: adding a `data` listener puts the stream in
-    // flowing mode, so a pause issued afterwards would still let the first chunks
-    // through and the whole point — keeping the encoder blocked in the pipe while the
-    // publisher is coming up — would be lost. `startPusher` resumes it.
-    if (this.awaitingPusher && child.stdout) {
-      child.stdout.pause()
-      this.pausedStdout = child.stdout
-    }
     child.stdout?.on('data', (chunk: Buffer) => {
       if (isCurrent()) this.relay(chunk)
     })
@@ -960,6 +1258,9 @@ export class Playout {
     const child = this.encoder
     this.encoder = null
     if (abandon && this.currentPass) this.currentPass.abandoned = true
+    // The pass will never report again: its exit handler ignores a replaced encoder,
+    // so nothing else would remove its measurement from the map.
+    if (this.currentPass?.seq !== undefined) this.passMaterial.delete(this.currentPass.seq)
     if (child && child.exitCode === null) {
       try {
         child.kill('SIGKILL')

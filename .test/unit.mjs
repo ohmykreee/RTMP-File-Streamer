@@ -30,7 +30,7 @@ function step(label, script, args = []) {
 }
 
 /** The clips every downstream suite streams from. */
-const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_a.srt', 'clip_emb.mkv']
+const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_d.mp4', 'clip_a.srt', 'clip_emb.mkv']
 
 if (!fs.existsSync(path.join(root, 'out', 'main', 'index.js'))) {
   console.error('Build output missing. Run `pnpm build` first (or use `pnpm test`, which builds).')

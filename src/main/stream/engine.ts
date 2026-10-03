@@ -13,7 +13,7 @@ import type {
 import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand } from '../ffmpeg/command'
 import { Playout } from './playout'
 import { buildRtmpTarget } from '@shared/rtmp'
-import { CONTAINER_MUXER } from '@shared/defaults'
+import { BUFFER_SEC_MIN, CONTAINER_MUXER } from '@shared/defaults'
 
 export interface EngineDeps {
   getFfmpegPath: () => string
@@ -64,6 +64,18 @@ const PASS_START_MARGIN_SEC = 0.25
  */
 function bufferedMode(output: SessionSettings['output']): boolean {
   return output.buffered === true && output.bufferSec > 0
+}
+
+/**
+ * How far the buffered encoder may run ahead of the publisher, in seconds.
+ *
+ * `bufferSec` is the operator's setting and the floor is enforced here as well as in
+ * the settings, so a value that never passed through `normaliseOutput` (a preset
+ * written by hand, the control API) cannot leave the playout with a buffer too small
+ * to cover a file change.
+ */
+function bufferLeadLimitSec(output: SessionSettings['output']): number {
+  return Math.max(BUFFER_SEC_MIN, output.bufferSec)
 }
 
 /**
@@ -726,13 +738,21 @@ export class StreamEngine {
     this.positionSec = positionSec
 
     if (!this.playout) {
-      this.playout = new Playout(ffmpeg, this.buildPusherArgs(settings), {
-        log: (level, message) => this.log(level, message),
-        onPublished: (seconds) => this.onPublished(seconds),
-        onPusherExit: (code) => this.onPusherExit(code),
-        onEncoderExit: (code, materialSec) => this.onEncoderExit(code, materialSec)
-      })
-      this.log('info', `已启用缓冲推流：编码领先推流 ${settings.output.bufferSec}s，seek 只重启编码进程。`)
+      this.playout = new Playout(
+        ffmpeg,
+        this.buildPusherArgs(settings),
+        bufferLeadLimitSec(settings.output),
+        {
+          log: (level, message) => this.log(level, message),
+          onPublished: (seconds) => this.onPublished(seconds),
+          onPusherExit: (code) => this.onPusherExit(code),
+          onEncoderExit: (code, materialSec) => this.onEncoderExit(code, materialSec)
+        }
+      )
+      this.log(
+        'info',
+        `已启用缓冲推流：编码最多领先推流 ${bufferLeadLimitSec(settings.output)}s（超出即暂停编码输出），换文件时靠这段缓冲过渡。`
+      )
     }
 
     /*

@@ -784,15 +784,19 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 }
               />
               <DelayField
-                label="推流延迟 (秒)"
-                hint={o.buffered ? `可用编码延迟/秒：${BUFFER_SEC_MIN}–${BUFFER_SEC_MAX}` : '需先开启双引擎推流'}
+                label="编码缓冲 (秒)"
+                hint={
+                  o.buffered
+                    ? `编码最多领先推流多少秒：${BUFFER_SEC_MIN}–${BUFFER_SEC_MAX} s。每 1 秒约占 码率/8 KB 内存，越大越能扛住编码变慢`
+                    : '需先开启双引擎推流'
+                }
                 value={o.bufferSec}
                 min={BUFFER_SEC_MIN}
                 max={BUFFER_SEC_MAX}
                 disabled={!o.buffered}
                 // The floor is applied when the field is committed, not per keystroke:
-                // a delay of zero has no meaning while buffering, but the intermediate
-                // states of a number being typed are not numbers yet.
+                // a lead below the floor cannot cover a file change, but the
+                // intermediate states of a number being typed are not numbers yet.
                 onCommit={(bufferSec) => props.onUpdateOutput({ bufferSec })}
               />
             </div>

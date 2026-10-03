@@ -248,11 +248,16 @@ export interface OutputSettings {
   /**
    * How far the encoder may run ahead of the publisher, in seconds.
    *
-   * This is the viewers' extra delay behind the live edge, and it is a trade-off
-   * rather than a free win: more of it absorbs a longer stall, less of it keeps the
-   * stream closer to real time. Only meaningful when `buffered` is on, where it has
-   * a floor of {@link BUFFER_SEC_MIN} — a buffer of zero would leave the publisher
-   * with nothing to read and stall it immediately.
+   * A hard limit, not a wish: the buffered playout holds the encoder back once it is
+   * further ahead than this, because everything ahead of the publisher is held in
+   * this process's memory until its turn comes (unbounded, that queue grew to the
+   * whole playlist and eventually killed the RTMP session).
+   *
+   * The publisher is the clock — it airs at 1x whatever it has been given — so this
+   * does not change what viewers see when, only how much of a slow stretch the
+   * encoder can ride out, at a cost of about `bitrate / 8` KB per second. Below
+   * {@link BUFFER_SEC_MIN} a file change starves the publisher, so the floor covers
+   * the hand-over between two entries.
    */
   bufferSec: number
   /**

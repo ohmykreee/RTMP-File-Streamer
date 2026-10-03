@@ -839,6 +839,111 @@ await obsWebSocketChecks({
   record
 })
 
+/* ------------------------------------------------------------------ *
+ * 9. buffered playout: the configured lead is a limit, not a wish
+ * ------------------------------------------------------------------ */
+
+console.log('\n=== 9. encoder buffer is enforced ===')
+/*
+ * The encoder runs flat out while the publisher takes material at 1x, so everything
+ * ahead of the publisher is held in this process's memory. That queue used to be
+ * unbounded (it grew to the whole playlist and eventually killed a real 4h51m
+ * session); now the playout pauses the encoder whenever it is further ahead than
+ * `bufferSec` allows.
+ *
+ * Two runs of the same clip with different limits is what proves the SETTING is the
+ * thing doing the bounding: a playout that ignored it would reach the same lead in
+ * both runs, and one that never throttled would keep the whole 45 s fixture. The
+ * encoder is deliberately slowed to ~5x real time — a fast one finishes the fixture
+ * between two `-progress` reports, and then no throttle decision can be made at all.
+ */
+{
+  const { BUFFER_SEC_MIN } = await import(pathToFileURL(bundle('src/shared/defaults.ts', path.join(here, 'defaults.bundle.mjs'))).href)
+  const { Playout } = await import(pathToFileURL(bundle('src/main/stream/playout.ts', path.join(here, 'playout.bundle.mjs'))).href)
+  /** The hold acts on `-progress` reports (~0.5 s apart), so one interval of material overshoots. */
+  const LEAD_SLACK_SEC = 4
+  const WINDOW_SEC = 8
+
+  /** Runs one encoder pass through the real playout and reports what the buffer did. */
+  const measureLead = async (leadLimitSec, tag) => {
+    const holds = []
+    let published = 0
+    const playout = new Playout(FFMPEG, ['-y', '-f', 'flv', path.join(here, `${tag}.flv`)], leadLimitSec, {
+      log: (level, message) => {
+        if (message.includes('暂停编码进程输出')) holds.push(message)
+      },
+      onPublished: (sec) => {
+        published = sec
+      },
+      onPusherExit: () => {},
+      onEncoderExit: () => {}
+    })
+    await playout.start(
+      {
+        input: path.join(here, 'clip_d.mp4'),
+        args: ['-map', '0:v', '-c:v', 'libx264', '-preset', 'veryfast', '-threads', '1', '-g', '60', '-pix_fmt', 'yuv420p', '-an'],
+        startPositionSec: 0,
+        tsOffset: 0,
+        expectedSec: 45
+      },
+      false
+    )
+    let peak = 0
+    const started = Date.now()
+    while ((Date.now() - started) / 1000 < WINDOW_SEC) {
+      peak = Math.max(peak, playout.getEncoderStats().leadSec)
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    const wallSec = (Date.now() - started) / 1000
+    const relayed = playout.getRelayStats()
+    const pts = playout.getTsPtsSpan()
+    const encodedSec = playout.getEncodedSec()
+    await playout.stop()
+    return { peak, holds, published, wallSec, relayedMb: relayed.relayedBytes / 1048576, pts, encodedSec }
+  }
+
+  const small = await measureLead(BUFFER_SEC_MIN, 'lead_small')
+  const large = await measureLead(BUFFER_SEC_MIN * 2, 'lead_large')
+  record(
+    'the encoder is held at the small configured lead instead of encoding the whole file',
+    small.peak <= BUFFER_SEC_MIN + LEAD_SLACK_SEC && small.peak >= BUFFER_SEC_MIN * 0.6 && small.holds.length > 0,
+    `peak lead ${small.peak.toFixed(1)}s of a 45s clip (limit ${BUFFER_SEC_MIN}s + ${LEAD_SLACK_SEC}s slack), ${small.holds.length} hold(s), ${small.relayedMb.toFixed(1)} MB relayed`
+  )
+  record(
+    'a larger lead setting really does allow a larger buffer',
+    large.peak >= small.peak + 6 && large.holds.length > 0,
+    `peak ${small.peak.toFixed(1)}s at ${BUFFER_SEC_MIN}s vs ${large.peak.toFixed(1)}s at ${BUFFER_SEC_MIN * 2}s`
+  )
+  record(
+    'the publisher kept taking material at real time while the encoder was held',
+    /*
+     * The publisher may only air what it is given, so if the throttle holds the encoder
+     * a little too long every cycle, production settles below 1x and every live viewer
+     * starves — that is exactly what a real session did (0.77–0.90x measured), and it
+     * shows up here as `published` falling behind the wall clock.
+     */
+    small.published > small.wallSec * 0.9 && large.published > large.wallSec * 0.9,
+    `published ${small.published.toFixed(1)}s of ${small.wallSec.toFixed(1)}s wall (small), ${large.published.toFixed(1)}s of ${large.wallSec.toFixed(1)}s (large)`
+  )
+  record(
+    'the reported on-wire PTS stays on the stream timeline',
+    /*
+     * The relay's TS scan feeds the "on-wire video PTS" figure in the log. It used to
+     * read the PTS at a fixed offset, which lands inside the PCR whenever the muxer
+     * writes one, and reported absurd spans (22,427–44,006 s for a 23-minute pass) —
+     * numbers an operator reasonably reads as a timestamp fault in the stream.
+     */
+    small.pts.videoHeaders > 0 &&
+      Number.isFinite(small.pts.firstSec) &&
+      Number.isFinite(small.pts.lastSec) &&
+      small.pts.lastSec >= small.encodedSec - 30 &&
+      small.pts.lastSec <= small.encodedSec + 5 &&
+      small.pts.firstSec < 10,
+    `PTS ${small.pts.firstSec?.toFixed(2)}–${small.pts.lastSec?.toFixed(2)}s over ${small.pts.videoHeaders} frames, encoder at ${small.encodedSec.toFixed(1)}s`
+  )
+  if (small.holds[0]) console.log(`  hold: ${small.holds[0]}`)
+}
+
 console.log('\n=== summary ===')
 const passed = results.filter((r) => r.ok).length
 console.log(`${passed}/${results.length} checks passed`)
