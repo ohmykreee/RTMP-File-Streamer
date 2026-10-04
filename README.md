@@ -239,7 +239,7 @@ data/                    运行期状态（不入库，见 .gitignore 的 Data/�
 ```bash
 pnpm test                # 默认跑 test:unit
 pnpm run test:unit       # 非 Electron 全部：命令构建 + 真实转码/字幕渲染 + 本地推流 + obs-websocket
-pnpm run test:e2e        # Electron 全部套件（ui → features → presets → layout → datadir → engine）
+pnpm run test:e2e        # Electron 全部套件（ui → features → presets → layout → datadir → engine → enginebuffered）
 pnpm run test:e2e ui     # 只跑指定套件，可写多个：node .test/e2e.mjs ui presets
 pnpm run test:ci         # 类型检查 → 构建 → test:unit → test:e2e
 ```
@@ -256,7 +256,7 @@ pnpm run test:ci         # 类型检查 → 构建 → test:unit → test:e2e
 - **编码缓冲（双引擎）**：用同一个 45s 素材、同一段编码参数跑两次真实播放（12s 与 24s 上限），要求实测领先量被压在设定值附近（含一个 `-progress` 周期的过冲）且**更大的设定确实允许更深的缓冲**，同时推流进程在编码被暂停期间持续按 1× 出流——这正是"上限真的生效、而不是随便编完整个列表"的证据
 - **本地推流**：`ffmpeg -listen 1` 接收真实推送，校验进度单调递增、`-re` 实时节奏、收到可解码的音视频
 - **obs-websocket 端点 22 项**：用真实 TCP 客户端完成 obs-websocket v5 握手（Hello/Identify/Identified、RFC 6455 accept key、子协议协商、密码 SHA256 挑战与错误密码拒绝），校验 `SetStreamServiceSettings` 写入推流地址与密钥、`StartStream`/`StopStream` 驱动引擎、`GetStreamStatus` 反映实时状态、未实现的请求返回通用成功、未掩码帧以 1002 关闭连接
-- **引擎 20 项**：两文件自动续播（20s + 15s 全部送达并解码）、进度单调递增、`-re` 实时节奏、跳转后仅重推剩余 8 秒、跳过目标完整送达、无错误日志
+- **引擎 26 项**（单进程）+ **29 项**（双引擎，`enginebuffered` 套件用 `BUFFER_SEC=12` 跑同一个驱动器）：两文件自动续播（20s + 15s 全部送达并解码、双引擎下整条列表只在**一个** RTMP 会话里播完）、进度单调递增、`-re` 实时节奏、跳转后仅重推剩余 8 秒、跳过目标完整送达、无错误日志；另加**进度条只反映推流进度**的两条回归断言——观众时间轴在换文件时不得回退，且切换「当前文件」必须等到已推流总量真的播完上一个文件（用变更**前**的采样判定：bug 会同时改写 `currentIndex` 与 `completedSec`，只看变更后是自洽的），并有一条断言证明双引擎下编码进程确实领先（实测 23s），否则前两条断言无意义
 - **UI 端到端 35 项**：窗口启动、播放列表与字幕关联恢复、点击「开始串流」→ RTMP ingest 收到数据、进度百分比推进、点击「下一个文件」切换到第二项、会话结束回到空闲、渲染进程无未捕获异常，状态确实写在 `Data/` 且未写入 Roaming，以及**日志面板的完整行为**：收起时工具栏隐藏 / 展开后出现「全部 ｜ 调试/信息/警告/错误/FFmpeg」（分隔线位于「全部」与等级之间）、等级多选且与「全部」互斥、单等级筛选在**整个列表**范围内生效、**面板渲染的行数等于它持有的条目数**（历史中主进程与引擎各自从 1 开始编号，早期实现因 id 重号导致 React 静默丢行）、面板持有主进程的**全部**历史而非截断片段、「清空」同时清空面板与主进程缓冲且之后不会被回填
 - **预设 32 项**：预设栏渲染、在五个选项卡里改设置后保存、`presets.json` 落在 `Data/`、预设含全部四组设置（推流地址与密钥按设计以明文保存）、套用内置预设覆盖设置、套用自定义预设完整还原、**obs-websocket 开关/地址/端口/密码落盘并随预设还原**、开关能启停端点且改端口会重新绑定、删除后从磁盘消失、分辨率控件结构（高度框在勾选后禁用、宽度框仍可编辑）、码率单位切换与 Mbps→kbps 换算
 - **Data 目录 33 项**：分别在开发构建、打包后的 `win-unpacked`、以及**整体复制到别处后的目录**三种情况下，校验 `Data/` 位于程序目录内、`settings.json`/`playlist.json`/`presets.json` 确实写入其中、缓存也在 `Data/Cache`、且 Roaming 目录完全没有被写入

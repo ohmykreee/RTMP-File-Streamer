@@ -23,17 +23,32 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
 const electron = path.join(root, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron')
 
-/** name -> { script, how, budget } ; `how: 'electron-app'` boots the real app. */
+/** name -> { script, how, budget, env } ; `how: 'electron-app'` boots the real app. */
 const SUITES = {
   ui: { script: 'ui-e2e.mjs', how: 'node', budget: 420_000, what: 'UI: queue, start/pause/skip, log panel, ingest' },
   features: { script: 'features-e2e.mjs', how: 'node', budget: 600_000, what: 'burn-in, hardware encoder, seek, multi-file queue' },
   presets: { script: 'preset-e2e.mjs', how: 'node', budget: 420_000, what: 'presets, RTMP tab + obs-websocket controls, resolution/bitrate widgets' },
   layout: { script: 'layout-e2e.mjs', how: 'node', budget: 300_000, what: 'player bar geometry across tabs' },
   datadir: { script: 'data-dir-e2e.mjs', how: 'node', budget: 300_000, what: 'state files stay inside Data/' },
-  engine: { script: 'engine-run.cjs', how: 'electron-app', budget: 300_000, what: 'engine lifecycle inside Electron without a window' }
+  engine: { script: 'engine-run.cjs', how: 'electron-app', budget: 300_000, what: 'engine lifecycle, single-process pipeline' },
+  /*
+   * The same driver with the buffered playout switched on, which is the DEFAULT the app
+   * ships with. Both pipelines need their own run: they share the engine but not the
+   * rules — a buffered session keeps one publish session across file changes, and the
+   * encoder runs ahead of the viewer, so anything the engine reports about "the file
+   * being encoded" must not move the viewer's progress bar. That regression lived in
+   * the buffered path only, so covering it here is the point of the second run.
+   */
+  enginebuffered: {
+    script: 'engine-run.cjs',
+    how: 'electron-app',
+    budget: 300_000,
+    env: { BUFFER_SEC: '12' },
+    what: 'engine lifecycle, buffered two-process pipeline'
+  }
 }
 
-const ORDER = ['ui', 'features', 'presets', 'layout', 'datadir', 'engine']
+const ORDER = ['ui', 'features', 'presets', 'layout', 'datadir', 'engine', 'enginebuffered']
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith('-'))
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
@@ -75,12 +90,14 @@ const runSuite = (name) =>
     const suite = SUITES[name]
     console.log(`\n${'='.repeat(72)}\n=== e2e: ${name} — ${suite.what}\n${'='.repeat(72)}`)
     const started = Date.now()
+    // A suite may pin environment the engine reads (BUFFER_SEC picks the playout).
+    const suiteEnv = { ...env, ...(suite.env ?? {}) }
     // `engine-run.cjs` is the Electron main script itself: Electron is handed the
     // file, not node. The browser suites are plain node drivers that spawn the app.
     const child =
       suite.how === 'electron-app'
-        ? spawn(electron, [path.join(here, suite.script)], { cwd: root, env, stdio: 'inherit' })
-        : spawn(process.execPath, [path.join(here, suite.script)], { cwd: root, env, stdio: 'inherit' })
+        ? spawn(electron, [path.join(here, suite.script)], { cwd: root, env: suiteEnv, stdio: 'inherit' })
+        : spawn(process.execPath, [path.join(here, suite.script)], { cwd: root, env: suiteEnv, stdio: 'inherit' })
 
     // A wedged suite would hang `pnpm test` forever; the watchdog fails it instead.
     const timer = setTimeout(() => {

@@ -149,7 +149,20 @@ export class StreamEngine {
   /* --- two-process playout (bufferSec > 0) --- */
   private playout: Playout | null = null
   /** Encoder pass being produced, i.e. what the pusher is heading into. */
-  private pass: { index: number; startSec: number; itemDurationSec: number; tsOffset: number } | null = null
+  private encoderPass: { index: number; startSec: number; itemDurationSec: number; tsOffset: number } | null = null
+  /**
+   * Which entry the ENCODER is working on, and how long it is.
+   *
+   * Deliberately not `currentIndex`: in buffered mode the encoder is seconds to
+   * minutes ahead of the viewer, so the entry being encoded is not the entry on
+   * screen. Keeping the two apart is what makes the progress bar honest — driving it
+   * from the encoder's entry made it jump to the next file the moment the encoder
+   * started it, and jump back when the pusher's next report arrived (measured: the
+   * bar sat at 20.0s of 35s for 327ms in the middle of file A). These fields are
+   * only read for reporting the encoder's own work (command preview, file path).
+   */
+  private encoderIndex = -1
+  private encoderItemDuration = 0
   /**
    * Set once every playlist entry is encoded but the pusher is still publishing
    * what it holds. In buffered mode the encoder deliberately runs ahead of the
@@ -282,12 +295,58 @@ export class StreamEngine {
    * a seek skipped — which is what the progress bar and the completion check
    * need. Deriving `completedSec` here (instead of in each caller) is what keeps
    * a seek from leaving a stale total behind.
+   *
+   * Everything here describes the VIEWER's position, so in buffered mode it may only
+   * be called from the published position, or on the user's own instruction (a skip
+   * or a jump restarts the RTMP session, so the viewer really does move at once).
+   * Calling it from encoder progress is what made the bar jump ahead at a file change.
    */
   private setPosition(positionSec: number): void {
     const max = this.itemDuration > 0 ? this.itemDuration : positionSec
     const clamped = Math.max(0, Math.min(positionSec, max))
     this.positionSec = clamped
     this.completedSec = this.sumDurationsBefore(this.currentIndex) + clamped
+  }
+
+  /**
+   * Moves the viewer to an entry and a position inside it.
+   *
+   * Used only where the viewer's timeline genuinely restarts: opening a session, and
+   * a skip/jump that retries or replaces the publish session. A buffered file change
+   * does NOT come through here — there the viewer stays where the pusher is until it
+   * reports crossing into the next entry.
+   *
+   * `durationSec` is passed in rather than read from the fields: this is the one place
+   * the viewer's file is known before the encoder has confirmed it, and taking the
+   * duration from `encoderItemDuration` would silently depend on whether the caller
+   * had already stamped the new pass into it. In buffered mode that stale value would
+   * be the PREVIOUS file's length; in the single-process pipeline it would be the
+   * playlist's own guess instead of what ffprobe measured.
+   */
+  private moveViewerTo(index: number, positionSec: number, durationSec: number): void {
+    this.currentIndex = index
+    this.startPositionSec = positionSec
+    this.itemDuration = durationSec || this.items[index]?.durationSec || 0
+    this.setPosition(positionSec)
+  }
+
+  /**
+   * Clears the figures that belong to a SESSION rather than to one pass.
+   *
+   * These describe live output (`speed`, `fps`, `bitrate`, `frame`, the raw ffmpeg
+   * timeline), so they are reset once when a run opens and once when it closes — not
+   * per encoder pass. Resetting them on every pass blanked the whole status line at
+   * each buffered file change, even though the viewer was still mid-file and the
+   * pusher had not missed a frame.
+   */
+  private resetSessionStats(): void {
+    this.outTimeSec = 0
+    this.speed = 0
+    this.fps = 0
+    this.bitrateKbps = 0
+    this.frame = 0
+    this.droppedFrames = 0
+    this.encoderStats = null
   }
 
   private emitPlaylist(): void {
@@ -328,12 +387,24 @@ export class StreamEngine {
     this.startedAt = Date.now()
     this.reconnectCount = 0
     this.stopping = false
+    this.resetSessionStats()
     // A new session starts a new RTMP timeline, so the pass log and the published
     // position must not carry over from the previous run.
     this.airedPasses = []
     this.publishedSec = 0
     this.drain = null
-    this.currentIndex = atIndex !== undefined ? Math.max(0, Math.min(atIndex, this.items.length - 1)) : 0
+    this.encoderPass = null
+    this.encoderIndex = -1
+    this.encoderItemDuration = 0
+    const firstIndex = atIndex !== undefined ? Math.max(0, Math.min(atIndex, this.items.length - 1)) : 0
+    /*
+     * Opening the session moves the viewer to the first entry, whichever pipeline runs.
+     * In buffered mode `launchCurrentFrom` deliberately leaves the viewer's fields
+     * alone (the encoder about to start is not what the viewer is watching), so the bar
+     * would otherwise sit empty until the pusher's first report — and the item the
+     * session is starting at is decided here, not there.
+     */
+    this.moveViewerTo(firstIndex, 0, this.items[firstIndex]?.durationSec || 0)
     this.emitPlaylist()
 
     const settings = this.deps.getSettings()
@@ -363,13 +434,15 @@ export class StreamEngine {
       this.playout = null
       await playout.stop()
     }
-    this.pass = null
+    this.encoderPass = null
     this.drain = null
     this.airedPasses = []
     this.publishedSec = 0
     this.state = 'idle'
     this.connected = false
     this.currentIndex = -1
+    this.encoderIndex = -1
+    this.encoderItemDuration = 0
     this.positionSec = 0
     this.startPositionSec = 0
     this.completedSec = 0
@@ -568,19 +641,31 @@ export class StreamEngine {
     await this.killChild(true)
     this.cancelTimers()
     const generation = ++this.generation
-    this.currentIndex = index
-    this.startPositionSec = positionSec
-    // Position and the derived session total are set together, so a seek cannot
-    // leave the total pointing at where playback used to be.
-    this.setPosition(positionSec)
-    // Raw ffmpeg timeline: rebased to zero by an input seek, so it starts at 0 for
-    // every pass regardless of where the pass begins.
-    this.outTimeSec = 0
-    this.speed = 0
-    this.fps = 0
-    this.bitrateKbps = 0
-    this.frame = 0
-    this.droppedFrames = 0
+    /*
+     * Everything below describes what the VIEWER sees, so in buffered mode it is the
+     * pusher's job — not this function's. Starting an encoder pass says nothing about
+     * where the viewer is: the encoder runs ahead on purpose, so moving the viewer's
+     * entry and position here is what made the progress bar jump to the next file the
+     * moment the encoder began it and snap back on the pusher's next report, and the
+     * per-pass reset of `speed`/`fps`/`bitrate` blanked the status line at every file
+     * change. `launchBuffered` sets the encoder-side fields instead; the viewer's move
+     * when the pusher actually reaches the entry (or at once, for a skip/jump, which
+     * replaces the session the viewer is watching).
+     */
+    const viewerStateFromThisPass = !bufferedMode(this.deps.getSettings().output)
+    if (viewerStateFromThisPass) {
+      this.encoderIndex = index
+      this.encoderItemDuration = item.durationSec || 0
+      this.moveViewerTo(index, positionSec, this.encoderItemDuration)
+      // Raw ffmpeg timeline: rebased to zero by an input seek, so it starts at 0 for
+      // every pass regardless of where the pass begins.
+      this.outTimeSec = 0
+      this.speed = 0
+      this.fps = 0
+      this.bitrateKbps = 0
+      this.frame = 0
+      this.droppedFrames = 0
+    }
     this.connected = false
     this.stopping = false
     this.emitStatus()
@@ -760,11 +845,20 @@ export class StreamEngine {
       return
     }
 
-    this.itemDuration = media.durationSec || item.durationSec || 0
-    this.currentIndex = index
-    this.startPositionSec = positionSec
-    this.positionSec = positionSec
+    // The encoder's own view of this pass. The viewer's fields are NOT touched here:
+    // see the note in `launchCurrentFrom`. What the encoder is producing is reported
+    // as a buffer lead (`encodedSec`) and as per-entry "准备中" status, both of which
+    // stay on the encoder's side of the line.
+    this.encoderIndex = index
+    this.encoderItemDuration = media.durationSec || item.durationSec || 0
 
+    /*
+     * A pass that has to open the publish session itself: either the playout does not
+     * exist yet (a retry after the pusher died drops it — see `onPusherExit`), or the
+     * pass is about to replace the session (skip / jump). Either way the published
+     * timeline starts over at this entry, so this is also where the viewer moves.
+     */
+    const resetViewer = !this.playout
     if (!this.playout) {
       this.playout = new Playout(
         ffmpeg,
@@ -803,7 +897,7 @@ export class StreamEngine {
         ? PASS_START_MARGIN_SEC
         : 0
       : this.playout.getNextOffset() + (positionSec > 0.05 ? PASS_START_MARGIN_SEC : 0)
-    const expectedSec = Math.max(0, this.itemDuration - positionSec)
+    const expectedSec = Math.max(0, this.encoderItemDuration - positionSec)
     if (restartSession) {
       // The timeline restarts with the session, so what the viewer is watching is
       // reported against the new one from here on.
@@ -811,10 +905,18 @@ export class StreamEngine {
       this.publishedSec = 0
       this.drain = null
     }
-    this.pass = { index, startSec: positionSec, itemDurationSec: this.itemDuration, tsOffset }
+    /*
+     * A new publish session means the viewer's timeline restarts at this entry, so it
+     * moves now rather than when the new publisher first reports — and for a skip or a
+     * jump that is also what the user just asked for, so waiting would look like the
+     * click was ignored. This is the only way a buffered file change moves the viewer;
+     * a plain `finish` advance leaves it where the pusher is.
+     */
+    if (resetViewer || restartSession) this.moveViewerTo(index, positionSec, this.encoderItemDuration)
+    this.encoderPass = { index, startSec: positionSec, itemDurationSec: this.encoderItemDuration, tsOffset }
     // Recorded before the encoder starts, so a pusher that crosses into this pass
     // while it is still being built is already reported as watching it.
-    if (this.airedPasses.at(-1)?.tsOffset !== tsOffset) this.airedPasses.push({ ...this.pass })
+    if (this.airedPasses.at(-1)?.tsOffset !== tsOffset) this.airedPasses.push({ ...this.encoderPass })
 
     const pass = { input: item.path, args, startPositionSec: positionSec, tsOffset, expectedSec }
     if (restartSession) {
@@ -833,8 +935,8 @@ export class StreamEngine {
         this.restartingSession = false
       }
       // The new pass has been handed over and will air from the start of the file.
-      this.pass = { index, startSec: positionSec, itemDurationSec: this.itemDuration, tsOffset }
-      this.airedPasses = [{ ...this.pass }]
+      this.encoderPass = { index, startSec: positionSec, itemDurationSec: this.encoderItemDuration, tsOffset }
+      this.airedPasses = [{ ...this.encoderPass }]
       /*
        * A pass that finished during the restart was held back (see `onEncoderExit`) and
        * has to be accounted for now: the new publisher is up, so this is the point at
@@ -1010,8 +1112,8 @@ export class StreamEngine {
 
   /** An encoder pass ended: what it produced is now part of the stream. */
   private onEncoderExit(code: number | null, materialSec: number): void {
-    if (this.stopping || !this.pass) return
-    const index = this.pass.index
+    if (this.stopping || !this.encoderPass) return
+    const index = this.encoderPass.index
     /*
      * A pass that ends while the session is being replaced cannot be acted on yet: the
      * publisher that is coming up has not connected, and advancing the queue would
@@ -1303,9 +1405,21 @@ export class StreamEngine {
     this.emitPlaylist()
   }
 
+  /**
+   * The entry the preview and the "show in folder" action should describe.
+   *
+   * The ENCODER's entry, not the viewer's: this answers "what is this app encoding
+   * right now", and in buffered mode the two are different files for most of a
+   * session. Falls back to the viewer's entry (and then to the first one) before any
+   * encoder pass has been started.
+   */
+  private encoderItem(): PlaylistItem | undefined {
+    return this.items[this.encoderIndex] ?? this.items[this.currentIndex] ?? this.items[0]
+  }
+
   getCommandPreview(): string {
     if (this.commandLine) return this.commandLine
-    const item = this.items[this.currentIndex] ?? this.items[0]
+    const item = this.encoderItem()
     if (!item) return '（播放列表为空，请先添加视频文件）'
     const media = this.deps.getMedia(item.path)
     if (!media) return '（正在等待媒体信息探测完成）'
@@ -1331,7 +1445,7 @@ export class StreamEngine {
   }
 
   getCurrentItemPath(): string | null {
-    const item = this.items[this.currentIndex]
+    const item = this.encoderItem()
     return item ? path.resolve(item.path) : null
   }
 }

@@ -264,6 +264,16 @@ async function main() {
   const logs = []
   const playlistUpdates = []
 
+  /*
+   * Snapshots of one session's status stream, for the viewer-facing timeline checks.
+   *
+   * The engine emits on encoder progress as well as publisher progress, so the two
+   * have to be told apart from the outside: a report that moves the viewer must be
+   * consistent with what has been published, and an encoder starting the next file
+   * must NOT move it.
+   */
+  let captureSession = null
+
   const engine = createStreamEngine({
     getFfmpegPath: () => FFMPEG,
     getSettings: () => settings,
@@ -318,6 +328,17 @@ async function main() {
     const st = engine.getStatus()
     if (st.state === 'live') sawLive = true
     if (st.currentIndex === 1) sawIndex1 = true
+    if (captureSession) {
+      captureSession.samples.push({
+        at: Date.now(),
+        state: st.state,
+        currentIndex: st.currentIndex,
+        completedSec: st.completedSec,
+        positionSec: st.positionSec,
+        encodedSec: st.encodedSec ?? null,
+        itemStatus: { ...st.itemStatus }
+      })
+    }
     const pos = Math.floor(st.positionSec)
     if (pos !== lastLoggedPosition && pos > 0 && pos % 5 === 0) {
       lastLoggedPosition = pos
@@ -330,6 +351,7 @@ async function main() {
 
   await engine.start()
   note('engine.start() returned', `state=${engine.getStatus().state}`)
+  captureSession = { label: 'phase 1', samples: [] }
 
   /*
    * Each phase gets its own airtime budget, because in buffered mode a phase lasts
@@ -361,6 +383,10 @@ async function main() {
    * finish it before the skip arrives. So "the target was reached and aired" is a
    * real observation here rather than a coincidence. */
   note('phase 2', 'skip while live, over two entries, to a file not yet encoded')
+  const phaseOneSamples = captureSession ? captureSession.samples : []
+  // Phase 1 is the run with no user intervention: whatever the viewer's timeline does
+  // there came from the engine, not from a skip or a jump, so it must be continuous.
+  captureSession = null
   const phaseTwoLogStart = logs.length
   const pushersBeforePhase2 = logs.filter((l) => l.message.includes('推流进程已启动')).length
   /**
@@ -473,6 +499,71 @@ async function main() {
   })()
   record('status stream produced progress updates', progressSamples.length > 10, `${progressSamples.length} samples`)
   record('reported position never went backwards within a file', monotonicPerItem)
+
+  /*
+   * The progress bar must report the PUBLISHER's position only.
+   *
+   * The engine also emits on encoder progress, and in buffered mode the encoder starts
+   * the next file long before the pusher finishes the current one. Letting that move
+   * the viewer's entry made the bar jump to the next file and snap back moments later
+   * (measured: it read 20.0s of a 35s playlist for 327ms in the middle of file A).
+   * Two properties rule that out, and both hold only for a run the user never
+   * interrupted — phase 1.
+   */
+  const phase1 = phaseOneSamples.filter((s) => s.state === 'live' || s.state === 'draining')
+  const viewerBackwards = []
+  for (let i = 1; i < phase1.length; i += 1) {
+    if (phase1[i].completedSec < phase1[i - 1].completedSec - 0.05) {
+      viewerBackwards.push(`${phase1[i - 1].completedSec.toFixed(2)}→${phase1[i].completedSec.toFixed(2)}`)
+    }
+  }
+  record(
+    'the viewer timeline never moves backwards during a buffered file change',
+    viewerBackwards.length === 0,
+    viewerBackwards.length ? `backward at ${viewerBackwards.slice(0, 3).join(', ')}` : `checked ${phase1.length} live samples`
+  )
+
+  /*
+   * A change of `currentIndex` may only follow a published position that actually
+   * finished the entries before it. Checking the sample AFTER the change is not enough:
+   * the bug set `currentIndex` and `completedSec` together (to the next entry's start),
+   * so the new sample looked self-consistent. What gives it away is the sample BEFORE
+   * it — the viewer was still mid-file there, and an entry cannot be current until its
+   * predecessor has aired. Measured on the bug: `currentIndex` became 1 while the last
+   * published total was 10.79s of the 20s clip_a, so the "next entry" was shown 9.2s
+   * before it was earned. Phase 1 is the two-entry playlist [clip_a (20s), clip_b (15s)].
+   */
+  const phase1Durations = [infoA.durationSec, infoB.durationSec]
+  const entryStartSec = phase1Durations.map((_, i) => phase1Durations.slice(0, i).reduce((a, b) => a + b, 0))
+  const INDEX_TOLERANCE_SEC = 1.5
+  const unearnedIndexMoves = []
+  for (let i = 1; i < phase1.length; i += 1) {
+    const prev = phase1[i - 1]
+    const cur = phase1[i]
+    if (cur.currentIndex <= prev.currentIndex || cur.currentIndex <= 0) continue
+    const boundary = entryStartSec[cur.currentIndex] ?? 0
+    // The viewer must have reached the end of everything before this entry.
+    if (prev.completedSec < boundary - INDEX_TOLERANCE_SEC) {
+      unearnedIndexMoves.push(
+        `entry ${cur.currentIndex} shown while the published total was only ${prev.completedSec.toFixed(2)}s of ${boundary.toFixed(2)}s`
+      )
+    }
+  }
+  record(
+    'the entry shown is only advanced by the published position',
+    unearnedIndexMoves.length === 0 && sawIndex1,
+    unearnedIndexMoves.length
+      ? unearnedIndexMoves.join(', ')
+      : `every entry change waited for the published total (checked ${phase1.length} samples)`
+  )
+  // And the same data proves the encoder really did run ahead in buffered mode, so the
+  // checks above are about a gap that exists rather than an absent one.
+  const maxLead = phase1.reduce((max, s) => Math.max(max, (s.encodedSec ?? s.completedSec) - s.completedSec), 0)
+  record(
+    buffered ? 'the encoder really did lead the publisher (so the checks above had a gap to catch)' : 'single-process pipeline reports no buffer lead',
+    buffered ? maxLead > 2 : maxLead < 0.5,
+    `max lead ${maxLead.toFixed(1)}s`
+  )
 
   /* ---- decode each received session ---- */
   /**
