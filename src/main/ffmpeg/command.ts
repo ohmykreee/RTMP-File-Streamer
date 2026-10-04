@@ -779,53 +779,171 @@ export function buildCommandLine(bin: string, args: string[]): string {
   return [quote(bin), ...args.map(quote)].join(' ')
 }
 
-/** Synthetic lavfi source used by the "test connection" action. */
-export function buildTestCommand(settings: SessionSettings, url: string, streamKey: string): string[] {
+/**
+ * Resolution of the synthetic test pattern.
+ *
+ * The pattern is what stands in for a real file, so it is generated at the size the
+ * session would output — otherwise a test at 640x360 says nothing about whether the
+ * chosen encoder and bitrate survive the real geometry. It is capped at 720p and
+ * falls back to 640x360 so that a 4K preset still answers in seconds instead of
+ * burning half a minute of software encoding on a connection check.
+ */
+const TEST_PATTERN_MAX_WIDTH = 1280
+const TEST_PATTERN_MAX_HEIGHT = 720
+const TEST_PATTERN_DEFAULT = '640x360'
+/**
+ * Frame rate of the pattern when the session does not pin one.
+ *
+ * `fps: 0` means "leave the source frame rate alone", and the pattern has no source
+ * to inherit it from, so 30 stands in — the same value the GOP maths already used.
+ * A configured `fps` IS honoured, because it is a real encoding parameter (it drives
+ * the keyframe interval) rather than a description of the file.
+ */
+const TEST_DEFAULT_FPS = 30
+
+function testPatternSize(v: VideoSettings): string {
+  const filter = resolveScaleFilter(v)
+  const m = /^(\d+):(\d+|-2)$/.exec(filter)
+  if (!m) return TEST_PATTERN_DEFAULT
+  let width = Number(m[1])
+  // `-2` is the auto height: derive it from the source aspect ratio, which for the
+  // 16:9 test pattern is what `testsrc2` would have produced anyway.
+  let height = m[2] === '-2' ? Math.round((width * 9) / 16 / 2) * 2 : Number(m[2])
+  if (!(width >= 2) || !(height >= 2)) return TEST_PATTERN_DEFAULT
+  const shrink = Math.min(1, TEST_PATTERN_MAX_WIDTH / width, TEST_PATTERN_MAX_HEIGHT / height)
+  if (shrink < 1) {
+    width = Math.max(2, Math.round((width * shrink) / 2) * 2)
+    height = Math.max(2, Math.round((height * shrink) / 2) * 2)
+  }
+  return `${width}x${height}`
+}
+
+/**
+ * Synthetic ffmpeg command for the "test connection" action.
+ *
+ * Everything the connection can depend on comes from the session, through the same
+ * helpers the real stream uses: the video/audio codecs, both encoders' rate control
+ * and bitrate, the audio sample rate, channel layout and loudness normalisation, the
+ * frame rate, keyframe interval, pixel format and container. Only the *source* is
+ * synthetic — and so is the one thing that describes it rather than encodes it: the
+ * test pattern's geometry is the session's output size (capped, see
+ * {@link testPatternSize}) and its duration is the 5 seconds the button promises.
+ *
+ * The settings that describe a *media file* instead of an encoder have no meaningful
+ * test equivalent, and the returned `notes` say so rather than leaving the result
+ * looking like they were exercised:
+ *  - `audio.codec: 'copy'`: the pattern has no source audio track to copy from, so the
+ *    test encodes AAC; `audio.codec: 'none'` drops the audio stream entirely, because
+ *    that is exactly what the real stream would send;
+ *  - `video.codec: 'copy'`: the pattern exists to be encoded, so the test uses the
+ *    software encoder of the same codec.
+ *
+ * `-re` is deliberately not applied: it would add the configured pipeline's pacing
+ * to a five-second clip for no diagnostic gain, and the button promises a quick
+ * answer. `-flvflags no_duration_filesize` is applied because the real command always
+ * applies it for FLV — RTMP flushes the header immediately — and its absence from the
+ * test was itself a difference between the test and the stream.
+ */
+export function buildTestCommand(settings: SessionSettings, url: string, streamKey: string): {
+  args: string[]
+  summary: string[]
+  notes: string[]
+} {
+  const v = settings.video
   const a = settings.audio
-  const aenc = a.codec === 'none' || a.codec === 'copy' ? 'aac' : a.codec === 'libopus' ? 'libopus' : a.codec === 'libmp3lame' ? 'libmp3lame' : 'aac'
+  const out = settings.output
+  const available = getAvailableEncoderNames()
+  const summary: string[] = []
+  const notes: string[] = []
   const target = buildRtmpTarget(url, streamKey)
-  return [
+  const pattern = testPatternSize(v)
+  const fps = v.fps > 0 ? v.fps : TEST_DEFAULT_FPS
+
+  /* ---------------- inputs ---------------- */
+  // `-nostdin` matches the real command: nothing here should ever read the console.
+  const args: string[] = [
     '-hide_banner',
+    '-nostdin',
     '-loglevel',
     'info',
     '-f',
     'lavfi',
     '-i',
-    'testsrc2=size=640x360:rate=30:duration=5',
+    `testsrc2=size=${pattern}:rate=${fps}:duration=5`,
     '-f',
     'lavfi',
     '-i',
     'sine=frequency=440:sample_rate=44100:duration=5',
     '-map',
-    '0:v:0',
-    '-map',
-    '1:a:0',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'ultrafast',
-    '-tune',
-    'zerolatency',
-    '-b:v',
-    '1000k',
-    '-maxrate',
-    '1000k',
-    '-bufsize',
-    '2000k',
-    '-pix_fmt',
-    'yuv420p',
-    '-g',
-    '60',
-    '-c:a',
-    aenc,
-    '-b:a',
-    '128k',
-    '-ar',
-    aenc === 'libopus' ? '48000' : '44100',
-    '-ac',
-    '2',
-    '-f',
-    CONTAINER_MUXER[settings.output.container],
-    target
+    '0:v:0'
   ]
+  if (a.codec !== 'none') args.push('-map', '1:a:0')
+
+  /* ---------------- video encoder ---------------- */
+  const flv = out.container === 'flv'
+  const wantsCopy = v.codec === 'copy'
+  const spec: EncoderSpec = wantsCopy
+    ? encoderArgFor('x264', 'h264', available)
+    : encoderArgFor(v.encoder, v.codec, available)
+  args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
+  applyVideoEncoderArgs(args, v, spec, fps, out.container)
+  if (v.repeatHeaders && flv) args.push('-flags', '+cgop')
+  if (wantsCopy) {
+    notes.push('视频设置为「直接复制」，测试画面没有源视频轨可复制，测试改用 H.264 软件编码（画面参数不代表实际推流）。')
+  }
+  const hw = spec.kind === 'software' ? '' : ' [硬件]'
+  summary.push(
+    `视频：${spec.name}${hw} · ${v.rateControl.toUpperCase()}${v.rateControl === 'crf' ? ` CRF ${v.crf}` : ` ${v.bitrateKbps}kbps`} · ${pattern} ${fps}fps`
+  )
+
+  /* ---------------- audio encoder ---------------- */
+  const audioFilters: string[] = []
+  if (a.codec === 'none') {
+    // No audio track at all: the test must push what the stream would push.
+    summary.push('音频：丢弃')
+  } else {
+    // The sine source is a single channel, which is what `applyAudioArgs` needs to
+    // know before it decides whether a `pan` downmix is required.
+    const enc = applyAudioArgs(args, a, audioFilters, 1)
+    if (a.codec === 'copy') {
+      notes.push('音频设置为「复制源音频」，测试信号没有源音轨可复制，测试改用 AAC 编码。')
+    }
+    const rate = enc === 'libopus' ? 48000 : a.sampleRate || 44100
+    const layout = Math.max(1, Math.min(2, a.channels || 2)) === 1 ? '单声道' : '立体声'
+    summary.push(`音频：${enc} ${a.rateControl === 'vbr' && enc !== 'libopus' ? 'VBR' : `${a.bitrateKbps}kbps`} @ ${rate}Hz ${layout}`)
+    if (a.loudnorm) {
+      audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
+      summary.push('响度归一化 -16 LUFS')
+    }
+  }
+  if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
+
+  /*
+   * The same container/codec warnings the real stream reports, for the same reason:
+   * now that the test pushes the configured codecs, an unsupported combination fails
+   * here exactly as it would live (measured: opus into FLV writes zero bytes and exits
+   * non-zero) — and "连接失败" would send the user hunting for a network problem that
+   * does not exist. Emitted only when the test really encodes that codec.
+   */
+  const codecWarning = flvCodecWarning(wantsCopy ? 'h264' : v.codec, out.container)
+  if (codecWarning) notes.push(codecWarning)
+  if (flv && a.codec === 'libopus') notes.push('FLV/RTMP 对 Opus 支持很差，多数服务器无法播放，建议改用 AAC。')
+
+  /* ---------------- muxing / destination ---------------- */
+  /*
+   * Mirrors the real command's output side: the flags that are always applied for
+   * FLV, the user's own extra arguments, and the late-frame policy. The extra
+   * arguments can already name any of these, and the real command would then emit
+   * the flag twice and let the last one win — here the user's text is the only copy,
+   * so the test command stays readable when it is the thing being inspected.
+   */
+  const extra = out.extraOutputArgs.trim() ? out.extraOutputArgs.trim().split(/\s+/) : []
+  const mentions = (flag: string): boolean => extra.includes(flag)
+  if (!mentions('-max_interleave_delta')) args.push('-max_interleave_delta', '0')
+  if (flv && !mentions('-flvflags')) args.push('-flvflags', 'no_duration_filesize')
+  if (out.dropLateFrames && !mentions('-fflags')) args.push('-fflags', '+genpts+igndts', '-max_delay', '0')
+  args.push(...extra)
+  args.push('-f', CONTAINER_MUXER[out.container], target)
+
+  return { args, summary, notes }
 }

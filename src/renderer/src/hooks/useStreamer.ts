@@ -317,8 +317,11 @@ export function useStreamer() {
   const skipNext = useCallback(() => requireBridge().skipNext(), [requireBridge])
   const previewCommand = useCallback(() => requireBridge().previewCommand(), [requireBridge])
   const testRtmp = useCallback(
-    (url: string, key: string): Promise<RtmpTestResult> => requireBridge().testRtmp({ url, streamKey: key, timeoutSec: 25 }),
-    [requireBridge]
+    (url: string, key: string): Promise<RtmpTestResult> =>
+      // The session travels with the request: the test must push what is on screen,
+      // not a copy of it read back from disk.
+      requireBridge().testRtmp({ url, streamKey: key, timeoutSec: 25, session: settings?.session }),
+    [requireBridge, settings]
   )
   /**
    * Empties the log panel.

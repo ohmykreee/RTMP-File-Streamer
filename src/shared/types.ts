@@ -458,6 +458,17 @@ export interface RtmpTestRequest {
   url: string
   streamKey: string
   timeoutSec: number
+  /**
+   * The session the test should exercise.
+   *
+   * The test pushes the same encoder settings the real stream would — the audio
+   * bitrate/sample rate/channel layout, the video codec, the container — because a
+   * server that rejects the real stream must not answer "连接成功" to a test that
+   * silently pushed something else. Sent explicitly so it is exactly what the UI is
+   * showing; when absent (an older caller) the main process falls back to the
+   * persisted settings.
+   */
+  session?: SessionSettings
 }
 
 export interface RtmpTestResult {
@@ -466,6 +477,14 @@ export interface RtmpTestResult {
   /** Captured ffmpeg output, useful for diagnosing auth/network errors. */
   detail: string
   elapsedMs: number
+  /**
+   * What the test actually pushed, one line per stream, in the same vocabulary as
+   * the stream summary. Shown next to the result so a difference between the test
+   * and the configured session is visible rather than silently assumed away.
+   */
+  summary?: string[]
+  /** Test-only consequences of the configured session (e.g. `copy` audio). */
+  notes?: string[]
 }
 
 export interface AppInfo {

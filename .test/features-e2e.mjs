@@ -555,6 +555,125 @@ const RECEIVED = path.join(here, 'features_received.flv')
   end()
 }
 
+/* ========= 5b. the connection test uses the configured encoding settings =========
+ *
+ * The test button used to push its own hardcoded recipe (128k/44100/stereo AAC,
+ * libx264 ultrafast 1000k), so a server that rejected the real stream could still
+ * answer "连接成功" — and vice versa. It must now exercise the session's encoders,
+ * and the panel must say what it pushed.
+ */
+{
+  const end = phase('connection test honours the encoding settings')
+  const changed = JSON.parse(
+    await ev(`window.streamer.saveSettings({ session: { audio: { codec: 'aac', rateControl: 'cbr', bitrateKbps: 96, sampleRate: 22050, channels: 1, loudnorm: true }, video: { fps: 25, scale: '1280:720', scaleWidth: 1280, scaleHeight: 720, scaleAuto: false } } }).then(s => JSON.stringify(s.session))`)
+  )
+  record(
+    'the test scenario was written to settings',
+    changed.audio.sampleRate === 22050 && changed.audio.channels === 1 && changed.video.fps === 25,
+    `audio=${changed.audio.codec} ${changed.audio.sampleRate}Hz ${changed.audio.channels}ch loudnorm=${changed.audio.loudnorm}, video ${changed.video.scale}@${changed.video.fps}`
+  )
+
+  // Reload so the renderer holds this session: with the field removed from the
+  // request the main process would fall back to these persisted settings and the
+  // "settings travel with the request" half of the fix would go untested.
+  await send('Page.enable')
+  await send('Page.reload')
+  await waitFor('the renderer to come back', () => ev(`!!window.streamer`), 20000)
+  await delay(1200)
+
+  const cap = path.join(here, 'features_test_settings.flv')
+  fs.rmSync(cap, { force: true })
+  const listener = spawn(
+    FFMPEG,
+    ['-hide_banner', '-loglevel', 'warning', '-listen', '1', '-f', 'flv', '-i', `rtmp://127.0.0.1:${TEST_PORT}/live`, '-c', 'copy', '-f', 'flv', '-y', cap],
+    { windowsHide: true }
+  )
+  await delay(1200)
+  const result = JSON.parse(
+    await ev(`window.streamer.testRtmp({ url: 'rtmp://127.0.0.1:${TEST_PORT}/live', streamKey: '', timeoutSec: 25 }).then(r => JSON.stringify(r))`)
+  )
+  listener.kill('SIGKILL')
+  await delay(700)
+
+  record('the test with configured settings succeeds', result.ok === true, result.message)
+  const summary = String((result.summary ?? []).join(' · '))
+  record(
+    'the test reports the settings it used',
+    summary.includes('22050') && summary.includes('单声道') && summary.includes('96kbps') && summary.includes('1280x720') && summary.includes('25fps'),
+    summary || '(no summary)'
+  )
+
+  const size = fs.existsSync(cap) ? fs.statSync(cap).size : 0
+  record('the configured-settings test stream reached the ingest', size > 50000, `${(size / 1024).toFixed(0)} KB`)
+  if (size > 0) {
+    const probe = spawnSync(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', cap], { encoding: 'utf8', timeout: 30000 })
+    try {
+      const parsed = JSON.parse(probe.stdout)
+      const vs = parsed.streams.find((s) => s.codec_type === 'video')
+      const as = parsed.streams.find((s) => s.codec_type === 'audio')
+      record(
+        'the received test audio uses the configured sample rate and channel count',
+        as?.sample_rate === '22050' && as?.channels === 1,
+        as ? `${as.codec_name} ${as.sample_rate}Hz ${as.channels}ch` : 'no audio stream'
+      )
+      record(
+        'the received test video uses the configured resolution and frame rate',
+        vs?.width === 1280 && vs?.height === 720 && vs?.avg_frame_rate === '25/1',
+        vs ? `${vs.codec_name} ${vs.width}x${vs.height} @${vs.avg_frame_rate}` : 'no video stream'
+      )
+    } catch (err) {
+      record('the received test audio uses the configured sample rate and channel count', false, String(err))
+    }
+  }
+  fs.rmSync(cap, { force: true })
+
+  /*
+   * And through the real button, so the wiring (renderer -> preload -> IPC) is
+   * covered too: the panel must render the result and name the parameters behind it.
+   */
+  const panel = path.join(here, 'features_test_panel.flv')
+  fs.rmSync(panel, { force: true })
+  const panelListener = spawn(
+    FFMPEG,
+    ['-hide_banner', '-loglevel', 'warning', '-listen', '1', '-f', 'flv', '-i', `rtmp://127.0.0.1:${TEST_PORT}/live`, '-c', 'copy', '-f', 'flv', '-y', panel],
+    { windowsHide: true }
+  )
+  await delay(1200)
+  await ev(`(() => {
+    const tab = [...document.querySelectorAll('.tabs .tab')].find(b => b.textContent.includes('输出'))
+    tab.click()
+    return 'ok'
+  })()`)
+  await delay(400)
+  await ev(`(() => {
+    const el = document.querySelector('input[placeholder="rtmp://127.0.0.1/live/"]')
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+    setter.call(el, 'rtmp://127.0.0.1:${TEST_PORT}/live/')
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    return 'ok'
+  })()`)
+  await delay(500)
+  await ev(`(() => {
+    const btn = [...document.querySelectorAll('.row-actions button')].find(b => b.textContent.includes('测试连接'))
+    btn.click()
+    return 'ok'
+  })()`)
+  const painted = await waitFor('the test result panel', () => ev(`!!document.querySelector('.test-result')`), 45000, 500)
+  const text = painted.ok ? await ev(`document.querySelector('.test-result').textContent`) : ''
+  record('the connection test result is rendered in the output tab', painted.ok && String(text).includes('连接成功'), String(text).slice(0, 80))
+  record(
+    'the panel names the parameters the test pushed',
+    String(text).includes('22050') && String(text).includes('单声道'),
+    String(text).replace(/\s+/g, ' ').slice(0, 160)
+  )
+  panelListener.kill('SIGKILL')
+  await delay(500)
+  const panelSize = fs.existsSync(panel) ? fs.statSync(panel).size : 0
+  record('the button-driven test pushed a stream', panelSize > 50000, `${(panelSize / 1024).toFixed(0)} KB`)
+  fs.rmSync(panel, { force: true })
+  end()
+}
+
 /* ================= 6. persisted logging + rotation ================= */
 {
   const end = phase('persisted logging')

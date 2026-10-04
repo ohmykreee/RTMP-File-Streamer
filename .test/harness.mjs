@@ -654,8 +654,176 @@ if (receivedSize > 0) {
 }
 
 console.log('\n=== 6. connection test command (used by the UI button) ===')
-const testArgs = buildTestCommand(baseSession, `rtmp://127.0.0.1:${listenPort}/live`, 'test')
-record('test command builds lavfi sources', testArgs.includes('testsrc2=size=640x360:rate=30:duration=5'))
+{
+  /*
+   * The test button pushes a synthetic pattern, and every encoder setting in it must
+   * come from the session: it used to carry its own hardcoded audio (128k, 44100,
+   * stereo, CBR) and video (libx264 ultrafast 1000k), so a server could accept the
+   * test and reject the real stream — or the reverse — with the UI reporting the
+   * answer as if it were about the configured session.
+   */
+  const testSession = (over = {}) => ({
+    ...baseSession,
+    ...over,
+    audio: { ...baseSession.audio, ...(over.audio ?? {}) },
+    video: { ...baseSession.video, ...(over.video ?? {}) },
+    output: { ...baseSession.output, ...(over.output ?? {}) }
+  })
+  const argAfter = (args, flag) => args[args.indexOf(flag) + 1]
+  /** `-f` names the input format first and the output muxer last, so the output side needs the last one. */
+  const lastArgAfter = (args, flag) => args[args.lastIndexOf(flag) + 1]
+  const testCmd = (over) => buildTestCommand(testSession(over), `rtmp://127.0.0.1:${listenPort}/live`, 'key123')
+
+  const testArgs = testCmd({}).args
+  record('test command builds lavfi sources', testArgs.includes('testsrc2=size=640x360:rate=30:duration=5'), argAfter(testArgs, '-i'))
+  record(
+    'test command targets the address + key with the flv muxer',
+    testArgs.at(-1) === `rtmp://127.0.0.1:${listenPort}/livekey123` && lastArgAfter(testArgs, '-f') === 'flv',
+    `${lastArgAfter(testArgs, '-f')} ${testArgs.at(-1)}`
+  )
+
+  /* --- audio: the whole tab --- */
+  const mp3 = testCmd({ audio: { codec: 'libmp3lame', rateControl: 'vbr', bitrateKbps: 320, sampleRate: 22050, channels: 1, loudnorm: true } }).args
+  record('test honours the audio codec', argAfter(mp3, '-c:a') === 'libmp3lame', argAfter(mp3, '-c:a'))
+  record('test honours the audio sample rate', argAfter(mp3, '-ar') === '22050', argAfter(mp3, '-ar'))
+  record('test honours the audio channel count', argAfter(mp3, '-ac') === '1', argAfter(mp3, '-ac'))
+  record('test honours audio VBR (no -b:a, -q:a instead)', mp3.includes('-q:a') && !mp3.includes('-b:a'), `-q:a ${argAfter(mp3, '-q:a')}`)
+  record('test honours loudnorm', argAfter(mp3, '-af')?.includes('loudnorm=I=-16') === true, argAfter(mp3, '-af'))
+  record(
+    'test keeps the resample/format filters the real command uses',
+    ['aresample=22050', 'channel_layouts=mono'].every((f) => argAfter(mp3, '-af')?.includes(f) === true),
+    argAfter(mp3, '-af')
+  )
+
+  const aacCbr = testCmd({ audio: { codec: 'aac', rateControl: 'cbr', bitrateKbps: 96, sampleRate: 48000, channels: 2 } }).args
+  record('test honours the audio bitrate for CBR', argAfter(aacCbr, '-b:a') === '96k', argAfter(aacCbr, '-b:a'))
+  // `-af` stays: the resample/format filters are always needed. Only loudnorm is optional.
+  record(
+    'test omits loudnorm when it is off',
+    !aacCbr.some((arg) => arg.includes('loudnorm')),
+    aacCbr[aacCbr.indexOf('-af') + 1]
+  )
+
+  // Opus cannot be resampled to a rate it does not accept, so the encoder wins.
+  const opus = testCmd({ audio: { codec: 'libopus', bitrateKbps: 64, sampleRate: 22050, channels: 2 } }).args
+  record('test forces 48 kHz for Opus but keeps its bitrate', argAfter(opus, '-ar') === '48000' && argAfter(opus, '-b:a') === '64k', `${argAfter(opus, '-ar')} / ${argAfter(opus, '-b:a')}`)
+
+  const noAudio = testCmd({ audio: { codec: 'none' } })
+  record('audio "none" pushes video only', noAudio.args.includes('-an') === false && !noAudio.args.includes('-c:a') && noAudio.args.join(' ').includes('-map 0:v:0'), noAudio.summary.join(' · '))
+
+  const copyAudio = testCmd({ audio: { codec: 'copy' } })
+  record(
+    'audio "copy" is reported instead of silently tested as a copy',
+    argAfter(copyAudio.args, '-c:a') === 'aac' && copyAudio.notes.some((n) => n.includes('复制源音频')),
+    copyAudio.notes.join(' | ')
+  )
+
+  /* --- video --- */
+  const hevc = testCmd({ video: { codec: 'hevc', encoder: 'x265', bitrateKbps: 3000, fps: 25, scale: '1280:720', scaleWidth: 1280, scaleHeight: 720, scaleAuto: false, keyframeIntervalSec: 1 } }).args
+  record('test honours the video codec', argAfter(hevc, '-c:v') === 'libx265', argAfter(hevc, '-c:v'))
+  record('test generates the pattern at the configured resolution', hevc.includes('testsrc2=size=1280x720:rate=25:duration=5'), argAfter(hevc, '-i'))
+  record('test honours the configured CBR bitrate', argAfter(hevc, '-b:v') === '3000k' && argAfter(hevc, '-minrate') === '3000k', `${argAfter(hevc, '-b:v')} / ${argAfter(hevc, '-minrate')}`)
+  record('test derives the GOP from the configured keyframe interval', argAfter(hevc, '-g') === '25', `-g ${argAfter(hevc, '-g')}`)
+
+  const capped = testCmd({ video: { scale: '3840:-2', scaleWidth: 3840, scaleHeight: 2160, scaleAuto: true } }).args
+  record(
+    'an oversized output is capped so the test stays quick',
+    capped.includes('testsrc2=size=1280x720:rate=30:duration=5'),
+    capped.find((a) => a.startsWith('testsrc2='))
+  )
+
+  const copyVideo = testCmd({ video: { codec: 'copy' } })
+  record(
+    'video "copy" is reported instead of silently tested as a copy',
+    argAfter(copyVideo.args, '-c:v') === 'libx264' && copyVideo.notes.some((n) => n.includes('直接复制')),
+    copyVideo.notes.join(' | ')
+  )
+
+  /* --- output --- */
+  const extra = testCmd({ output: { extraOutputArgs: '-flvflags no_duration_filesize -metadata comment=x', dropLateFrames: true } }).args
+  const flvFlagsCount = extra.filter((a) => a === '-flvflags').length
+  record('test appends the custom output arguments exactly once', extra.includes('-metadata') && flvFlagsCount === 1, `-flvflags ×${flvFlagsCount}`)
+  record('test honours drop-late-frames', argAfter(extra, '-fflags') === '+genpts+igndts' && argAfter(extra, '-max_delay') === '0', argAfter(extra, '-fflags'))
+  record('test applies the always-on FLV flag by default', testArgs.filter((a) => a === '-flvflags').length === 1, `-flvflags ${argAfter(testArgs, '-flvflags')}`)
+
+  const ts = testCmd({ output: { container: 'mpegts', extraOutputArgs: '' } }).args
+  record('test honours the output container', lastArgAfter(ts, '-f') === 'mpegts' && !ts.includes('-flvflags'), lastArgAfter(ts, '-f'))
+
+  /* --- what the result panel shows --- */
+  const summary = testCmd({ audio: { bitrateKbps: 192 }, video: { bitrateKbps: 4500 } }).summary.join(' · ')
+  record(
+    'test result summarises the settings it used',
+    summary.includes('4500kbps') && summary.includes('192kbps') && summary.includes('aac'),
+    summary
+  )
+  const opusNotes = testCmd({ audio: { codec: 'libopus' } }).notes.join(' | ')
+  record('an FLV/Opus combination warns before the connection is blamed', opusNotes.includes('Opus'), opusNotes)
+
+  /*
+   * End to end: run the command and probe what the ingest actually received. The
+   * argument checks above prove intent; this proves the settings survive ffmpeg's own
+   * filter/encoder negotiation, which is where "mono 22050 Hz" quietly becomes stereo
+   * 44100 Hz if the resample/format filters are missing.
+   */
+  const probeStreams = async (file) => {
+    const res = await run(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', file])
+    try {
+      const parsed = JSON.parse(res.stdout)
+      return {
+        video: parsed.streams.find((s) => s.codec_type === 'video'),
+        audio: parsed.streams.find((s) => s.codec_type === 'audio'),
+        format: parsed.format ?? {}
+      }
+    } catch (err) {
+      return { error: String(err) }
+    }
+  }
+
+  /** Pushes a test command at a fresh listener and returns the received file's streams. */
+  const receiveTestPush = async (label, over) => {
+    const port = listenPort + 40
+    const file = path.join(here, `received_${label}.flv`)
+    fs.rmSync(file, { force: true })
+    const sink = spawn(
+      FFMPEG,
+      ['-hide_banner', '-loglevel', 'warning', '-listen', '1', '-f', 'flv', '-i', `rtmp://127.0.0.1:${port}/live/test`, '-c', 'copy', '-f', 'flv', '-y', file],
+      { windowsHide: true }
+    )
+    await new Promise((r) => setTimeout(r, 1200))
+    const built = buildTestCommand(testSession(over), `rtmp://127.0.0.1:${port}/live`, 'test')
+    const res = await run(FFMPEG, built.args, { timeoutMs: 90000 })
+    sink.kill('SIGKILL')
+    await new Promise((r) => setTimeout(r, 800))
+    const size = fs.existsSync(file) ? fs.statSync(file).size : 0
+    const streams = size > 0 ? await probeStreams(file) : { error: 'nothing received' }
+    fs.rmSync(file, { force: true })
+    return { res, size, ...streams, built }
+  }
+
+  const receivedAudio = await receiveTestPush('test_audio', {
+    audio: { codec: 'aac', rateControl: 'cbr', bitrateKbps: 96, sampleRate: 22050, channels: 1, loudnorm: true },
+    video: { scale: '1280:720', scaleWidth: 1280, scaleHeight: 720, scaleAuto: false, fps: 25 }
+  })
+  record('the test push is accepted by a listening RTMP endpoint', receivedAudio.res.code === 0 && receivedAudio.size > 50000, `exit ${receivedAudio.res.code}, ${(receivedAudio.size / 1024).toFixed(0)} KB`)
+  record(
+    'the received test audio matches the configured codec/rate/channels',
+    receivedAudio.audio?.codec_name === 'aac' && receivedAudio.audio?.sample_rate === '22050' && receivedAudio.audio?.channels === 1,
+    receivedAudio.audio
+      ? `audio=${receivedAudio.audio.codec_name} ${receivedAudio.audio.sample_rate}Hz ${receivedAudio.audio.channels}ch`
+      : String(receivedAudio.error)
+  )
+  record(
+    'the received test video matches the configured resolution and frame rate',
+    receivedAudio.video?.width === 1280 && receivedAudio.video?.height === 720 && receivedAudio.video?.avg_frame_rate === '25/1',
+    receivedAudio.video ? `video=${receivedAudio.video.codec_name} ${receivedAudio.video.width}x${receivedAudio.video.height} @${receivedAudio.video.avg_frame_rate}` : String(receivedAudio.error)
+  )
+  const receivedMuted = await receiveTestPush('test_noaudio', { audio: { codec: 'none' } })
+  record(
+    'audio "none" really sends a video-only stream',
+    receivedMuted.res.code === 0 && !!receivedMuted.video && !receivedMuted.audio,
+    receivedMuted.video ? `video=${receivedMuted.video.codec_name}, audio=${receivedMuted.audio ? 'present' : 'absent'}` : String(receivedMuted.error)
+  )
+}
 
 console.log('\n=== 7. seek and sync-offset permutations actually land correctly ===')
 

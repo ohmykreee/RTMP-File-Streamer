@@ -1081,6 +1081,12 @@ input[type='color'] {
   word-break: break-word;
 }
 
+/* What the test actually pushed — dimmer than the verdict, above the raw output. */
+.test-result .test-summary {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
 .test-result details {
   margin-top: 8px;
 }

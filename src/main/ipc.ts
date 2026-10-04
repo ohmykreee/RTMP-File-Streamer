@@ -257,11 +257,19 @@ export function registerIpc(services: AppServices): void {
     if (!/^rtmps?:\/\//i.test(url)) {
       return { ok: false, message: '地址必须是以 rtmp:// 或 rtmps:// 开头的推流地址', detail: '', elapsedMs: 0 }
     }
+    // Test the session the caller sent (the settings on screen); fall back to the
+    // persisted ones so a caller that predates the field still gets a test.
+    const session = req?.session ?? settings.session
     // The stream key is optional: some servers take the whole path in the address.
     const target = buildRtmpTarget(url, key)
-    const args = buildTestCommand(settings.session, url, key)
+    const test = buildTestCommand(session, url, key)
+    const args = test.args
     const timeoutMs = Math.max(5, Math.min(60, Number(req?.timeoutSec) || 20)) * 1000
     services.pushLog('debug', `RTMP 测试目标: ${target}`)
+    // The summary is what makes "the test used different settings than the stream"
+    // a visible fact instead of something the user has to infer from ffmpeg output.
+    services.pushLog('debug', `RTMP 测试参数: ${test.summary.join(' · ')}`)
+    for (const note of test.notes) services.pushLog('info', `RTMP 测试：${note}`)
     services.pushLog('debug', `RTMP 测试命令: ${buildCommandLine(resolved.ffmpeg, args)}`)
 
     const started = Date.now()
@@ -308,6 +316,6 @@ export function registerIpc(services: AppServices): void {
       message = errLine ? errLine.trim() : `推流失败（ffmpeg 退出码 ${timeoutResult.code ?? '未知'}）`
     }
     services.pushLog(ok ? 'info' : 'error', `RTMP 测试：${message}`)
-    return { ok, message, detail, elapsedMs }
+    return { ok, message, detail, elapsedMs, summary: test.summary, notes: test.notes }
   })
 }

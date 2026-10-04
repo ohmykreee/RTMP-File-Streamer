@@ -607,7 +607,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
             <div className="row-actions">
               <button className="btn primary" onClick={runTest} disabled={testState.running || props.busy}>
-                {testState.running ? '正在测试…' : '测试连接（推送 5 秒测试画面）'}
+                {testState.running ? '正在测试…' : '测试连接（按当前编码设置）'}
               </button>
               <button className="btn ghost" onClick={showCommand}>
                 查看 ffmpeg 命令
@@ -618,6 +618,14 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               <div className={`test-result ${testState.result.ok ? 'ok' : 'fail'}`}>
                 <strong>{testState.result.ok ? '✓ 连接成功' : '✗ 连接失败'}</strong>
                 <p>{testState.result.message}</p>
+                {testState.result.summary && testState.result.summary.length > 0 && (
+                  <p className="test-summary">测试参数：{testState.result.summary.join(' · ')}</p>
+                )}
+                {testState.result.notes?.map((n) => (
+                  <p className="hint warn small" key={n}>
+                    {n}
+                  </p>
+                ))}
                 {testState.result.detail && (
                   <details>
                     <summary>ffmpeg 输出</summary>
