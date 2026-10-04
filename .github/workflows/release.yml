@@ -1,0 +1,192 @@
+# Publishing a release: build the portable archives for all three platforms and
+# attach them to that release.
+#
+# Triggered by `release: created` — publishing a release is the act that says
+# "these artifacts are the release". `build.yml` covers the push-to-main case and
+# stops at the artifact; this one is the only place that writes to a release.
+#
+# Same build layout as `build.yml`: Windows and Linux in one Ubuntu job, each as a
+# self-contained package→archive→upload step, and macOS on its own runner because
+# electron-builder will not build for darwin anywhere else.
+name: Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+
+permissions:
+  # Required for softprops/action-gh-release to upload assets to the release the
+  # event carries.
+  contents: write
+
+jobs:
+  checks:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+  portable-linux-host:
+    name: portable (Windows + Linux, x86_64)
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Build the app bundles
+        run: pnpm run build
+
+      # --- Windows -------------------------------------------------------------
+      # One self-contained step per target: package, archive, upload.
+
+      - name: Package Windows (x86_64)
+        run: pnpm exec electron-builder --win --x64 --dir --config electron-builder.config.cjs
+
+      # The runner's own `zip`, run from inside `release/` so the archive's single
+      # top-level entry is the folder itself (`win-unpacked/…`).
+      - name: Archive Windows
+        run: |
+          mkdir -p dist
+          (cd release && zip -r -q ../dist/rtmp-file-streamer-win-x86_64.zip win-unpacked)
+          unzip -l dist/rtmp-file-streamer-win-x86_64.zip | head -3
+          ls -lh dist/rtmp-file-streamer-win-x86_64.zip
+
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtmp-file-streamer-win-x86_64
+          path: dist/rtmp-file-streamer-win-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      # --- Linux ---------------------------------------------------------------
+      - name: Package Linux (x86_64)
+        run: |
+          rm -rf release/win-unpacked
+          pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.cjs
+
+      - name: Archive Linux
+        run: |
+          (cd release && zip -r -q ../dist/rtmp-file-streamer-linux-x86_64.zip linux-unpacked)
+          unzip -l dist/rtmp-file-streamer-linux-x86_64.zip | head -3
+          ls -lh dist/rtmp-file-streamer-linux-x86_64.zip
+
+      - name: Upload the Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtmp-file-streamer-linux-x86_64
+          path: dist/rtmp-file-streamer-linux-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+  portable-macos:
+    name: portable (macOS)
+    needs: checks
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Build the app bundles
+        run: pnpm run build
+
+      - name: Package macOS (x86_64)
+        run: pnpm exec electron-builder --mac --x64 --dir --config electron-builder.config.cjs
+
+      - name: Ad-hoc sign the bundle
+        run: |
+          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
+          echo "signing ${app}"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+
+      - name: Archive macOS
+        run: |
+          mkdir -p dist
+          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
+          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac-x86_64.zip
+          ls -lh dist/
+
+      - name: Upload the macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtmp-file-streamer-mac-x86_64
+          path: dist/rtmp-file-streamer-mac-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  attach:
+    name: attach to release
+    needs: [portable-linux-host, portable-macos]
+    runs-on: ubuntu-latest
+    steps:
+      # One download step for all three archives, so they are attached in a single
+      # release update instead of three racing ones.
+      - name: Download the portable artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rtmp-file-streamer-*
+          path: dist
+          merge-multiple: true
+
+      - name: List what will be attached
+        run: ls -lh dist
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          # A missing archive means a platform silently produced nothing: fail rather
+          # than publish a release that is missing one of the three.
+          fail_on_unmatched_files: true

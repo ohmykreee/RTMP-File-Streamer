@@ -56,7 +56,7 @@
 | `Data/Logs/` | 运行日志留存（JSONL 会话文件，总量上限 12 MB，超出自动清理最旧文件） |
 | `Data/Cache/` | Chromium/Electron 的缓存与日志（与数据分开存放） |
 
-`Data` 文件夹在需要时自动创建；预设栏的「📂 数据目录」按钮可直接打开它。若该位置不可写，界面会标红提示。
+`Data` 文件夹**随打包产物一起发出**（`electron-builder.config.cjs` 的 `extraResources` 把 `build/data-placeholder` 复制成程序目录下的 `Data/`），所以解压后它就已经存在，程序只是把 Electron 的可写路径指向它；若它被删掉，启动时仍会按需重建。预设栏的「📂 数据目录」按钮可直接打开它；若该位置不可写，界面会标红提示。
 
 因为状态就在程序目录内，整个 `release/win-unpacked` 文件夹可以**随意移动或复制到 U 盘**，换台机器解压后照常使用（已实测移动后仍能正常读写）。从旧版本升级时，首次启动会自动把 `%APPDATA%\RTMP File Streamer` 里的设置、队列与预设迁移过来，并在日志中说明迁移了哪些文件。
 
@@ -100,12 +100,6 @@
 
 全部界面文字集中在 **[`src/shared/i18n/messages.ts`](src/shared/i18n/messages.ts)**：英文表是基准（键集由它推导，写错键名是编译错误），中文/日文表必须与它**键完全一致**，启动时与应用内都会校验（缺键会在日志里给出 `[i18n]` 警告），单元测试也会逐键断言，避免出现「界面里夹一句英文」这种看不出来的漏翻。
 
-![语言菜单（顶栏最右侧的语言按钮）](docs/i18n-menu.png)
-
-切换后顶栏与各项文案随即变成所选语言（截图由 `.test/capture-language.mjs` 实拍）：
-
-![切换到日语后的顶栏](docs/i18n-topbar-ja.png)
-
 ### 1.7 其他
 
 - 运行日志面板（按 信息/警告/错误/FFmpeg 过滤、自动滚动、可清空）
@@ -120,11 +114,9 @@
 
 | 依赖 | 说明 |
 | --- | --- |
-| **FFmpeg + FFprobe** | 必需。自动按以下顺序查找：设置中手动指定 → 程序目录 `bin/` → `PATH` → 常见安装路径（`C:\ExecuteBin`、`C:\ffmpeg\bin`、winget/choco/scoop 目录等）。**建议使用带 libass 的完整版构建**，否则无法烧录字幕 |
+| **FFmpeg + FFprobe** | 必需。自动按以下顺序查找：设置中手动指定 → 程序目录 `bin/` → `PATH` → 常见安装路径。**建议使用带 libass 的完整版构建**，否则无法烧录字幕 |
 | Node.js ≥ 20 | 仅开发/构建需要 |
 | 操作系统 | Windows 10/11 x64（已验证）；macOS / Linux 同样支持 |
-
-本机已存在的 FFmpeg（`C:\ExecuteBin\ffmpeg.exe`）包含 `libass`、`libx264`、`libx265`、`libsvtav1`、AMF/NVENC/QSV 等，可直接使用。
 
 ---
 
@@ -145,6 +137,30 @@ pnpm dist             # 生成免安装目录版 release/win-unpacked/
 ```
 
 产物只有一个：`release/win-unpacked/`，直接运行其中的 `RTMPFileStreamer.exe`。**不生成单文件便携 exe，也不生成 NSIS 安装包**，因为程序状态写在自身目录的 `Data/` 里 —— 整个文件夹就是完整可移动的绿色版。
+
+三个平台都用同一套 `--dir` 打包（各自平台的产物名：`win-unpacked/`、`linux-unpacked/`、`mac/`）：
+
+```bash
+pnpm exec electron-builder --win   --x64 --dir --config electron-builder.config.cjs
+pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.cjs
+pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.cjs
+```
+
+`--mac` **只能在 macOS 上执行**（electron-builder 会直接拒绝：*Build for macOS is supported only on macOS*），`--win` 与 `--linux` 在任意桌面系统上都能交叉打出目录版（目标是目录而非安装包，因此不需要 Wine）。
+
+### 持续集成（GitHub Actions）
+
+| 工作流 | 触发 | 做什么 |
+| --- | --- | --- |
+| `checks.yml` | push 到 `main`、任何 PR、手动 | **只做类型检查**。测试套件需要 ffmpeg/ffprobe（命令层会真的转码、烧字幕、本地推流），而本项目刻意不打包 ffmpeg，所以不在 CI 里准备它 |
+| `build.yml` | push 到 `main`、手动 | 类型检查 → 打包三个平台的**绿色版 zip** → 上传为 artifact（**不上传任何中间产物**） |
+| `release.yml` | release created、手动 | 同上，并把三个 zip **附到该 release**（`softprops/action-gh-release`）；`main` 上的 push 到此为止，不写 release |
+
+- 三个产物：`rtmp-file-streamer-win-x86_64.zip`、`rtmp-file-streamer-linux-x86_64.zip`、`rtmp-file-streamer-mac-x86_64.zip`（文件名自带平台与架构，当前只出 x86_64）
+- **Windows 与 Linux 在同一个 Ubuntu job 里交叉构建**（各占一个独立 step，各自打包、各自压缩、各自上传），macOS 单独一个 runner：这是 electron-builder 的硬约束，不是选择
+- 压缩用各平台自带工具、纯 bash：Ubuntu 上用 `zip`（同时保留可执行位，Linux 的启动器与 `chrome-sandbox` 解压后需要它），macOS 上用 `ditto`（`.app` 里的符号链接与签名只有它能保住）。**不用 tar.gz**：同一份产物实测 gzip -9 是 153.8 MB，zip 是 151 MB，更大且 Windows 用户更不好打开
+- 工具链与本地开发**完全一致**（Node `26.7.0`、pnpm `12.8.1`，见 `package.json` 的 `engines`/`packageManager`），安装命令固定为 `pnpm ci --ignore-scripts`：本项目不依赖任何 postinstall（electron-builder 自己下载要打包的 Electron 二进制），这条命令同时也验证了这一点
+- 三个 workflow 的结构由 `.test/validate-workflows.mjs` 校验（步骤完整性、`needs` 目标、action 版本锁、工具链是否与 `package.json` 一致）：`node .test/validate-workflows.mjs`
 
 macOS / Linux 的目标同样配置为 `dir`，在对应平台执行 `electron-builder --mac` / `--linux` 即可。
 

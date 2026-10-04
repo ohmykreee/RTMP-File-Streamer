@@ -1,9 +1,0 @@
-此文件夹保存程序运行时的全部状态，不会随版本更新被覆盖：
-
-  settings.json   ffmpeg 路径与当前会话设置
-  playlist.json   播放列表（下次启动自动恢复）
-  presets.json    你保存的预设
-  Cache/          Chromium/Electron 的缓存与日志
-
-因为状态就在程序目录内，整个程序文件夹可以直接复制或移动到 U 盘使用。
-删除本文件夹等同于恢复出厂设置。

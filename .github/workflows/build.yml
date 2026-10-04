@@ -1,0 +1,209 @@
+# Portable builds for a push to `main` (or a manual run).
+#
+# Every platform is packaged as an unpacked directory (`--dir`), which is the only
+# target this app has: it writes its state into its own `Data/` folder, so the
+# folder IS the installation — the whole thing can be moved or copied anywhere and
+# keeps working. Each job then wraps that folder in a zip.
+#
+# Two runners, not three: Windows and Linux are both built in ONE Ubuntu job,
+# because electron-builder cross-compiles `win` and `linux` from Linux and the
+# target is a directory (so no Wine). Inside that job each target is its own
+# self-contained step — package, archive, upload — so either can be re-run or
+# debugged without the other, and neither can pick up the other's leftovers.
+# macOS cannot join them: electron-builder refuses to build for darwin anywhere but
+# macOS ("Build for macOS is supported only on macOS" — verified locally).
+#
+# It stops at the artifact on purpose. A merge to `main` is a build, not a
+# publication; attaching to a release is `release.yml`'s job.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The gate runs in every workflow that produces something. It is duplicated
+  # rather than shared through a reusable workflow so that each workflow is
+  # self-contained and can be dispatched on its own.
+  checks:
+    name: typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          # Exact version, matching local development: a floating `26` would let the
+          # compiler (and its lib types) drift between CI and a local run.
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+  portable-linux-host:
+    name: portable (Windows + Linux, x86_64)
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      # `--ignore-scripts`: nothing here needs a postinstall step. electron-builder
+      # fetches the Electron binary for each target itself, so skipping `electron`'s
+      # own download is not just safe, it avoids fetching the same payload twice.
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Report the toolchain
+        run: |
+          node --version
+          pnpm --version
+
+      # `electron-builder --dir` does not run a build step, so the main / preload /
+      # renderer bundles come first. They are platform-independent; only the Electron
+      # runtime and the packager differ per target.
+      - name: Build the app bundles
+        run: pnpm run build
+
+      # --- Windows -------------------------------------------------------------
+      # One self-contained step per target: package, archive, upload. Each can be
+      # re-run or debugged on its own, and neither depends on the other's leftovers.
+
+      - name: Package Windows (x86_64)
+        run: pnpm exec electron-builder --win --x64 --dir --config electron-builder.config.cjs
+
+      # `zip` is the runner's own; no pwsh and no Node helper. Run from inside
+      # `release/` so the archive's single top-level entry is the folder itself
+      # (`win-unpacked/…`), which is what the user ends up with after extracting.
+      - name: Archive Windows
+        run: |
+          mkdir -p dist
+          (cd release && zip -r -q ../dist/rtmp-file-streamer-win-x86_64.zip win-unpacked)
+          unzip -l dist/rtmp-file-streamer-win-x86_64.zip | head -3
+          unzip -l dist/rtmp-file-streamer-win-x86_64.zip | grep -E 'unpacked/(Data/|RTMPFileStreamer\.exe)' | head -3
+          ls -lh dist/rtmp-file-streamer-win-x86_64.zip
+
+      - name: Upload the Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtmp-file-streamer-win-x86_64
+          path: dist/rtmp-file-streamer-win-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      # --- Linux ---------------------------------------------------------------
+      # The Windows output is cleared first: packaging rewrites `release/`, so the
+      # Linux archive must not be able to pick up a stale `win-unpacked`.
+      - name: Package Linux (x86_64)
+        run: |
+          rm -rf release/win-unpacked
+          pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.cjs
+
+      # `zip` stores the executable bit, which the launcher and `chrome-sandbox`
+      # need after extraction. tar.gz was measured on this payload and is slightly
+      # LARGER (153.8 MB vs 151 MB), so zip wins on size as well as on "what can the
+      # receiver open".
+      - name: Archive Linux
+        run: |
+          (cd release && zip -r -q ../dist/rtmp-file-streamer-linux-x86_64.zip linux-unpacked)
+          unzip -l dist/rtmp-file-streamer-linux-x86_64.zip | head -3
+          ls -lh dist/rtmp-file-streamer-linux-x86_64.zip
+
+      - name: Upload the Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtmp-file-streamer-linux-x86_64
+          path: dist/rtmp-file-streamer-linux-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  portable-macos:
+    name: portable (macOS)
+    needs: checks
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Build the app bundles
+        run: pnpm run build
+
+      - name: Package macOS (x86_64)
+        run: pnpm exec electron-builder --mac --x64 --dir --config electron-builder.config.cjs
+
+      # There is no signing identity for this app on a runner, and an unsigned
+      # bundle is what CI can legitimately produce. An ad-hoc signature at least
+      # keeps macOS from refusing to launch the extracted app outright.
+      - name: Ad-hoc sign the bundle
+        run: |
+          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
+          echo "signing ${app}"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+
+      # `ditto` rather than `zip`: it is what preserves the symlinks and the code
+      # signature inside the `.app` bundle, and `--keepParent` puts the bundle in its
+      # own folder so extracting yields one directory. `--norsrc` keeps extended
+      # attributes out of an archive meant to be portable. tar.gz was measured on
+      # this payload and is slightly LARGER than zip (153.8 MB vs 151 MB).
+      - name: Archive macOS
+        run: |
+          mkdir -p dist
+          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
+          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac-x86_64.zip
+          ls -lh dist/
+
+      - name: Upload the macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtmp-file-streamer-mac-x86_64
+          path: dist/rtmp-file-streamer-mac-x86_64.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
