@@ -6,6 +6,8 @@
 - **跨平台**：Windows（已在本机验证并打包）/ macOS / Linux 均可构建运行
 - **后端**：调用系统 FFmpeg（自动探测，也可手动指定），不修改也不重打包 FFmpeg
 
+> 开发、构建、打包、测试与工程约束见 **[AGENTS.md](AGENTS.md)**。
+
 ---
 
 ## 1. 功能
@@ -26,8 +28,8 @@
 | **音频** | 编码格式（AAC / MP3 / Opus / 复制 / 丢弃）、码率、采样率、声道数、CBR / VBR、响度归一化（loudnorm −16 LUFS） |
 | **字幕渲染嵌入** | 处理方式（关闭 / **烧录进画面** / 作为独立轨道复制）、样式来源（保留原 ASS 样式 / 强制覆盖 / 纯文本）、字体、字号、颜色、描边、阴影、垂直边距、对齐方式、粗体/斜体 |
 | **输出** | RTMP 地址、串流密钥（可选、点状显示）、容器（FLV / MPEG-TS / Matroska）、实时节奏 `-re`、播放列表循环、断线重连间隔与次数、丢弃迟到帧、追加自定义 ffmpeg 参数 |
-| **高级** | 双引擎推流开关与「编码缓冲」（12–300 秒，见 §5）、日志留存与**调试输出开关**（关闭后只写 info 及以上，并在 info 里留一条记录）、FFmpeg 路径/版本/编码器可用性 |
-| **预设** | 把以上全部设置保存为命名预设，存放在程序同目录的 `config/presets.json`；另有 5 套内置预设 |
+| **高级** | 双引擎推流开关与「编码缓冲」（12–300 秒，见 §4）、日志留存与**调试输出开关**（关闭后只写 info 及以上，并在 info 里留一条记录）、FFmpeg 路径/版本/编码器可用性 |
+| **预设** | 把以上全部设置保存为命名预设，存放在程序目录的 `Data/presets.json`；另有 5 套内置预设 |
 
 **码率单位**：所有码率输入框右侧都有 `kbps / Mbps` 下拉框。内部统一以 kbps 存储并传给 ffmpeg，切换单位只是换一种写法（3200 kbps ⇄ 3.2 Mbps），不会把数值当成另一个数量级。
 
@@ -40,7 +42,8 @@
 
 #### 预设
 
-- 顶部预设栏：下拉选择（内置预设 / 我的预设分组）+「💾 保存为预设」+「删除」+「📂 配置目录」
+- 顶部预设栏：下拉选择（内置预设 / 我的预设分组）+「💾 保存为预设」+「**改名**」+「删除」+「📂 数据目录」
+- **改名**只换名称：预设 id、里面保存的设置、当前选中状态都不变；内置预设不能改名、不能删除
 - 保存时把**视频编码、音频编码、字幕、输出、高级五个选项卡的全部设置**写入一个命名预设
 - **推流目标（RTMP 地址与串流密钥）随预设一起明文保存**：套用预设会完整还原整组配置，包括往哪里推流
 - 同名保存即覆盖；应用预设会一次性替换全部设置
@@ -56,9 +59,9 @@
 | `Data/Logs/` | 运行日志留存（JSONL 会话文件，总量上限 12 MB，超出自动清理最旧文件） |
 | `Data/Cache/` | Chromium/Electron 的缓存与日志（与数据分开存放） |
 
-`Data` 文件夹**随打包产物一起发出**（`electron-builder.config.cjs` 的 `extraResources` 把 `build/data-placeholder` 复制成程序目录下的 `Data/`），所以解压后它就已经存在，程序只是把 Electron 的可写路径指向它；若它被删掉，启动时仍会按需重建。预设栏的「📂 数据目录」按钮可直接打开它；若该位置不可写，界面会标红提示。
+`Data` 文件夹**随打包产物一起发出**（打包时把 `build/data-placeholder` 复制成程序目录下的 `Data/`），所以解压后它就已经存在，程序只是把 Electron 的可写路径指向它；若它被删掉，启动时仍会按需重建。预设栏的「📂 数据目录」按钮可直接打开它；若该位置不可写，界面会标红提示。
 
-因为状态就在程序目录内，整个 `release/win-unpacked` 文件夹可以**随意移动或复制到 U 盘**，换台机器解压后照常使用（已实测移动后仍能正常读写）。从旧版本升级时，首次启动会自动把 `%APPDATA%\RTMP File Streamer` 里的设置、队列与预设迁移过来，并在日志中说明迁移了哪些文件。
+因为状态就在程序目录内，整个 `release/win-unpacked` 文件夹可以**随意移动或复制到 U 盘**，换台机器解压后照常使用（已实测移动后仍能正常读写）。程序**从不读写系统漫游配置目录**（`%APPDATA%`）：首次启动不导入任何外部状态，一切都从程序目录内的 `Data/` 开始（见 §6）。
 
 ### 1.3 推流到 RTMP 服务器
 
@@ -98,8 +101,6 @@
 - 语言覆盖界面、右键提示、窗口标题、原生文件对话框，以及**主进程产出的文本**（运行日志、FFmpeg 诊断、错误提示）：切换语言后新的日志行即为所选语言
 - 串流进行中语言按钮与设置一起锁定；不选语言就一直跟随系统语言（`settings.json` 里没有 `language` 键时即为此状态）
 
-全部界面文字集中在 **[`src/shared/i18n/messages.ts`](src/shared/i18n/messages.ts)**：英文表是基准（键集由它推导，写错键名是编译错误），中文/日文表必须与它**键完全一致**，启动时与应用内都会校验（缺键会在日志里给出 `[i18n]` 警告），单元测试也会逐键断言，避免出现「界面里夹一句英文」这种看不出来的漏翻。
-
 ### 1.7 其他
 
 - 运行日志面板（按 信息/警告/错误/FFmpeg 过滤、自动滚动、可清空）
@@ -115,66 +116,17 @@
 | 依赖 | 说明 |
 | --- | --- |
 | **FFmpeg + FFprobe** | 必需。自动按以下顺序查找：设置中手动指定 → 程序目录 `bin/` → `PATH` → 常见安装路径。**建议使用带 libass 的完整版构建**，否则无法烧录字幕 |
-| Node.js ≥ 20 | 仅开发/构建需要 |
 | 操作系统 | Windows 10/11 x64（已验证）；macOS / Linux 同样支持 |
 
----
-
-## 3. 开发与构建
-
-```bash
-pnpm install          # 安装依赖
-pnpm dev              # 开发模式（热重载）
-pnpm typecheck        # 类型检查
-pnpm build            # 编译主进程/预加载/渲染进程到 out/
-pnpm start            # 用编译产物启动（不弹 DevTools）
-```
-
-### 打包
-
-```bash
-pnpm dist             # 生成免安装目录版 release/win-unpacked/
-```
-
-产物只有一个：`release/win-unpacked/`，直接运行其中的 `RTMPFileStreamer.exe`。**不生成单文件便携 exe，也不生成 NSIS 安装包**，因为程序状态写在自身目录的 `Data/` 里 —— 整个文件夹就是完整可移动的绿色版。
-
-三个平台都用同一套 `--dir` 打包（各自平台的产物名：`win-unpacked/`、`linux-unpacked/`、`mac/`）：
-
-```bash
-pnpm exec electron-builder --win   --x64 --dir --config electron-builder.config.cjs
-pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.cjs
-pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.cjs
-```
-
-`--mac` **只能在 macOS 上执行**（electron-builder 会直接拒绝：*Build for macOS is supported only on macOS*），`--win` 与 `--linux` 在任意桌面系统上都能交叉打出目录版（目标是目录而非安装包，因此不需要 Wine）。
-
-### 持续集成（GitHub Actions）
-
-| 工作流 | 触发 | 做什么 |
-| --- | --- | --- |
-| `checks.yml` | push 到 `main`、任何 PR、手动 | **只做类型检查**。测试套件需要 ffmpeg/ffprobe（命令层会真的转码、烧字幕、本地推流），而本项目刻意不打包 ffmpeg，所以不在 CI 里准备它 |
-| `build.yml` | push 到 `main`、手动 | 类型检查 → 打包三个平台的**绿色版 zip** → 上传为 artifact（**不上传任何中间产物**） |
-| `release.yml` | release created、手动 | 同上，并把三个 zip **附到该 release**（`softprops/action-gh-release`）；`main` 上的 push 到此为止，不写 release |
-
-- 三个产物：`rtmp-file-streamer-win-x86_64.zip`、`rtmp-file-streamer-linux-x86_64.zip`、`rtmp-file-streamer-mac.zip`（文件名自带平台与架构，当前只出 x86_64）
-- **Windows 与 Linux 在同一个 Ubuntu job 里交叉构建**（各占一个独立 step，各自打包、各自压缩、各自上传），macOS 单独一个 runner：这是 electron-builder 的硬约束，不是选择
-- 压缩用各平台自带工具、纯 bash：Ubuntu 上用 `zip`（同时保留可执行位，Linux 的启动器与 `chrome-sandbox` 解压后需要它），macOS 上用 `ditto`（`.app` 里的符号链接与签名只有它能保住）。**不用 tar.gz**：同一份产物实测 gzip -9 是 153.8 MB，zip 是 151 MB，更大且 Windows 用户更不好打开
-- 工具链与本地开发**完全一致**（Node `26.7.0`、pnpm `12.8.1`，见 `package.json` 的 `engines`/`packageManager`），安装命令固定为 `pnpm ci --ignore-scripts`：本项目不依赖任何 postinstall（electron-builder 自己下载要打包的 Electron 二进制），这条命令同时也验证了这一点
-- 三个 workflow 的结构由 `.test/validate-workflows.mjs` 校验（步骤完整性、`needs` 目标、action 版本锁、工具链是否与 `package.json` 一致）：`node .test/validate-workflows.mjs`
-
-macOS / Linux 的目标同样配置为 `dir`，在对应平台执行 `electron-builder --mac` / `--linux` 即可。
-
-### 随包附带 FFmpeg（可选）
-
-默认**不**打包 FFmpeg（GPL 许可，且体积大）。若需要离线分发：把 `ffmpeg.exe`、`ffprobe.exe` 放进项目根的 `bin/` 目录，`pnpm dist` 会自动复制到 `resources/bin`，运行时优先使用它。
+从源码构建、打包与运行测试需要 Node.js ≥ 20，见 **[AGENTS.md](AGENTS.md)**。
 
 ---
 
-## 4. 使用步骤
+## 3. 使用步骤
 
 1. 启动应用，确认右上角显示 FFmpeg 版本号（若显示「未找到 FFmpeg」，到「高级」页手动指定路径）
 2. 在「📡 输出 / RTMP」填入 **RTMP 地址**（如 `rtmp://live.example.com/app/`）和**串流密钥**（可选），点「测试连接」确认可用；完整推流目标 = 地址 + 密钥直接拼接
-3. 在「🎞 视频编码」等页设置编码参数（码率旁可选 kbps/Mbps，分辨率可填宽高或勾选高度自适应），或直接选一套预设；调好后点「💾 保存为预设」把整组设置存起来
+3. 在「🎞 视频编码」等页设置编码参数（码率旁可选 kbps/Mbps，分辨率可填宽高或勾选高度自适应），或直接选一套预设；调好后点「💾 保存为预设」把整组设置存起来，之后可用预设栏的「改名」调整名字
 4. 左侧「+ 视频」添加文件（可多选），或拖入文件；同名同目录字幕会自动关联
 5. 需要时展开某项的「字幕/同步」：选择字幕轨、处理方式、音画与字幕延迟
 6. 点「▶ 开始串流」（或按空格）
@@ -195,7 +147,7 @@ macOS / Linux 的目标同样配置为 `dir`，在对应平台执行 `electron-b
 
 ---
 
-## 5. 已知限制与说明
+## 4. 已知限制与说明
 
 - **跳转会重开一次 RTMP 会话**：RTMP 是单向直播流，已发送的帧无法撤回。跳转时**双引擎的缓冲会被丢弃并重开一次发布会话**，因为缓冲里的内容排在观众还没看的内容后面，而已发布的时间轴无法回退；服务器会有约 1–3 秒的断流（观众端表现为一次重连）。缓冲是有上限的（见下一条），所以跳转丢掉的通常只有十几秒。**文件自然播完不需要重开**：那时推流端已经把交付的内容播完，只重启编码进程，RTMP 会话与观众连接都不受影响。
 - **双引擎推流与「编码缓冲」**：默认开启「双引擎推流」——编码进程全速编码、推流进程按 1× 稳定输出，编码偶尔跟不上时由缓冲吸收。此时「编码缓冲」是**编码最多领先推流的秒数**：超过这个领先量，应用会暂停编码进程的输出（管道回压）等推流追上，因此缓冲不会随播放列表增长——这一点很关键，因为领先的每一秒都留在内存里（约 码率/8 KB，已经播出的部分随推流进程读取即时释放）。它**不是观众端的延迟**：推流进程才是时钟，收到多少就按 1× 播多少。下限 12 秒是实测出来的：换文件时上一段编码结束到下一段产出首个数据包要 5.8–7.5 秒，缓冲小于这个值就会在每个文件边界断流；上限 300 秒（5 分钟，4 Mbps 下约 150 MB），够扛住编码临时变慢。数值在**输入框失焦时**才夹取。关闭双引擎后该输入框不可用，回到单进程管道，节奏由推流端决定。
@@ -214,7 +166,7 @@ macOS / Linux 的目标同样配置为 `dir`，在对应平台执行 `electron-b
 
 ---
 
-## 6. 项目结构
+## 5. 项目结构
 
 ```
 src/
@@ -236,12 +188,15 @@ src/
       command.ts         FFmpeg 命令构建（滤镜链、码率控制、字幕烧录、时间戳处理）
     stream/
       engine.ts          串流引擎：任务生命周期、进度解析、跳转、跳过、自动续播、重连
+      playout.ts         双引擎播出（编码进程 → Node 中转 → 推流进程）
     store/
       settings.ts        设置持久化（Data/settings.json）
       playlist.ts        播放列表持久化（Data/playlist.json）、探测缓存、字幕自动关联
       presets.ts         预设读写（Data/presets.json，含推流目标）
       logger.ts          日志留存（Data/Logs/，轮转 + 总量上限）
       paths.ts           把 Electron 的可写目录重定向到 <程序目录>/Data
+    obs/
+      websocket.ts       obs-websocket v5 兼容控制端点
     test-entry.ts        测试入口（把引擎暴露给 Electron 内的集成测试）
   preload/index.ts       contextBridge 暴露的 window.streamer API（含拖拽路径解析）
   renderer/              React 界面
@@ -250,57 +205,17 @@ src/
     src/hooks/           useStreamer：状态管理与 IPC 订阅
     src/components/      PlaylistPanel / SettingsPanel / Timeline / LogPanel / LanguageSwitcher
     src/styles.css       深色主题样式
-.test/                   自动化验证
-  unit.mjs               非 Electron 测试入口：fixtures → 打包 → 断言
-  harness.mjs            断言主体（文案表 / 命令层 / 真实转码 / 本地 RTMP ingest / 时间戳）
-  obs-websocket.mjs      obs-websocket 端点验证（真实 TCP 客户端跑完整握手与请求）
-  e2e.mjs                Electron 测试入口：node .test/e2e.mjs [ui|features|presets|layout|datadir|engine]
-  make-fixtures.mjs      生成测试视频
-  build-bundles.mjs      打包被测模块（命令构建器 / ffprobe 封装 / 文案表 / 引擎测试入口）
-  capture-language.mjs   抓取顶栏语言按钮与语言菜单截图（docs/i18n-*.png）
-  engine-run.cjs         引擎集成验证（Electron 内驱动，不建窗口）
-  features-e2e.mjs       拖入/锁定/密钥掩码/对齐/日志留存 端到端验证
-  ui-e2e.mjs             UI 端到端验证（CDP 驱动真实窗口，含日志面板与筛选行为）
-  preset-e2e.mjs         预设读写、RTMP/obs-websocket 控件与分辨率/码率控件验证
-  data-dir-e2e.mjs       Data 目录位置验证（开发构建 + 打包版 + 移动后）
-  layout-e2e.mjs         切换选项卡时播放区不位移的布局回归验证
-  harness-util.mjs       测试看门狗（防卡死）与残留进程清理
-  timestamp-matrix.mjs   离线测量 ffmpeg 时间戳选项行为
-build/                   应用图标与生成脚本
-docs/                    文档截图
-release/                 electron-builder 产物（免安装目录版）
-data/                    运行期状态（不入库，见 .gitignore 的 Data/）
+.test/                   自动化验证套件（unit / e2e，详见 AGENTS.md）
+build/                   应用图标与 Data 目录占位文件（打包时复制成程序目录的 Data/）
+.github/workflows/       打包与发布流水线（详见 AGENTS.md）
 ```
 
 ---
 
-## 7. 自动化验证
+## 6. 从旧版本升级
 
-```bash
-pnpm test                # 默认跑 test:unit
-pnpm run test:unit       # 非 Electron 全部：命令构建 + 真实转码/字幕渲染 + 本地推流 + obs-websocket
-pnpm run test:e2e        # Electron 全部套件（ui → features → presets → layout → datadir → engine → enginebuffered）
-pnpm run test:e2e ui     # 只跑指定套件，可写多个：node .test/e2e.mjs ui presets
-pnpm run test:ci         # 类型检查 → 构建 → test:unit → test:e2e
-```
+程序把全部状态放在**自己目录下的 `Data/`**，从不读写系统漫游配置目录（`%APPDATA%`）。
 
-`test:unit` 会按需生成 fixture、打包被测模块，再跑断言；`test:e2e` 需要先 `pnpm build`（`test:ci` 已包含）。两套都会在首个失败处停下并给出失败项，`e2e` 还带看门狗：某个套件超时会被杀掉并以非零码报告，不会挂住整轮。
-
-测试用 `ffmpeg -listen 1` 充当下游 RTMP 服务器，因此不需要外部流媒体服务。所有端到端测试都装有**看门狗**（超时即杀掉残留进程并以退出码 3 报告卡住的步骤），UI 驱动全部走 CDP 程序化调用；测试启动的应用以 `STREAMER_E2E=1` 运行——窗口移出屏幕并开启点击穿透，物理鼠标不会干扰测试。
-
-已验证内容（`pnpm run test:unit` 124 项 + `pnpm run test:e2e` 全绿）：
-
-- **界面语言**：三张文案表**键集完全一致**（655 键 × 3 语言，缺键/多键都会失败）、没有空翻译、每条的 `{占位符}` 与基准表一致；系统语言判定逐条覆盖 `zh-CN`/`zh-Hans`/`zh-TW`/`zh-HK`/`zh-Hant-TW` → 中文、`ja`/`ja-JP` → 日语、`en-US`/`de-DE`/`ko-KR`/空值 → 英文；已保存的语言优先于系统语言，非法/缺失值回退到检测；命令构建器确实按传入语言生成摘要文字
-- **命令层与转码**：媒体探测、外挂字幕自动关联、字幕滤镜转义（Windows 盘符冒号、样式逗号）、分辨率三态（关闭 / 显式宽高 / 高度自适应）与非法几何回退、CBR/VBR/CRF 参数、硬件编码器与像素格式映射、跳转与音画偏移的时间戳语义、RTMP 地址拼接，并**实际执行生成的命令**再解码校验产出
-- **测试连接（本次修复，unit 28 项 + e2e 10 项）**：命令层要求音频码率 / 采样率 / 声道 / 模式（CBR 用 `-b:a`、VBR 用 `-q:a`）/ loudnorm、视频编码器 / 码率 / 分辨率 / 帧率 / GOP、容器、自定义参数（不重复下发同一条 flag）与丢弃迟到帧全部来自设置，`直接复制`与`不要音频`的替代行为必须出现在结果说明里；端到端再**真的推一遍并 ffprobe 收到的流**，要求音频是 22050Hz 单声道、画面是 1280x720@25——即参数确实活过了 ffmpeg 自己的协商，而不是只写进了命令行
-- **字幕渲染**：外挂字幕与**内嵌字幕轨**各跑一次烧录，抽取画面用 `signalstats` 验证字幕区域出现高亮字形像素（YMAX 235，中文正常渲染，见 `docs/subtitle-burn-in.png`）；命令层另校验内嵌轨用的是媒体文件路径 + 字幕流序号（`si` 按字幕流计数，不是 ffprobe 的绝对流号，选第二条内嵌轨必须是 `si=1`）
-- **编码缓冲（双引擎）**：用同一个 45s 素材、同一段编码参数跑两次真实播放（12s 与 24s 上限），要求实测领先量被压在设定值附近（含一个 `-progress` 周期的过冲）且**更大的设定确实允许更深的缓冲**，同时推流进程在编码被暂停期间持续按 1× 出流——这正是"上限真的生效、而不是随便编完整个列表"的证据
-- **本地推流**：`ffmpeg -listen 1` 接收真实推送，校验进度单调递增、`-re` 实时节奏、收到可解码的音视频
-- **obs-websocket 端点 22 项**：用真实 TCP 客户端完成 obs-websocket v5 握手（Hello/Identify/Identified、RFC 6455 accept key、子协议协商、密码 SHA256 挑战与错误密码拒绝），校验 `SetStreamServiceSettings` 写入推流地址与密钥、`StartStream`/`StopStream` 驱动引擎、`GetStreamStatus` 反映实时状态、未实现的请求返回通用成功、未掩码帧以 1002 关闭连接
-- **引擎 26 项**（单进程）+ **29 项**（双引擎，`enginebuffered` 套件用 `BUFFER_SEC=12` 跑同一个驱动器）：两文件自动续播（20s + 15s 全部送达并解码、双引擎下整条列表只在**一个** RTMP 会话里播完）、进度单调递增、`-re` 实时节奏、跳转后仅重推剩余 8 秒、跳过目标完整送达、无错误日志；另加**进度条只反映推流进度**的两条回归断言——观众时间轴在换文件时不得回退，且切换「当前文件」必须等到已推流总量真的播完上一个文件（用变更**前**的采样判定：bug 会同时改写 `currentIndex` 与 `completedSec`，只看变更后是自洽的），并有一条断言证明双引擎下编码进程确实领先（实测 23s），否则前两条断言无意义
-- **UI 端到端 40 项**：窗口启动、播放列表与字幕关联恢复、点击「开始串流」→ RTMP ingest 收到数据、进度百分比推进、点击「下一个文件」切换到第二项、会话结束回到空闲、渲染进程无未捕获异常、**语言按钮位于顶栏最右侧**、语言菜单按母语列出三项且当前项勾选、切到日语后界面文字与 `<html lang>` 同步变化并把 `language: "ja"` 写进 `settings.json`、切回中文恢复，状态确实写在 `Data/` 且未写入 Roaming，以及**日志面板的完整行为**：收起时工具栏隐藏 / 展开后出现「全部 ｜ 调试/信息/警告/错误/FFmpeg」（分隔线位于「全部」与等级之间）、等级多选且与「全部」互斥、单等级筛选在**整个列表**范围内生效、**面板渲染的行数等于它持有的条目数**（历史中主进程与引擎各自从 1 开始编号，早期实现因 id 重号导致 React 静默丢行）、面板持有主进程的**全部**历史而非截断片段、「清空」同时清空面板与主进程缓冲且之后不会被回填
-- **预设 32 项**：预设栏渲染、在五个选项卡里改设置后保存、`presets.json` 落在 `Data/`、预设含全部四组设置（推流地址与密钥按设计以明文保存）、套用内置预设覆盖设置、套用自定义预设完整还原、**obs-websocket 开关/地址/端口/密码落盘并随预设还原**、开关能启停端点且改端口会重新绑定、删除后从磁盘消失、分辨率控件结构（高度框在勾选后禁用、宽度框仍可编辑）、码率单位切换与 Mbps→kbps 换算
-- **Data 目录 33 项**：分别在开发构建、打包后的 `win-unpacked`、以及**整体复制到别处后的目录**三种情况下，校验 `Data/` 位于程序目录内、`settings.json`/`playlist.json`/`presets.json` 确实写入其中、缓存也在 `Data/Cache`、且 Roaming 目录完全没有被写入
-- **布局回归 8 项**：在五个选项卡间切换时逐次测量播放条与进度条的 `getBoundingClientRect`，要求位置与高度**完全一致**（播放条固定在 746px、进度条固定在 786px），同时确认各选项卡内容高度确实不同（611 / 171 / 88 / 427 / 331 px）以证明测量有效，并验证高内容选项卡是在面板内部滚动而不是把播放区推下去
-
-打包产物 `release/win-unpacked/` 也跑过同一套验证（UI 22/22、Data 目录全绿），确认 asar 打包后预加载桥、FFmpeg 探测、推流链路与目录布局均正常。
+- **不迁移任何外部状态**：一切从程序目录内的 `Data/` 开始
+- 换机器或换目录继续用：把整个程序文件夹（含 `Data/`）一起复制过去即可
+- 恢复出厂设置：删掉 `Data/` 文件夹，下次启动会重建

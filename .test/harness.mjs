@@ -120,8 +120,7 @@ const baseSession = {
     marginVertical: 28,
     alignment: 2,
     bold: false,
-    italic: false,
-    allowTranscodeCopy: false
+    italic: false
   },
   output: {
     server: 'rtmp://127.0.0.1:1935/live',

@@ -41,7 +41,8 @@ interface SettingsPanelProps {
   onSelectPreset: (preset: Preset) => void
   onSavePreset: (name: string) => void
   onDeletePreset: (presetId: string) => void
-  onOpenConfigDir: () => void
+  onRenamePreset: (presetId: string, name: string) => void
+  onOpenDataDir: () => void
   onOpenLogsDir: () => void
   onUpdateVideo: (patch: Partial<VideoSettings>) => void
   onUpdateAudio: (patch: Partial<AudioSettings>) => void
@@ -220,7 +221,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         onSelectPreset={props.onSelectPreset}
         onSavePreset={props.onSavePreset}
         onDeletePreset={props.onDeletePreset}
-        onOpenConfigDir={props.onOpenConfigDir}
+        onRenamePreset={props.onRenamePreset}
+        onOpenDataDir={props.onOpenDataDir}
       />
 
       <nav className="tabs">
@@ -994,7 +996,8 @@ function PresetBar({
   onSelectPreset,
   onSavePreset,
   onDeletePreset,
-  onOpenConfigDir
+  onRenamePreset,
+  onOpenDataDir
 }: {
   presets: PresetsPayload | null
   activePresetId: string
@@ -1002,10 +1005,12 @@ function PresetBar({
   onSelectPreset: (preset: Preset) => void
   onSavePreset: (name: string) => void
   onDeletePreset: (presetId: string) => void
-  onOpenConfigDir: () => void
+  onRenamePreset: (presetId: string, name: string) => void
+  onOpenDataDir: () => void
 }): React.JSX.Element {
   const t = useT()
-  const [menuOpen, setMenuOpen] = useState(false)
+  /** Which inline form the "save / rename" row is showing, if any. */
+  const [menu, setMenu] = useState<'none' | 'save' | 'rename'>('none')
   const [name, setName] = useState('')
 
   const all = presets?.presets ?? []
@@ -1013,12 +1018,36 @@ function PresetBar({
   const userPresets = all.filter((p) => !p.builtin)
   const writable = presets?.location.writable ?? true
 
+  const closeMenu = (): void => {
+    setMenu('none')
+    setName('')
+  }
+
   const save = (): void => {
     const trimmed = name.trim()
     if (!trimmed) return
     onSavePreset(trimmed)
-    setName('')
-    setMenuOpen(false)
+    closeMenu()
+  }
+
+  const rename = (): void => {
+    const trimmed = name.trim()
+    if (!active || !trimmed) return
+    onRenamePreset(active.id, trimmed)
+    closeMenu()
+  }
+
+  /**
+   * Opens one of the two inline forms, or closes it when it is already open.
+   *
+   * Save starts empty so pressing the button twice cannot silently overwrite the
+   * active preset with its own name; rename starts from the current name because
+   * that is what the operator is about to edit.
+   */
+  const toggleMenu = (kind: 'save' | 'rename'): void => {
+    if (menu === kind) return closeMenu()
+    setName(kind === 'rename' ? (active?.name ?? '') : '')
+    setMenu(kind)
   }
 
   const presetOptions = (
@@ -1064,28 +1093,48 @@ function PresetBar({
 
       {active?.builtin && <span className="badge subtle">{t('settings.preset.builtinBadge')}</span>}
 
-      <button className="btn tiny" onClick={() => setMenuOpen((v) => !v)} disabled={locked} title={t('settings.preset.saveTitle')}>
+      <button
+        className="btn tiny"
+        onClick={() => toggleMenu('save')}
+        disabled={locked}
+        title={t('settings.preset.saveTitle')}
+      >
         {t('settings.preset.saveAs')}
       </button>
 
       {active && !active.builtin && (
-        <button
-          className="btn tiny danger"
-          onClick={() => onDeletePreset(active.id)}
-          disabled={locked}
-          title={t('settings.preset.deleteTitle', { name: active.name })}
-        >
-          {t('settings.preset.delete')}
-        </button>
+        <>
+          <button
+            className="btn tiny"
+            onClick={() => toggleMenu('rename')}
+            disabled={locked}
+            title={t('settings.preset.renameTitle', { name: active.name })}
+          >
+            {t('settings.preset.rename')}
+          </button>
+          <button
+            className="btn tiny danger"
+            onClick={() => {
+              closeMenu()
+              onDeletePreset(active.id)
+            }}
+            disabled={locked}
+            title={t('settings.preset.deleteTitle', { name: active.name })}
+          >
+            {t('settings.preset.delete')}
+          </button>
+        </>
       )}
 
-      <button className="btn tiny ghost" onClick={onOpenConfigDir} title={presets?.location.dir ?? t('settings.preset.dataDirTitle')}>
+      <button className="btn tiny ghost" onClick={onOpenDataDir} title={presets?.location.dir ?? t('settings.preset.dataDirTitle')}>
         {t('settings.preset.dataDir')}
       </button>
 
-      {menuOpen && (
-        <div className="preset-menu">
-          <div className="preset-menu-title">{t('settings.preset.menuTitle')}</div>
+      {menu !== 'none' && (
+        <div className="preset-menu" data-mode={menu}>
+          <div className="preset-menu-title">
+            {menu === 'save' ? t('settings.preset.menuTitle') : t('settings.preset.renameMenuTitle')}
+          </div>
           <div className="preset-menu-row">
             <input
               autoFocus
@@ -1094,21 +1143,22 @@ function PresetBar({
               maxLength={80}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') save()
-                if (e.key === 'Escape') setMenuOpen(false)
+                if (e.key === 'Enter') (menu === 'save' ? save : rename)()
+                if (e.key === 'Escape') closeMenu()
               }}
             />
-            <button className="btn primary" onClick={save} disabled={!name.trim()}>
-              {t('settings.preset.saveButton')}
+            <button className="btn primary" onClick={menu === 'save' ? save : rename} disabled={!name.trim()}>
+              {menu === 'save' ? t('settings.preset.saveButton') : t('settings.preset.renameButton')}
             </button>
-            <button className="btn ghost" onClick={() => setMenuOpen(false)}>
+            <button className="btn ghost" onClick={closeMenu}>
               {t('settings.preset.cancel')}
             </button>
           </div>
           <div className="preset-menu-note muted small">
             {writable ? (
               <>
-                {t('settings.preset.overwriteNote')} <code>{presets?.location.file ?? '—'}</code>
+                {menu === 'save' ? t('settings.preset.overwriteNote') : t('settings.preset.renameNote')}{' '}
+                <code>{presets?.location.file ?? '—'}</code>
               </>
             ) : (
               <span className="warn">{t('settings.preset.notWritable', { dir: presets?.location.dir ?? '—' })}</span>

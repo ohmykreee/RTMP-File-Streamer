@@ -21,7 +21,6 @@ const CDP_PORT = 9777
 /** The app stores state in `<appRoot>/Data`; in dev that is the project folder. */
 const DATA_DIR = path.join(root, 'Data')
 const PRESETS_FILE = path.join(DATA_DIR, 'presets.json')
-const LEGACY_DATA = path.join(process.env.APPDATA ?? '', 'RTMP File Streamer')
 
 const results = []
 const note = (s, d) => console.log(`[${new Date().toISOString().slice(11, 19)}] ${s}${d ? ` — ${d}` : ''}`)
@@ -32,10 +31,7 @@ const record = (name, ok, detail) => {
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // Start from a clean slate so assertions about file creation are meaningful.
-// The legacy %APPDATA% folder is removed too, otherwise the app's first-run
-// migration would copy stale settings back into Data/.
 fs.rmSync(DATA_DIR, { recursive: true, force: true })
-fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 fs.mkdirSync(DATA_DIR, { recursive: true })
 const TEST_PRESET = `测试预设 ${Date.now().toString(36)}`
 
@@ -467,7 +463,122 @@ record(
   JSON.stringify(afterSaved.output.obsWebSocket)
 )
 
-/* ---------- delete ---------- */
+/* ---------- rename ----------
+ * The store, IPC and preload layers have always had rename; this suite is what
+ * proves the button that reaches them exists and that the new name is what lands
+ * on disk. Renaming must not disturb the selection or the settings it holds. */
+note('renaming a preset through the UI')
+const RENAMED_PRESET = `${TEST_PRESET} · 改名`
+const presetIdsBeforeRename = JSON.parse(await ev('window.streamer.getPresets().then(p => JSON.stringify(p.presets.map(x => x.id)))'))
+
+await ev(`(() => {
+  const sel = document.querySelector('.preset-select')
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+  const opt = [...document.querySelectorAll('.preset-select option')].find(o => o.textContent === ${JSON.stringify(TEST_PRESET)})
+  if (!sel || !opt) return 'no-option'
+  setter.call(sel, opt.value)
+  sel.dispatchEvent(new Event('change', { bubbles: true }))
+  return 'ok'
+})()`)
+await delay(600)
+
+const renameBtn = await ev(`[...document.querySelectorAll('.preset-bar button')].some(b => b.textContent.trim() === '改名')`)
+record('a rename button appears for the selected user preset', renameBtn)
+
+await ev(`(() => {
+  const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '改名')
+  btn?.click()
+  return 'ok'
+})()`)
+await delay(300)
+
+const renameForm = JSON.parse(
+  await ev(`JSON.stringify({
+    open: !!document.querySelector('.preset-menu[data-mode="rename"]'),
+    prefilled: document.querySelector('.preset-menu input')?.value ?? null
+  })`)
+)
+record('the rename form opens and starts from the current name', renameForm.open && renameForm.prefilled === TEST_PRESET, JSON.stringify(renameForm))
+
+await ev(`(() => {
+  const input = document.querySelector('.preset-menu[data-mode="rename"] input')
+  if (!input) return 'no-input'
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  setter.call(input, ${JSON.stringify(RENAMED_PRESET)})
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  return 'ok'
+})()`)
+await delay(250)
+await ev(`(() => {
+  const btn = [...document.querySelectorAll('.preset-menu[data-mode="rename"] button')].find(b => b.textContent.trim() === '改名')
+  btn?.click()
+  return 'ok'
+})()`)
+await delay(900)
+
+const afterRename = fs.existsSync(PRESETS_FILE) ? JSON.parse(fs.readFileSync(PRESETS_FILE, 'utf8')) : { presets: [] }
+const renamedEntry = (afterRename.presets ?? []).find((p) => p.name === RENAMED_PRESET)
+record('renaming writes the new name to presets.json', Boolean(renamedEntry), `names: ${(afterRename.presets ?? []).map((p) => p.name).join(' | ') || 'none'}`)
+record('the old name is gone from disk', !(afterRename.presets ?? []).some((p) => p.name === TEST_PRESET))
+record(
+  'renaming keeps the stored settings untouched',
+  renamedEntry?.settings?.video?.bitrateKbps === 3200 && renamedEntry?.settings?.output?.streamKey === 'preset-key-test',
+  renamedEntry ? `bitrate=${renamedEntry.settings.video.bitrateKbps} key=${renamedEntry.settings.output.streamKey}` : 'missing'
+)
+
+const selectionAfterRename = JSON.parse(
+  await ev(`JSON.stringify({
+    value: document.querySelector('.preset-select')?.value ?? '',
+    label: document.querySelector('.preset-select')?.selectedOptions?.[0]?.textContent ?? '',
+    menuClosed: !document.querySelector('.preset-menu'),
+    deleteShown: [...document.querySelectorAll('.preset-bar button')].some(b => b.textContent.trim() === '删除')
+  })`)
+)
+record(
+  'the renamed preset stays selected and the form closes',
+  selectionAfterRename.value !== '' && selectionAfterRename.label === RENAMED_PRESET && selectionAfterRename.menuClosed && selectionAfterRename.deleteShown,
+  JSON.stringify(selectionAfterRename)
+)
+record(
+  'renaming preserved the preset id the UI was pointing at',
+  presetIdsBeforeRename.includes(selectionAfterRename.value),
+  `${selectionAfterRename.value} in [${presetIdsBeforeRename.join(', ')}]`
+)
+
+/* Rename again to check the store keeps one entry (no duplicate row appears). */
+await ev(`(() => {
+  const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '改名')
+  btn?.click()
+  return 'ok'
+})()`)
+await delay(250)
+await ev(`(() => {
+  const input = document.querySelector('.preset-menu[data-mode="rename"] input')
+  if (!input) return 'no-input'
+  const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
+  setter.call(input, ${JSON.stringify(`${TEST_PRESET} · 二次改名`)})
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+  return 'ok'
+})()`)
+await delay(250)
+await ev(`(() => {
+  const btn = [...document.querySelectorAll('.preset-menu[data-mode="rename"] button')].find(b => b.textContent.trim() === '改名')
+  btn?.click()
+  return 'ok'
+})()`)
+await delay(900)
+const afterSecondRename = fs.existsSync(PRESETS_FILE) ? JSON.parse(fs.readFileSync(PRESETS_FILE, 'utf8')) : { presets: [] }
+record(
+  'renaming twice leaves exactly one preset',
+  (afterSecondRename.presets ?? []).filter((p) => p.id === selectionAfterRename.value).length === 1 &&
+    (afterSecondRename.presets ?? []).some((p) => p.name === `${TEST_PRESET} · 二次改名`),
+  (afterSecondRename.presets ?? []).map((p) => p.name).join(' | ') || 'none'
+)
+
+/* ---------- delete ----------
+ * Nothing else in this suite depends on the preset surviving, so the rename
+ * checks above run first and the cleanup happens last. The prefix match covers
+ * every name the rename steps produced. */
 note('deleting the test preset')
 await ev(`(() => {
   const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '删除')
@@ -476,7 +587,11 @@ await ev(`(() => {
 })()`)
 await delay(900)
 const afterDelete = fs.existsSync(PRESETS_FILE) ? JSON.parse(fs.readFileSync(PRESETS_FILE, 'utf8')) : { presets: [] }
-record('deleting removes the preset from disk', !(afterDelete.presets ?? []).some((p) => p.name === TEST_PRESET), `${(afterDelete.presets ?? []).length} remaining`)
+record(
+  'deleting removes the preset from disk',
+  !(afterDelete.presets ?? []).some((p) => p.name.startsWith(TEST_PRESET)),
+  `${(afterDelete.presets ?? []).length} remaining`
+)
 
 /* ---------- resolution + unit controls ---------- */
 note('checking resolution and bitrate unit controls')

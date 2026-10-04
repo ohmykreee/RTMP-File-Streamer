@@ -420,7 +420,16 @@ export function useStreamer() {
     [requireBridge]
   )
 
-  const openConfigDir = useCallback(() => requireBridge().openConfigDir(), [requireBridge])
+  const renamePreset = useCallback(
+    async (presetId: string, name: string) => {
+      const payload = await requireBridge().renamePreset(presetId, name)
+      setPresets(payload)
+      return payload
+    },
+    [requireBridge]
+  )
+
+  const openDataDir = useCallback(() => requireBridge().openDataDir(), [requireBridge])
 
   return {
     ready,
@@ -466,7 +475,8 @@ export function useStreamer() {
     applyPreset,
     savePreset,
     deletePreset,
-    openConfigDir,
+    renamePreset,
+    openDataDir,
     obsStatus,
     refreshObsStatus,
     applyObsWebSocket

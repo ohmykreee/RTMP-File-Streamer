@@ -19,7 +19,6 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
 const electron = path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
 const UNPACKED = path.join(root, 'release', 'win-unpacked')
-const LEGACY_DATA = path.join(process.env.APPDATA ?? '', 'RTMP File Streamer')
 
 const results = []
 const note = (s, d) => console.log(`[${new Date().toISOString().slice(11, 19)}] ${s}${d ? ` — ${d}` : ''}`)
@@ -161,10 +160,11 @@ async function checkLayout({ label, command, args, cwd, expectedDataDir, cdpPort
     )
   }
 
-  // Caches are kept inside Data/ as well, not in the roaming profile.
+  // Caches are kept inside Data/ as well, not in the user profile.
   const cacheDir = path.join(expectedDataDir, 'Cache')
+  const roamingDir = path.join(process.env.APPDATA ?? '', 'RTMP File Streamer')
   record(`${label}: cache folder created inside Data/`, fs.existsSync(cacheDir), cacheDir)
-  record(`${label}: nothing written to the Roaming profile`, !fs.existsSync(LEGACY_DATA), LEGACY_DATA)
+  record(`${label}: nothing written to the Roaming profile`, !fs.existsSync(roamingDir), roamingDir)
 
   client.close()
   child.kill('SIGKILL')
@@ -174,7 +174,6 @@ async function checkLayout({ label, command, args, cwd, expectedDataDir, cdpPort
 /* ---------------- 1. development / built-out layout ---------------- */
 const devData = path.join(root, 'Data')
 fs.rmSync(devData, { recursive: true, force: true })
-fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 
 await checkLayout({
   label: '开发构建',
@@ -195,7 +194,6 @@ if (fs.existsSync(path.join(UNPACKED, 'RTMPFileStreamer.exe'))) {
   const hadPackedData = fs.existsSync(packedData)
   if (hadPackedData) fs.cpSync(packedData, packedBackup, { recursive: true })
   fs.rmSync(packedData, { recursive: true, force: true })
-  fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 
   try {
     await checkLayout({
@@ -213,7 +211,6 @@ if (fs.existsSync(path.join(UNPACKED, 'RTMPFileStreamer.exe'))) {
     fs.cpSync(UNPACKED, movedDir, { recursive: true })
     const movedData = path.join(movedDir, 'Data')
     fs.rmSync(movedData, { recursive: true, force: true })
-    fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 
     await checkLayout({
       label: '移动后的目录',
@@ -232,8 +229,6 @@ if (fs.existsSync(path.join(UNPACKED, 'RTMPFileStreamer.exe'))) {
 } else {
   note('skipping packaged checks', `${UNPACKED}\\RTMPFileStreamer.exe not found — run \`pnpm dist\` first`)
 }
-
-fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 
 const passed = results.filter((r) => r.ok).length
 console.log(`\n${passed}/${results.length} data-directory checks passed`)

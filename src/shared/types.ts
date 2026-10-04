@@ -196,8 +196,6 @@ export interface SubtitleRenderSettings {
   /** Bold (-1 = on, 0 = off) and italic (-1 = on, 0 = off), libass convention. */
   bold: boolean
   italic: boolean
-  /** For `copy` mode: convert bitmap subtitles to text (requires OCR, unavailable) is not supported. */
-  allowTranscodeCopy: boolean
 }
 
 /**
@@ -273,7 +271,7 @@ export interface OutputSettings {
   reconnectDelaySec: number
   /** 0 disables automatic reconnection attempts. */
   maxReconnectAttempts: number
-  /** Optional https/http query parameters appended to the RTMP url. */
+  /** Drop frames instead of letting delay accumulate when encoding falls behind. */
   dropLateFrames: boolean
 }
 
@@ -573,14 +571,15 @@ export interface StreamerApi {
   showItemInFolder(path: string): Promise<void>
   /** Build (but do not run) the ffmpeg command for the current item, for inspection. */
   previewCommand(): Promise<string>
-  /* --- presets: whole-session settings stored in the app's config folder --- */
+  /* --- presets: whole-session settings stored in the app's Data folder --- */
   getPresets(): Promise<PresetsPayload>
   /** Creates a preset from the current session, overwriting one with the same name. */
   savePreset(name: string, settings: SessionSettings): Promise<PresetsPayload>
   deletePreset(presetId: string): Promise<PresetsPayload>
+  /** Renames a user preset; built-ins cannot be renamed. */
   renamePreset(presetId: string, name: string): Promise<PresetsPayload>
-  /** Reveal the config folder that holds presets.json. */
-  openConfigDir(): Promise<void>
+  /** Reveal the `Data` folder that holds settings.json, playlist.json and presets.json. */
+  openDataDir(): Promise<void>
   /** Reveal the folder holding the persisted run logs. */
   openLogsDir(): Promise<void>
   /** Size/count of the persisted log files. */
@@ -627,7 +626,7 @@ export const IPC = {
   savePreset: 'presets:save',
   deletePreset: 'presets:delete',
   renamePreset: 'presets:rename',
-  openConfigDir: 'presets:openDir',
+  openDataDir: 'presets:openDir',
   openLogsDir: 'logs:openDir',
   getLogFileInfo: 'logs:info',
   getObsWebSocketStatus: 'obs:status',

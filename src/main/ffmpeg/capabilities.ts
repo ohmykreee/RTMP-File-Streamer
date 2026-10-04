@@ -86,7 +86,6 @@ function commonLocations(name: string): string[] {
   const home = os.homedir()
   const out: string[] = []
   const roots = [
-    'C:\\ExecuteBin',
     'C:\\ffmpeg\\bin',
     'C:\\Program Files\\ffmpeg\\bin',
     'C:\\Program Files (x86)\\ffmpeg\\bin',
@@ -191,7 +190,7 @@ interface EncoderDef {
 }
 
 export const ENCODER_CATALOGUE: EncoderDef[] = [
-  // --- AMD AMF (this machine's GPU family) ---
+  // --- AMD AMF ---
   { value: 'h264_amf', label: { prefix: 'H.264 · AMD AMF', suffix: ' (hardware)', suffixFull: ' (硬件)' }, codec: 'h264', kind: 'amf', ffmpegName: 'h264_amf', presets: ['speed', 'balanced', 'quality'] },
   { value: 'hevc_amf', label: { prefix: 'HEVC · AMD AMF', suffix: ' (hardware)', suffixFull: ' (硬件)' }, codec: 'hevc', kind: 'amf', ffmpegName: 'hevc_amf', presets: ['speed', 'balanced', 'quality'] },
   { value: 'av1_amf', label: { prefix: 'AV1 · AMD AMF', suffix: ' (hardware)', suffixFull: ' (硬件)' }, codec: 'av1', kind: 'amf', ffmpegName: 'av1_amf', presets: ['speed', 'balanced', 'quality'] },

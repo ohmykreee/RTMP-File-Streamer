@@ -340,7 +340,8 @@ export default function App(): React.JSX.Element {
               setActivePresetId('')
               void run(() => st.deletePreset(id))
             }}
-            onOpenConfigDir={() => void run(st.openConfigDir)}
+            onRenamePreset={(id, name) => void run(() => st.renamePreset(id, name))}
+            onOpenDataDir={() => void run(st.openDataDir)}
             onOpenLogsDir={() => void run(st.openLogsDir)}
             onUpdateVideo={editVideo}
             onUpdateAudio={editAudio}

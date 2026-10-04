@@ -22,7 +22,6 @@ const CDP_PORT = 9444
  * The app keeps all state in `<appRoot>/Data`. In development (how this test
  * launches it) the app root is the working directory, i.e. the project folder.
  */
-const LEGACY_DATA = path.join(process.env.APPDATA ?? '', 'RTMP File Streamer')
 const DATA_DIR = path.join(root, 'Data')
 
 const results = []
@@ -35,11 +34,8 @@ const record = (name, ok, detail) => {
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
 /* ---------------- clean slate ----------------
- * The app stores its state in <appRoot>/Data, so this test owns that folder.
- * The pre-migration %APPDATA% folder is removed too, otherwise the app's
- * first-run migration would copy stale settings back in. */
+ * The app stores its state in <appRoot>/Data, so this test owns that folder. */
 fs.rmSync(DATA_DIR, { recursive: true, force: true })
-fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 fs.mkdirSync(DATA_DIR, { recursive: true })
 
 /* ---------------- seed the app's saved playlist ---------------- */
@@ -755,7 +751,8 @@ record(
   fs.existsSync(path.join(DATA_DIR, 'settings.json')) && fs.existsSync(path.join(DATA_DIR, 'playlist.json')),
   ['settings.json', 'playlist.json'].filter((f) => fs.existsSync(path.join(DATA_DIR, f))).join(', ')
 )
-record('nothing was written to the Roaming profile', !fs.existsSync(LEGACY_DATA), LEGACY_DATA)
+const roamingDir = path.join(process.env.APPDATA ?? '', 'RTMP File Streamer')
+record('nothing was written to the Roaming profile', !fs.existsSync(roamingDir), roamingDir)
 
 /* ---------------- shut down and check the ingested media ---------------- */
 const uiShot = path.join(here, 'gui-live.png')

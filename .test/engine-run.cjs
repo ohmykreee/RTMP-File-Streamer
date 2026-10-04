@@ -208,8 +208,7 @@ async function main() {
       marginVertical: 24,
       alignment: 2,
       bold: false,
-      italic: false,
-      allowTranscodeCopy: false
+      italic: false
     },
     output: {
       server: `rtmp://127.0.0.1:${LISTEN_PORT}/live/`,

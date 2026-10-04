@@ -32,7 +32,6 @@ const TEST_PORT = 16211
 const DATA_DIR = path.join(root, 'Data')
 const LOGS_DIR = path.join(DATA_DIR, 'Logs')
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
-const LEGACY_DATA = path.join(process.env.APPDATA ?? '', 'RTMP File Streamer')
 
 const disarm = installWatchdog(240000, 'features-e2e')
 
@@ -54,7 +53,6 @@ if (!fs.existsSync(clipA) || !fs.existsSync(srtA)) {
 
 /* ---------------- clean slate + seeded state ---------------- */
 fs.rmSync(DATA_DIR, { recursive: true, force: true })
-fs.rmSync(LEGACY_DATA, { recursive: true, force: true })
 fs.mkdirSync(DATA_DIR, { recursive: true })
 
 fs.writeFileSync(

@@ -10,7 +10,7 @@ import type {
   PlaylistItemStatus,
   SessionSettings
 } from '@shared/types'
-import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand } from '../ffmpeg/command'
+import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand, type BuiltEncoderArgs } from '../ffmpeg/command'
 import type { Language } from '@shared/types'
 import { mainT } from '../i18n'
 import { Playout } from './playout'
@@ -752,32 +752,8 @@ export class StreamEngine {
     this.commandLine = built.commandLine
     this.lastWarnings = built.warnings
 
-    if (reason !== 'retry' || positionSec === 0) {
-      this.log(
-        'info',
-        mainT('main.engine.preparingItem', { name: item.name }) +
-          (positionSec > 0 ? mainT('main.engine.preparingFrom', { time: formatDuration(positionSec) }) : '')
-      )
-      // Log exactly what was found, so "the stream had no video" is diagnosable
-      // from the log alone.
-      this.log('debug', `   ${mainT('main.engine.itemPath')}: ${item.path}`)
-      this.log('debug', `   ${describeStreams(media, this.deps.getLanguage())}`)
-      if (built.videoStreamIndex >= 0) {
-        const v = media.videoStreams.find((s) => s.index === built.videoStreamIndex)
-        this.log(
-          'debug',
-          `   ${mainT('main.engine.selectedVideo', { index: built.videoStreamIndex })}${v ? ` (${v.codec} ${v.width}x${v.height} @ ${v.fps ?? '?'}fps)` : ''}`
-        )
-      }
-      if (built.audioStreamIndex >= 0) {
-        const a = media.audioStreams.find((s) => s.index === built.audioStreamIndex)
-        this.log(
-          'debug',
-          `   ${mainT('main.engine.selectedAudio', { index: built.audioStreamIndex })}${a ? ` (${a.codec} ${a.channels ?? '?'}ch @ ${a.sampleRate ?? '?'}Hz)` : ''}`
-        )
-      }
-      for (const line of built.summary) this.log('debug', `   ${line}`)
-    }
+    this.logStreamChoice(item, media, built, positionSec, reason)
+
     if (built.videoStreamIndex < 0) {
       this.log('warn', mainT('main.engine.noVideoSelected'))
     }
@@ -819,6 +795,51 @@ export class StreamEngine {
     })
   }
 
+  /**
+   * Writes the "what did we find and what did we pick" diagnostics for one pass.
+   *
+   * Both pipelines call this, and they must produce the same lines: the single-process
+   * path used to be the only writer, so a buffered session (the default) logged the
+   * stream inventory but never which video/audio stream was selected — the answer to
+   * "it only pushed audio" was missing exactly where it was needed. `reason === 'retry'`
+   * resumes mid-file, where repeating the inventory would only add noise.
+   */
+  private logStreamChoice(
+    item: PlaylistItem,
+    media: MediaInfo,
+    built: BuiltCommand | BuiltEncoderArgs,
+    positionSec: number,
+    reason: string
+  ): void {
+    if (reason === 'retry' && positionSec > 0) return
+    const lang = this.deps.getLanguage()
+
+    this.log(
+      'info',
+      mainT('main.engine.preparingItem', { name: item.name }) +
+        (positionSec > 0 ? mainT('main.engine.preparingFrom', { time: formatDuration(positionSec) }) : '')
+    )
+    // Log exactly what was found, so "the stream had no video" is diagnosable
+    // from the log alone.
+    this.log('debug', `   ${mainT('main.engine.itemPath')}: ${item.path}`)
+    this.log('debug', `   ${describeStreams(media, lang)}`)
+    if (built.videoStreamIndex >= 0) {
+      const v = media.videoStreams.find((s) => s.index === built.videoStreamIndex)
+      this.log(
+        'debug',
+        `   ${mainT('main.engine.selectedVideo', { index: built.videoStreamIndex })}${v ? ` (${v.codec} ${v.width}x${v.height} @ ${v.fps ?? '?'}fps)` : ''}`
+      )
+    }
+    if (built.audioStreamIndex >= 0) {
+      const a = media.audioStreams.find((s) => s.index === built.audioStreamIndex)
+      this.log(
+        'debug',
+        `   ${mainT('main.engine.selectedAudio', { index: built.audioStreamIndex })}${a ? ` (${a.codec} ${a.channels ?? '?'}ch @ ${a.sampleRate ?? '?'}Hz)` : ''}`
+      )
+    }
+    for (const line of built.summary) this.log('debug', `   ${line}`)
+  }
+
   /* ------------------------------------------------------------ *
    * Two-process playout (bufferSec > 0)
    * ------------------------------------------------------------ */
@@ -847,16 +868,7 @@ export class StreamEngine {
       const built = buildEncoderArgs({ ffmpegPath: ffmpeg, media, item, settings, startPositionSec: positionSec, language: this.deps.getLanguage() })
       args = built.args
       this.lastWarnings = built.warnings
-      if (reason !== 'retry' || positionSec === 0) {
-        this.log(
-          'info',
-          mainT('main.engine.preparingItem', { name: item.name }) +
-            (positionSec > 0 ? mainT('main.engine.preparingFrom', { time: formatDuration(positionSec) }) : '')
-        )
-        this.log('debug', `   ${mainT('main.engine.itemPath')}: ${item.path}`)
-        this.log('debug', `   ${describeStreams(media, this.deps.getLanguage())}`)
-        for (const line of built.summary) this.log('debug', `   ${line}`)
-      }
+      this.logStreamChoice(item, media, built, positionSec, reason)
       for (const w of built.warnings) this.log('warn', w)
       if (generation !== this.generation) return
     } catch (err) {

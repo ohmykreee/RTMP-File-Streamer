@@ -51,8 +51,7 @@ export const DEFAULT_SUBTITLES: SubtitleRenderSettings = {
   marginVertical: 24,
   alignment: 2,
   bold: false,
-  italic: false,
-  allowTranscodeCopy: false
+  italic: false
 }
 
 /**

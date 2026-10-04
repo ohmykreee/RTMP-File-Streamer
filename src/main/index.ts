@@ -425,9 +425,6 @@ if (!app.requestSingleInstanceLock()) {
           mb: (logInfo.budgetBytes / 1024 / 1024).toFixed(0)
         })
       )
-      if (dataPaths.migratedFrom) {
-        pushLog('info', mainT('main.engine.migrated', { path: dataPaths.migratedFrom }))
-      }
       const userCount = listPresets().length
       pushLog('debug', mainT('main.engine.presetsLoaded', { user: userCount, builtin: BUILTIN_PRESETS.length }))
     }

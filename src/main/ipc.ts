@@ -233,7 +233,7 @@ export function registerIpc(services: AppServices): void {
     return presetsPayload()
   })
 
-  ipcMain.handle(IPC.openConfigDir, (): void => {
+  ipcMain.handle(IPC.openDataDir, (): void => {
     const { dir } = getPresetLocation()
     try {
       fs.mkdirSync(dir, { recursive: true })

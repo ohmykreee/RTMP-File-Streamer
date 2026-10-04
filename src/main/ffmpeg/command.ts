@@ -44,7 +44,33 @@ export interface BuildRequest {
 
 export type SubtitleApplication = 'burn-text' | 'burn-bitmap' | 'copy' | 'none'
 
-export interface BuiltCommand {
+/** The stream indexes a built command actually mapped, for the diagnostics in the log. */
+export interface MappedStreams {
+  /** ffprobe index of the video stream that was mapped, or -1 when there is none. */
+  videoStreamIndex: number
+  /** ffprobe index of the audio stream that was mapped, or -1 when there is none. */
+  audioStreamIndex: number
+}
+
+/**
+ * Which source streams a command maps.
+ *
+ * Shared by both builders so the reported indexes cannot drift from what the
+ * mapping does: `-an` (audio codec `none`) means no audio stream is mapped even
+ * when the file has one, and a subtitle-only file maps no video at all.
+ */
+function mappedStreamIndexes(
+  videoIn: MediaStreamInfo | null | undefined,
+  audioIn: MediaStreamInfo | null | undefined,
+  audioCodec: string
+): MappedStreams {
+  return {
+    videoStreamIndex: videoIn ? videoIn.index : -1,
+    audioStreamIndex: audioIn && audioCodec !== 'none' ? audioIn.index : -1
+  }
+}
+
+export interface BuiltCommand extends MappedStreams {
   args: string[]
   commandLine: string
   /** Short human readable description of the pipeline, shown in the UI. */
@@ -55,10 +81,14 @@ export interface BuiltCommand {
   subtitleApplied: SubtitleApplication
   /** Seconds of material left from `startPositionSec`. */
   remainingDurationSec: number
-  /** ffprobe index of the video stream that was mapped, or -1 when there is none. */
-  videoStreamIndex: number
-  /** ffprobe index of the audio stream that was mapped, or -1 when there is none. */
-  audioStreamIndex: number
+}
+
+/** What {@link buildEncoderArgs} produces: the args plus enough context to log the choice. */
+export interface BuiltEncoderArgs extends MappedStreams {
+  args: string[]
+  summary: string[]
+  warnings: string[]
+  vencName: string
 }
 
 interface EncoderSpec {
@@ -687,8 +717,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     aencName,
     subtitleApplied,
     remainingDurationSec: remaining,
-    videoStreamIndex: videoIn ? videoIn.index : -1,
-    audioStreamIndex: audioIn && a.codec !== 'none' ? audioIn.index : -1
+    ...mappedStreamIndexes(videoIn, audioIn, a.codec)
   }
 }
 
@@ -700,12 +729,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
  * needs for its encoder pass — the pass writes MPEG-TS to a buffer file, so the
  * RTMP target, `-re` pacing and container flags all belong to the pusher instead.
  */
-export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
-  args: string[]
-  summary: string[]
-  warnings: string[]
-  vencName: string
-} {
+export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): BuiltEncoderArgs {
   const { item, settings, media } = req
   const v = settings.video
   const a = settings.audio
@@ -826,7 +850,7 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
-  return { args, summary, warnings, vencName: copyVideo ? 'copy' : spec.name }
+  return { args, summary, warnings, vencName: copyVideo ? 'copy' : spec.name, ...mappedStreamIndexes(videoIn, audioIn, a.codec) }
 }
 
 /** Quote an argument vector for display / copy-paste. */

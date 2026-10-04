@@ -33,14 +33,11 @@ export function getSystemLocale(): string {
 /**
  * Merge stored values over the defaults so keys added in a newer version still
  * resolve, and so a partially written file cannot break startup.
- *
- * Presets are intentionally NOT stored here — they live in the `config` folder
- * (see `store/presets.ts`).
  */
 function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
   const s = stored ?? {}
   const session = { ...DEFAULT_SETTINGS.session, ...(s.session ?? {}) }
-  const output = (session.output ?? {}) as Partial<OutputSettings> & { rtmpUrl?: unknown }
+  const output = session.output ?? {}
   return {
     ffmpegPath: typeof s.ffmpegPath === 'string' ? s.ffmpegPath : '',
     ffprobePath: typeof s.ffprobePath === 'string' ? s.ffprobePath : '',
@@ -64,31 +61,23 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
 /**
  * Normalises the output block.
  *
- * `rtmpUrl` was renamed to `server` when the OBS-compatible control endpoint
- * arrived (OBS calls the field "server"); the old key is still honoured so an
- * existing installation keeps pushing to the address it was configured with.
- *
- * The buffered playout used to be selected by a NON-ZERO `bufferSec`, and the delay
- * had no floor. Both changed: the switch is its own field now and the delay has a
- * minimum, so a stored file written under the old rule is migrated here — a non-zero
- * delay means the operator wanted buffering, and a delay the engine would refuse is
- * raised to the smallest one it accepts instead of silently disabling the feature.
+ * The buffered playout is selected by `buffered` alone; `bufferSec` is only how far
+ * the encoder may lead, and it is clamped into the range the engine accepts rather
+ * than being allowed to express the switch as well.
  */
-export function normaliseOutput(raw: Partial<OutputSettings> & { rtmpUrl?: unknown }): OutputSettings {
+export function normaliseOutput(raw: Partial<OutputSettings>): OutputSettings {
   const fallback = DEFAULT_SETTINGS.session.output
-  const legacy = typeof raw.rtmpUrl === 'string' ? raw.rtmpUrl : ''
-  const server = typeof raw.server === 'string' && raw.server.trim() ? raw.server : legacy || fallback.server
+  const server = typeof raw.server === 'string' && raw.server.trim() ? raw.server : fallback.server
   const obs = { ...fallback.obsWebSocket, ...(raw.obsWebSocket ?? {}) }
-  const storedDelay = Number(raw.bufferSec)
-  const buffered = typeof raw.buffered === 'boolean' ? raw.buffered : Number.isFinite(storedDelay) && storedDelay > 0
-  const delay = clampNumber(storedDelay, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT)
+  const buffered = typeof raw.buffered === 'boolean' ? raw.buffered : fallback.buffered
+  const delay = clampNumber(raw.bufferSec, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT)
   return {
     ...fallback,
     ...raw,
     server,
     streamKey: typeof raw.streamKey === 'string' ? raw.streamKey : fallback.streamKey,
     buffered,
-    bufferSec: buffered ? clampNumber(delay, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT) : delay,
+    bufferSec: buffered ? delay : clampNumber(raw.bufferSec, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT),
     obsWebSocket: {
       enabled: obs.enabled === true,
       host: typeof obs.host === 'string' && obs.host.trim() ? obs.host.trim() : fallback.obsWebSocket.host,

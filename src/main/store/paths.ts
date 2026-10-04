@@ -47,15 +47,13 @@ export interface PathSetup {
   dataDir: string
   cacheDir: string
   writable: boolean
-  /** Where state was read from before this version, when a migration happened. */
-  migratedFrom: string | null
 }
 
 let setup: PathSetup | null = null
 
 /**
- * Points Electron's own writable paths at `Data/` and moves state over from the
- * previous `%APPDATA%` location the first time this runs.
+ * Points Electron's own writable paths at `Data/`, creating the folder on first
+ * run. Nothing is read from or written to the user profile.
  *
  * Must be called before anything reads `app.getPath('userData')`.
  */
@@ -66,41 +64,6 @@ export function setupDataPaths(): PathSetup {
   const cache = cacheDir()
   const writable = ensureDir(data)
   ensureDir(cache)
-
-  let migratedFrom: string | null = null
-
-  if (writable) {
-    // Move state out of the old per-user folder so upgrading users keep their
-    // settings, queue and presets instead of silently starting fresh.
-    const legacy = path.join(app.getPath('appData'), 'RTMP File Streamer')
-    if (path.resolve(legacy) !== path.resolve(data) && fs.existsSync(legacy)) {
-      const moved: string[] = []
-      for (const file of ['settings.json', 'playlist.json']) {
-        const from = path.join(legacy, file)
-        const to = path.join(data, file)
-        if (fs.existsSync(from) && !fs.existsSync(to)) {
-          try {
-            fs.copyFileSync(from, to)
-            moved.push(file)
-          } catch {
-            /* skip files that cannot be copied */
-          }
-        }
-      }
-      // Presets used to live in a `config` subfolder of the same place.
-      const legacyPresets = path.join(legacy, 'config', 'presets.json')
-      const newPresets = path.join(data, 'presets.json')
-      if (fs.existsSync(legacyPresets) && !fs.existsSync(newPresets)) {
-        try {
-          fs.copyFileSync(legacyPresets, newPresets)
-          moved.push('presets.json')
-        } catch {
-          /* ignore */
-        }
-      }
-      if (moved.length > 0) migratedFrom = `${legacy} (${moved.join(', ')})`
-    }
-  }
 
   try {
     // userData feeds session storage, local storage and the DevTools profile.
@@ -116,8 +79,7 @@ export function setupDataPaths(): PathSetup {
   setup = {
     dataDir: data,
     cacheDir: cache,
-    writable: writable && path.resolve(app.getPath('userData')) === path.resolve(data),
-    migratedFrom
+    writable: writable && path.resolve(app.getPath('userData')) === path.resolve(data)
   }
   return setup
 }
