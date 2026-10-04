@@ -196,14 +196,14 @@ jobs:
         run: |
           mkdir -p dist
           app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
-          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac-x86_64.zip
+          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac.zip
           ls -lh dist/
 
       - name: Upload the macOS build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-mac-x86_64
-          path: dist/rtmp-file-streamer-mac-x86_64.zip
+          name: rtmp-file-streamer-mac
+          path: dist/rtmp-file-streamer-mac.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

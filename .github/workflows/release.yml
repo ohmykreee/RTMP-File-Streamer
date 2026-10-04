@@ -153,14 +153,14 @@ jobs:
         run: |
           mkdir -p dist
           app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
-          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac-x86_64.zip
+          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac.zip
           ls -lh dist/
 
       - name: Upload the macOS build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-mac-x86_64
-          path: dist/rtmp-file-streamer-mac-x86_64.zip
+          name: rtmp-file-streamer-mac
+          path: dist/rtmp-file-streamer-mac.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -173,7 +173,7 @@ jobs:
       # One download step for all three archives, so they are attached in a single
       # release update instead of three racing ones.
       - name: Download the portable artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: rtmp-file-streamer-*
           path: dist
@@ -184,7 +184,7 @@ jobs:
 
       - name: Attach to release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.zip
           # A missing archive means a platform silently produced nothing: fail rather

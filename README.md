@@ -156,7 +156,7 @@ pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.
 | `build.yml` | push 到 `main`、手动 | 类型检查 → 打包三个平台的**绿色版 zip** → 上传为 artifact（**不上传任何中间产物**） |
 | `release.yml` | release created、手动 | 同上，并把三个 zip **附到该 release**（`softprops/action-gh-release`）；`main` 上的 push 到此为止，不写 release |
 
-- 三个产物：`rtmp-file-streamer-win-x86_64.zip`、`rtmp-file-streamer-linux-x86_64.zip`、`rtmp-file-streamer-mac-x86_64.zip`（文件名自带平台与架构，当前只出 x86_64）
+- 三个产物：`rtmp-file-streamer-win-x86_64.zip`、`rtmp-file-streamer-linux-x86_64.zip`、`rtmp-file-streamer-mac.zip`（文件名自带平台与架构，当前只出 x86_64）
 - **Windows 与 Linux 在同一个 Ubuntu job 里交叉构建**（各占一个独立 step，各自打包、各自压缩、各自上传），macOS 单独一个 runner：这是 electron-builder 的硬约束，不是选择
 - 压缩用各平台自带工具、纯 bash：Ubuntu 上用 `zip`（同时保留可执行位，Linux 的启动器与 `chrome-sandbox` 解压后需要它），macOS 上用 `ditto`（`.app` 里的符号链接与签名只有它能保住）。**不用 tar.gz**：同一份产物实测 gzip -9 是 153.8 MB，zip 是 151 MB，更大且 Windows 用户更不好打开
 - 工具链与本地开发**完全一致**（Node `26.7.0`、pnpm `12.8.1`，见 `package.json` 的 `engines`/`packageManager`），安装命令固定为 `pnpm ci --ignore-scripts`：本项目不依赖任何 postinstall（electron-builder 自己下载要打包的 Electron 二进制），这条命令同时也验证了这一点
