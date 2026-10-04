@@ -28,6 +28,7 @@ const api: StreamerApi = {
   getAppInfo: () => ipcRenderer.invoke(IPC.getAppInfo) as Promise<AppInfo>,
   getSettings: () => ipcRenderer.invoke(IPC.getSettings) as Promise<AppSettings>,
   saveSettings: (patch) => ipcRenderer.invoke(IPC.saveSettings, patch) as Promise<AppSettings>,
+  setLanguage: (language) => ipcRenderer.invoke(IPC.setLanguage, language) as Promise<AppSettings>,
   getCapabilities: (force) => ipcRenderer.invoke(IPC.getCapabilities, force ?? false) as Promise<FfmpegCapabilities>,
   pickFfmpeg: () => ipcRenderer.invoke(IPC.pickFfmpeg) as Promise<string | null>,
   pickVideoFiles: () => ipcRenderer.invoke(IPC.pickVideoFiles) as Promise<string[]>,

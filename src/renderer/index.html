@@ -1,5 +1,11 @@
 <!doctype html>
-<html lang="zh-CN">
+<!--
+  The static lang/title below are only what shows before the renderer boots.
+  `App.tsx` overwrites both from the resolved language on the first render, and
+  the window title itself comes from the main process, so neither of these is a
+  second source of truth.
+-->
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -7,7 +13,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
     />
-    <title>RTMP 文件串流器</title>
+    <title>RTMP File Streamer</title>
   </head>
   <body>
     <div id="root"></div>

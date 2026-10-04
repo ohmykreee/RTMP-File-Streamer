@@ -3,6 +3,10 @@
  * Keep this file dependency-free: it is compiled into both bundles.
  */
 
+import type { Language, TranslationKey } from './i18n'
+
+export type { Language, TranslationKey }
+
 /* ------------------------------------------------------------------ *
  * Media probing
  * ------------------------------------------------------------------ */
@@ -321,6 +325,28 @@ export interface AppSettings {
    * what makes switching this off visible in the log itself.
    */
   debugLogging: boolean
+  /**
+   * The language the UI runs in.
+   *
+   * Application state, so it lives with the other installation-level preferences
+   * (this file) rather than with the queue or the presets: it says who is using this
+   * copy of the app, not what is being streamed or how. A preset is a shareable
+   * bundle of *stream* settings, so applying one must never change the interface
+   * language.
+   *
+   * Always resolved: on first launch the main process detects it from the system
+   * locale and writes it here, so this field is never empty once the app has
+   * started.
+   */
+  language: Language
+  /**
+   * False when {@link language} merely mirrors the system locale (first launch, or a
+   * settings file written before the setting existed).
+   *
+   * Kept so the UI can tell "I picked Chinese" from "the system asked for Chinese";
+   * only an explicit choice sets it.
+   */
+  languageSet: boolean
   session: SessionSettings
 }
 
@@ -512,6 +538,14 @@ export interface StreamerApi {
   getAppInfo(): Promise<AppInfo>
   getSettings(): Promise<AppSettings>
   saveSettings(patch: Partial<AppSettings>): Promise<AppSettings>
+  /**
+   * Switches the interface language.
+   *
+   * Separate from `saveSettings` because it is a choice rather than a setting dump:
+   * it records the language as explicitly chosen (so it stops following the system
+   * locale) and tells the main process to re-render its own strings in it.
+   */
+  setLanguage(language: Language): Promise<AppSettings>
   getCapabilities(force?: boolean): Promise<FfmpegCapabilities>
   pickFfmpeg(): Promise<string | null>
   pickVideoFiles(): Promise<string[]>
@@ -572,6 +606,7 @@ export const IPC = {
   getAppInfo: 'app:info',
   getSettings: 'settings:get',
   saveSettings: 'settings:save',
+  setLanguage: 'settings:setLanguage',
   getCapabilities: 'ffmpeg:capabilities',
   pickFfmpeg: 'dialog:pickFfmpeg',
   pickVideoFiles: 'dialog:pickVideos',

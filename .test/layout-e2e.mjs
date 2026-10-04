@@ -27,7 +27,9 @@ const record = (name, ok, detail) => {
 }
 const delay = (ms) => new Promise((r) => setTimeout(r, ms))
 
-const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
+/* `--lang=zh-CN` pins the UI language, so the fixed layout is measured in the same
+   wording on every machine instead of depending on the developer's system locale. */
+const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
   env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
 })

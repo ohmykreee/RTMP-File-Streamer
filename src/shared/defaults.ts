@@ -212,6 +212,15 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // stream failure diagnosable after the fact. The switch exists to keep a long
   // unattended run's log small, not to hide the default detail level.
   debugLogging: true,
+  /*
+   * English is the built-in fallback, but it is *not* what a new installation
+   * normally starts in: the settings store resolves the language from the system
+   * locale and writes the result, so this value is only what a caller sees before
+   * that happens. `languageSet: false` marks it as "nobody has chosen yet", which is
+   * the state the detection rule keys on.
+   */
+  language: 'en',
+  languageSet: false,
   session: DEFAULT_SESSION
 }
 

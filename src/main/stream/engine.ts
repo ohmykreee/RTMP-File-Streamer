@@ -11,6 +11,8 @@ import type {
   SessionSettings
 } from '@shared/types'
 import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand } from '../ffmpeg/command'
+import type { Language } from '@shared/types'
+import { mainT } from '../i18n'
 import { Playout } from './playout'
 import { buildRtmpTarget } from '@shared/rtmp'
 import { BUFFER_SEC_MIN, CONTAINER_MUXER } from '@shared/defaults'
@@ -21,6 +23,15 @@ export interface EngineDeps {
   /** Probe results are provided by the caller so the engine stays I/O free. */
   getMedia: (itemPath: string) => MediaInfo | undefined
   probeMedia: (filePath: string) => Promise<MediaInfo>
+  /**
+   * The language the log is written in.
+   *
+   * Supplied rather than imported from the settings store for the same reason as
+   * the probes: the engine is driven by integration tests that run it without the
+   * application's stores, and the summary/warning text the command builder produces
+   * is part of what those tests assert on.
+   */
+  getLanguage: () => Language
 }
 
 export interface EngineSink {
@@ -363,17 +374,17 @@ export class StreamEngine {
 
   async start(atIndex?: number): Promise<EngineStatus> {
     if (this.items.length === 0) {
-      this.log('warn', '播放列表为空，无法开始串流。')
+      this.log('warn', mainT('main.engine.playlistEmpty'))
       return this.getStatus()
     }
     if (this.state === 'live' || this.state === 'connecting' || this.state === 'preparing') {
-      this.log('info', '串流已在进行中。')
+      this.log('info', mainT('main.engine.alreadyStreaming'))
       return this.getStatus()
     }
     this.cancelTimers()
     const ffmpeg = this.deps.getFfmpegPath()
     if (!ffmpeg) {
-      this.log('error', '未找到 ffmpeg，无法开始串流。请在“设置”中指定 ffmpeg 路径。')
+      this.log('error', mainT('main.engine.noFfmpeg'))
       this.state = 'error'
       this.emitStatus()
       return this.getStatus()
@@ -411,9 +422,9 @@ export class StreamEngine {
     const target = buildRtmpTarget(settings.output.server, settings.output.streamKey)
     // The full target (which contains the stream key) is only shown in the debug
     // log, not in the UI and not in the info log.
-    this.log('info', '开始串流会话。')
-    this.log('debug', `推流目标: ${target}`)
-    this.log('info', `播放列表共 ${this.items.length} 个文件，预计总时长 ${formatDuration(this.items.reduce((s, i) => s + (i.durationSec || 0), 0))}`)
+    this.log('info', mainT('main.engine.sessionStarting'))
+    this.log('debug', `${mainT('main.engine.streamTarget')}: ${target}`)
+    this.log('info', mainT('main.engine.playlistReady', { n: this.items.length, duration: formatDuration(this.items.reduce((s, i) => s + (i.durationSec || 0), 0)) }))
 
     await this.launchCurrent(0, 'session-start')
     return this.getStatus()
@@ -425,7 +436,7 @@ export class StreamEngine {
     this.cancelTimers()
     this.state = 'stopping'
     this.emitStatus()
-    this.log('info', '正在停止串流…')
+    this.log('info', mainT('main.engine.stopping'))
     await this.killChild(true)
     // The buffered playout owns two processes; stopping it flushes whatever the
     // pusher still had in hand before the RTMP session is closed.
@@ -455,17 +466,17 @@ export class StreamEngine {
     }
     this.emitPlaylist()
     this.emitStatus()
-    this.log('info', '串流已停止。')
+    this.log('info', mainT('main.engine.stopped'))
     return this.getStatus()
   }
 
   /** Skip to the next playlist entry; the last entry ends the session. */
-  async skipNext(reason = '手动跳过'): Promise<EngineStatus> {
+  async skipNext(reason = mainT('main.engine.skipManual')): Promise<EngineStatus> {
     if (this.currentIndex < 0 || this.state === 'idle') {
-      this.log('warn', '当前没有正在串流的文件。')
+      this.log('warn', mainT('main.engine.nothingStreaming'))
       return this.getStatus()
     }
-    this.log('info', `${reason}：切到下一个文件。`)
+    this.log('info', mainT('main.engine.skipReason', { reason }))
     this.setItemStatus(this.currentIndex, 'skipped')
     await this.advanceTo(this.currentIndex + 1, 'skip')
     return this.getStatus()
@@ -475,7 +486,7 @@ export class StreamEngine {
   async jumpToItem(itemId: string): Promise<EngineStatus> {
     const index = this.items.findIndex((i) => i.id === itemId)
     if (index < 0) {
-      this.log('warn', '找不到指定的播放列表项。')
+      this.log('warn', mainT('main.engine.itemNotFound'))
       return this.getStatus()
     }
     for (let i = 0; i < index; i += 1) {
@@ -483,7 +494,7 @@ export class StreamEngine {
       if (st !== 'done') this.items[i].status = 'skipped'
     }
     this.emitPlaylist()
-    this.log('info', `跳转到「${this.items[index].name}」。`)
+    this.log('info', mainT('main.engine.jumpingTo', { name: this.items[index].name }))
     if (this.state === 'idle') {
       return this.start(index)
     }
@@ -548,7 +559,7 @@ export class StreamEngine {
     const settings = this.deps.getSettings()
     if (index >= this.items.length) {
       if (settings.output.loopPlaylist) {
-        this.log('info', '播放列表结束，按设置循环回第一个文件。')
+        this.log('info', mainT('main.engine.playlistLooping'))
         for (const item of this.items) item.status = 'pending'
         this.completedSec = 0
         this.emitPlaylist()
@@ -569,12 +580,12 @@ export class StreamEngine {
           this.emitStatus()
           this.log(
             'info',
-            `播放列表已全部编码完成，正在按 1× 播出剩余缓冲（还需约 ${formatDuration(waitingForSec - published)}）。`
+            mainT('main.engine.drainingBuffer', { time: formatDuration(waitingForSec - published) })
           )
           return
         }
       }
-      this.log('info', '播放列表全部完成，串流结束。')
+      this.log('info', mainT('main.engine.playlistFinished'))
       await this.finishSession(true)
       return
     }
@@ -681,8 +692,8 @@ export class StreamEngine {
     if (generation !== this.generation) return
 
     if (!media.videoStreams.length && !media.audioStreams.length) {
-      const msg = media.probeError || '无法读取媒体流信息'
-      this.log('error', `「${item.name}」${msg}，已跳过该文件。`)
+      const msg = media.probeError || mainT('main.engine.mediaUnreadable')
+      this.log('error', mainT('main.engine.itemSkipped', { name: item.name, message: msg }))
       this.setItemStatus(index, 'error', msg)
       this.state = 'error'
       this.emitStatus()
@@ -715,7 +726,7 @@ export class StreamEngine {
         return
       }
       if (reason !== 'retry') {
-        this.log('info', 'AV1 无法通过 MPEG-TS 缓冲中转（MPEG-TS 不支持 AV1），本次改用单进程直推 FLV（Enhanced-RTMP av01）。')
+        this.log('info', mainT('main.engine.av1SingleProcess'))
       }
     }
 
@@ -726,10 +737,13 @@ export class StreamEngine {
         media,
         item,
         settings,
-        startPositionSec: positionSec
+        startPositionSec: positionSec,
+        // The command builder writes the summary/warning text, so it has to know
+        // which language the log is being written in.
+        language: this.deps.getLanguage()
       })
     } catch (err) {
-      this.log('error', `构建 ffmpeg 命令失败: ${String(err)}`)
+      this.log('error', mainT('main.engine.buildFailed', { error: String(err) }))
       this.setItemStatus(index, 'error', String(err))
       this.state = 'error'
       this.emitStatus()
@@ -739,29 +753,33 @@ export class StreamEngine {
     this.lastWarnings = built.warnings
 
     if (reason !== 'retry' || positionSec === 0) {
-      this.log('info', `▸ 正在准备「${item.name}」${positionSec > 0 ? `（从 ${formatDuration(positionSec)} 开始）` : ''}`)
+      this.log(
+        'info',
+        mainT('main.engine.preparingItem', { name: item.name }) +
+          (positionSec > 0 ? mainT('main.engine.preparingFrom', { time: formatDuration(positionSec) }) : '')
+      )
       // Log exactly what was found, so "the stream had no video" is diagnosable
       // from the log alone.
-      this.log('debug', `   文件: ${item.path}`)
-      this.log('debug', `   ${describeStreams(media)}`)
+      this.log('debug', `   ${mainT('main.engine.itemPath')}: ${item.path}`)
+      this.log('debug', `   ${describeStreams(media, this.deps.getLanguage())}`)
       if (built.videoStreamIndex >= 0) {
         const v = media.videoStreams.find((s) => s.index === built.videoStreamIndex)
         this.log(
           'debug',
-          `   选用视频流 #${built.videoStreamIndex}${v ? ` (${v.codec} ${v.width}x${v.height} @ ${v.fps ?? '?'}fps)` : ''}`
+          `   ${mainT('main.engine.selectedVideo', { index: built.videoStreamIndex })}${v ? ` (${v.codec} ${v.width}x${v.height} @ ${v.fps ?? '?'}fps)` : ''}`
         )
       }
       if (built.audioStreamIndex >= 0) {
         const a = media.audioStreams.find((s) => s.index === built.audioStreamIndex)
         this.log(
           'debug',
-          `   选用音频流 #${built.audioStreamIndex}${a ? ` (${a.codec} ${a.channels ?? '?'}ch @ ${a.sampleRate ?? '?'}Hz)` : ''}`
+          `   ${mainT('main.engine.selectedAudio', { index: built.audioStreamIndex })}${a ? ` (${a.codec} ${a.channels ?? '?'}ch @ ${a.sampleRate ?? '?'}Hz)` : ''}`
         )
       }
       for (const line of built.summary) this.log('debug', `   ${line}`)
     }
     if (built.videoStreamIndex < 0) {
-      this.log('warn', '本次编码没有选中任何视频流，推流将是纯音频。')
+      this.log('warn', mainT('main.engine.noVideoSelected'))
     }
     for (const w of built.warnings) this.log('warn', w)
     this.log('ffmpeg', built.commandLine)
@@ -775,7 +793,7 @@ export class StreamEngine {
     try {
       child = spawn(ffmpeg, built.args, { windowsHide: true }) as ChildProcessWithoutNullStreams
     } catch (err) {
-      this.log('error', `无法启动 ffmpeg: ${String(err)}`)
+      this.log('error', mainT('main.engine.spawnFailed', { error: String(err) }))
       this.setItemStatus(index, 'error', String(err))
       this.state = 'error'
       this.emitStatus()
@@ -793,7 +811,7 @@ export class StreamEngine {
     child.stderr.on('data', (chunk: string) => this.onStderr(chunk, generation))
     child.on('error', (err) => {
       if (generation !== this.generation) return
-      this.log('error', `ffmpeg 进程错误: ${err.message}`)
+      this.log('error', mainT('main.engine.processError', { error: err.message }))
       this.setItemStatus(index, 'error', err.message)
     })
     child.on('close', (code, signal) => {
@@ -826,19 +844,23 @@ export class StreamEngine {
 
     let args: string[]
     try {
-      const built = buildEncoderArgs({ ffmpegPath: ffmpeg, media, item, settings, startPositionSec: positionSec })
+      const built = buildEncoderArgs({ ffmpegPath: ffmpeg, media, item, settings, startPositionSec: positionSec, language: this.deps.getLanguage() })
       args = built.args
       this.lastWarnings = built.warnings
       if (reason !== 'retry' || positionSec === 0) {
-        this.log('info', `▸ 正在准备「${item.name}」${positionSec > 0 ? `（从 ${formatDuration(positionSec)} 开始）` : ''}`)
-        this.log('debug', `   文件: ${item.path}`)
-        this.log('debug', `   ${describeStreams(media)}`)
+        this.log(
+          'info',
+          mainT('main.engine.preparingItem', { name: item.name }) +
+            (positionSec > 0 ? mainT('main.engine.preparingFrom', { time: formatDuration(positionSec) }) : '')
+        )
+        this.log('debug', `   ${mainT('main.engine.itemPath')}: ${item.path}`)
+        this.log('debug', `   ${describeStreams(media, this.deps.getLanguage())}`)
         for (const line of built.summary) this.log('debug', `   ${line}`)
       }
       for (const w of built.warnings) this.log('warn', w)
       if (generation !== this.generation) return
     } catch (err) {
-      this.log('error', `构建编码参数失败: ${String(err)}`)
+      this.log('error', mainT('main.engine.buildEncoderFailed', { error: String(err) }))
       this.setItemStatus(index, 'error', String(err))
       this.state = 'error'
       this.emitStatus()
@@ -868,12 +890,16 @@ export class StreamEngine {
           log: (level, message) => this.log(level, message),
           onPublished: (seconds) => this.onPublished(seconds),
           onPusherExit: (code) => this.onPusherExit(code),
-          onEncoderExit: (code, materialSec) => this.onEncoderExit(code, materialSec)
+          onEncoderExit: (code, materialSec) => this.onEncoderExit(code, materialSec),
+          // The playout writes its own buffer/health lines, so it needs the same
+          // lookup the engine uses — resolved per call, so a language switch applies
+          // to the next line rather than at the next session.
+          t: (key, params) => mainT(key, params)
         }
       )
       this.log(
         'info',
-        `已启用缓冲推流：编码最多领先推流 ${bufferLeadLimitSec(settings.output)}s（超出即暂停编码输出），换文件时靠这段缓冲过渡。`
+        mainT('main.engine.bufferedEnabled', { sec: bufferLeadLimitSec(settings.output) })
       )
     }
 
@@ -1094,15 +1120,15 @@ export class StreamEngine {
     const now = Date.now()
     let playedOut = false
     if (this.publishedSec >= drain.waitingForSec - DRAIN_TOLERANCE_SEC) {
-      this.log('info', `缓冲已全部播出（${this.publishedSec.toFixed(1)}s），串流结束。`)
+      this.log('info', mainT('main.engine.bufferAired', { sec: this.publishedSec.toFixed(1) }))
       playedOut = true
     } else if (now - drain.lastProgressAt > DRAIN_STALL_MS) {
       this.log(
         'warn',
-        `推流进程在 ${this.publishedSec.toFixed(1)}s 处停止推进（已交付 ${drain.waitingForSec.toFixed(1)}s），提前结束会话。`
+        mainT('main.engine.publisherStalled', { sec: this.publishedSec.toFixed(1), delivered: drain.waitingForSec.toFixed(1) })
       )
     } else if ((now - drain.startedAt) / 1000 > drain.waitingForSec + DRAIN_MAX_SEC) {
-      this.log('warn', `播出剩余缓冲超过预期上限（${drain.waitingForSec.toFixed(1)}s），提前结束会话。`)
+      this.log('warn', mainT('main.engine.drainTooLong', { sec: drain.waitingForSec.toFixed(1) }))
     } else {
       return
     }
@@ -1135,11 +1161,17 @@ export class StreamEngine {
   private handleEncoderExit(index: number, code: number | null, materialSec: number): void {
     const item = this.items[index]
     if (code !== 0) {
-      this.log('warn', `「${item?.name ?? '文件'}」编码进程异常结束（退出码 ${code ?? '未知'}），已产出的部分仍会继续播放。`)
-      this.setItemStatus(index, 'error', `编码进程退出码 ${code ?? '未知'}`)
+      this.log(
+        'warn',
+        mainT('main.engine.encoderCrashed', { name: item?.name ?? mainT('main.engine.file'), code: code ?? mainT('main.engine.unknown') })
+      )
+      this.setItemStatus(index, 'error', mainT('main.engine.encoderExitCode', { code: code ?? mainT('main.engine.unknown') }))
       this.emitStatus()
     }
-    this.log('info', `✔ 「${item?.name ?? '文件'}」编码完成，已交给推流进程（${materialSec.toFixed(1)}s）。`)
+    this.log(
+      'info',
+      mainT('main.engine.encoderDone', { name: item?.name ?? mainT('main.engine.file'), sec: materialSec.toFixed(1) })
+    )
     /*
      * Being encoded is NOT being streamed, so the entry is not marked done here.
      *
@@ -1191,7 +1223,12 @@ export class StreamEngine {
       this.emitStatus()
       this.log(
         'warn',
-        `推流进程结束（退出码 ${code ?? '未知'}），${delayMs / 1000}s 后重试（第 ${this.reconnectCount}/${settings.output.maxReconnectAttempts} 次）…`
+        mainT('main.engine.publisherRetry', {
+          code: code ?? mainT('main.engine.unknown'),
+          delay: delayMs / 1000,
+          n: this.reconnectCount,
+          max: settings.output.maxReconnectAttempts
+        })
       )
       this.reconnectTimer = setTimeout(() => {
         if (this.stopping) return
@@ -1201,7 +1238,7 @@ export class StreamEngine {
     }
     this.state = 'error'
     this.emitStatus()
-    this.log('error', `推流进程结束（退出码 ${code ?? '未知'}），串流中断。`)
+    this.log('error', mainT('main.engine.publisherLost', { code: code ?? mainT('main.engine.unknown') }))
   }
 
   private sumDurationsBefore(index: number): number {
@@ -1265,7 +1302,7 @@ export class StreamEngine {
             this.bitrateKbps = v
             if (!this.connected) {
               this.connected = true
-              this.log('info', 'RTMP 服务器已接收数据流。')
+              this.log('info', mainT('main.engine.rtmpAccepted'))
             }
           }
           break
@@ -1360,7 +1397,7 @@ export class StreamEngine {
       this.completedSec = this.sumDurationsBefore(index) + (item?.durationSec ?? 0)
       this.positionSec = item?.durationSec ?? this.positionSec
       this.emitStatus()
-      this.log('info', `✔ 「${item?.name ?? '文件'}」串流完成。`)
+      this.log('info', mainT('main.engine.itemDone', { name: item?.name ?? mainT('main.engine.file') }))
       // Single-process only: each file is its own RTMP publish session, so the server
       // needs a moment to release the stream key before the next publish takes it. The
       // buffered pipeline never republishes at a file change and does not wait at all.
@@ -1373,10 +1410,13 @@ export class StreamEngine {
     }
 
     /* Premature exit: attempt reconnection. */
-    const detail = code === null ? `信号 ${signal ?? '未知'}` : `退出码 ${code}`
+    const detail =
+      code === null
+        ? mainT('main.engine.signal', { name: signal ?? mainT('main.engine.unknown') })
+        : mainT('main.engine.exitCode', { code })
     if (settings.output.maxReconnectAttempts <= 0 || this.reconnectCount >= settings.output.maxReconnectAttempts) {
-      this.log('error', `ffmpeg 异常结束（${detail}），已达到最大重连次数。`)
-      this.setItemStatus(index, 'error', `ffmpeg 异常结束（${detail}）`)
+      this.log('error', mainT('main.engine.crashNoRetry', { detail }))
+      this.setItemStatus(index, 'error', mainT('main.engine.crashDetail', { detail }))
       this.state = 'error'
       this.emitStatus()
       return
@@ -1386,7 +1426,16 @@ export class StreamEngine {
     const delay = Math.max(1, settings.output.reconnectDelaySec) * 1000
     this.state = 'reconnecting'
     this.emitStatus()
-    this.log('warn', `ffmpeg 异常结束（${detail}），${delay / 1000}s 后从 ${formatDuration(this.positionSec)} 重连（第 ${this.reconnectCount}/${settings.output.maxReconnectAttempts} 次）…`)
+    this.log(
+      'warn',
+      mainT('main.engine.reconnecting', {
+        detail,
+        delay: delay / 1000,
+        time: formatDuration(this.positionSec),
+        n: this.reconnectCount,
+        max: settings.output.maxReconnectAttempts
+      })
+    )
     this.reconnectTimer = setTimeout(() => {
       void this.launchCurrentFrom(index, Math.max(0, this.positionSec - 1), 'retry')
     }, delay)
@@ -1420,19 +1469,20 @@ export class StreamEngine {
   getCommandPreview(): string {
     if (this.commandLine) return this.commandLine
     const item = this.encoderItem()
-    if (!item) return '（播放列表为空，请先添加视频文件）'
+    if (!item) return mainT('main.engine.previewEmpty')
     const media = this.deps.getMedia(item.path)
-    if (!media) return '（正在等待媒体信息探测完成）'
+    if (!media) return mainT('main.engine.previewProbing')
     try {
       return buildStreamCommand({
         ffmpegPath: this.deps.getFfmpegPath() || 'ffmpeg',
         media,
         item,
         settings: this.deps.getSettings(),
-        startPositionSec: 0
+        startPositionSec: 0,
+        language: this.deps.getLanguage()
       }).commandLine
     } catch (err) {
-      return `（无法生成命令: ${String(err)}）`
+      return mainT('main.engine.previewFailed', { error: String(err) })
     }
   }
 

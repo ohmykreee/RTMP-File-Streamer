@@ -2,6 +2,7 @@ import path from 'node:path'
 import type {
   AudioSettings,
   ContainerName,
+  Language,
   MediaInfo,
   MediaStreamInfo,
   PlaylistItem,
@@ -11,9 +12,22 @@ import type {
   VideoCodecName,
   VideoSettings
 } from '@shared/types'
+import type { Translate, TranslationKey } from '@shared/i18n'
+import { translatorFor } from '@shared/i18n'
 import { CONTAINER_MUXER } from '@shared/defaults'
 import { buildRtmpTarget } from '@shared/rtmp'
 import { encoderArgFor, getAvailableEncoderNames } from './capabilities'
+
+/**
+ * Language used when a caller does not name one.
+ *
+ * Not a preference — a compatibility default. The strings this module produces are
+ * the `summary` / `warnings` / `notes` diagnostics, and the offline test harness
+ * asserts on their wording, so the builder only localizes when it is told which
+ * language to write in. The application always passes the active one; leaving it
+ * out yields the original Chinese, which is also what those tests expect.
+ */
+export const DEFAULT_COMMAND_LANGUAGE: Language = 'zh'
 
 export interface BuildRequest {
   ffmpegPath: string
@@ -24,6 +38,8 @@ export interface BuildRequest {
   startPositionSec: number
   /** Optional override: write to a local file instead of the configured RTMP target. */
   outputOverride?: string
+  /** Language for the summary and warning text; defaults to {@link DEFAULT_COMMAND_LANGUAGE}. */
+  language?: Language
 }
 
 export type SubtitleApplication = 'burn-text' | 'burn-bitmap' | 'copy' | 'none'
@@ -157,10 +173,10 @@ function resolveTextBurnSource(media: MediaInfo, filePath: string, track: Subtit
 }
 
 /** What to tell the user when {@link resolveTextBurnSource} found nothing to read. */
-function burnSourceMissingWarning(track: SubtitleTrackRef): string {
+function burnSourceMissingWarning(track: SubtitleTrackRef, t: Translate<TranslationKey>): string {
   return track.source === 'embedded'
-    ? `无法在源文件中定位所选内嵌字幕轨（#${track.streamIndex ?? '?'}），已跳过字幕烧录。`
-    : '所选外部字幕文件无法读取，已跳过字幕烧录。'
+    ? t('main.cmd.burnSourceMissingEmbedded', { n: track.streamIndex ?? '?' })
+    : t('main.cmd.burnSourceMissingExternal')
 }
 
 /**
@@ -215,17 +231,18 @@ function pickBest(streams: MediaStreamInfo[]): MediaStreamInfo | undefined {
 }
 
 /** One-line stream inventory, used in the log so "no video" cases are diagnosable. */
-export function describeStreams(media: MediaInfo): string {
-  if (media.streams.length === 0) return '流信息: (空)'
+export function describeStreams(media: MediaInfo, language: Language = DEFAULT_COMMAND_LANGUAGE): string {
+  const t = translatorFor(language)
+  if (media.streams.length === 0) return t('main.cmd.streamsEmpty')
   const parts = media.streams.map((s) => {
     const bits = [`#${s.index}`, s.type, s.codec]
     if (s.type === 'video') bits.push(`${s.width ?? '?'}x${s.height ?? '?'}`, `${s.fps ?? '?'}fps`)
     if (s.type === 'audio') bits.push(`${s.channels ?? '?'}ch`, `${s.sampleRate ?? '?'}Hz`)
-    if (s.attachedPic) bits.push('封面图')
-    if (s.isDefault) bits.push('默认')
+    if (s.attachedPic) bits.push(t('main.cmd.attachedPic'))
+    if (s.isDefault) bits.push(t('main.cmd.streamDefault'))
     return bits.join(' ')
   })
-  return `流信息: ${parts.join(' | ')}`
+  return t('main.cmd.streams', { list: parts.join(' | ') })
 }
 
 /* ------------------------------------------------------------------ *
@@ -398,11 +415,26 @@ function applyAudioArgs(args: string[], a: AudioSettings, filters: string[], sou
  * the video track is dropped or left undecodable, so the user must be told
  * rather than left guessing why the picture is black.
  */
-function flvCodecWarning(codec: VideoCodecName, container: ContainerName): string | null {
+function flvCodecWarning(codec: VideoCodecName, container: ContainerName, t: Translate<TranslationKey>): string | null {
   if (container !== 'flv') return null
-  if (codec === 'hevc') return 'HEVC 通过 Enhanced-RTMP（hvc1）推流，需要服务器与播放器支持 Enhanced-RTMP，否则画面会黑屏/无视频。'
-  if (codec === 'av1') return 'AV1 通过 Enhanced-RTMP（av01）推流，需要服务器与播放器支持 Enhanced-RTMP，否则画面会黑屏/无视频。'
+  if (codec === 'hevc') return t('main.cmd.hevcEnhancedRtmp')
+  if (codec === 'av1') return t('main.cmd.av1EnhancedRtmp')
   return null
+}
+
+/**
+ * Renders the encoder description used by every summary line.
+ *
+ * Split into key + two templates rather than one sprintf-style string: the mode
+ * half ("CRF 20" / "6000kbps") is a different phrase in each language position, and
+ * building it here keeps that decision in one place instead of three.
+ */
+function videoSummary(t: Translate<TranslationKey>, encoder: string, hw: string, v: VideoSettings): string {
+  const mode =
+    v.rateControl === 'crf'
+      ? t('main.cmd.summaryVideoModeCrf', { crf: v.crf })
+      : t('main.cmd.summaryVideoModeBitrate', { kbps: v.bitrateKbps })
+  return t('main.cmd.summaryVideo', { encoder, hw, mode: `${v.rateControl.toUpperCase()} ${mode}` })
 }
 
 /* ------------------------------------------------------------------ *
@@ -415,6 +447,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   const a = settings.audio
   const sub = settings.subtitles
   const out = settings.output
+  const t = translatorFor(req.language ?? DEFAULT_COMMAND_LANGUAGE)
 
   const warnings: string[] = []
   const summary: string[] = []
@@ -462,7 +495,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     // per-item accuracy setting is gone. Restarts are the only thing that seek
     // inside a file — the playlist starts every entry at its beginning.
     args.push('-ss', String(round2(startPos)))
-    summary.push(`起点 ${round2(startPos)}s`)
+    summary.push(t('main.cmd.summaryStart', { time: round2(startPos) }))
   }
   if (hasOffset) {
     // `-itsoffset` shifts video, audio and embedded subtitles together.
@@ -470,11 +503,9 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     // stream still starts at 0; a positive offset delays everything, so the muxed
     // stream opens with that much empty timeline before the first frame.
     args.push('-itsoffset', String(round2(internalOffset)))
-    summary.push(`音视频/字幕偏移 ${round2(internalOffset)}s`)
+    summary.push(t('main.cmd.summaryOffset', { time: round2(internalOffset) }))
     if (internalOffset > 0) {
-      warnings.push(
-        `偏移 +${round2(internalOffset)}s 会延后所有内容，推流开头会有约 ${round2(internalOffset)} 秒的空档（黑屏/无声）等待缓冲。若只是想修正音画不同步，建议改用负值提前内容。`
-      )
+      warnings.push(t('main.cmd.offsetPositive', { sec: round2(internalOffset) }))
     }
   }
   args.push('-fflags', '+genpts', '-i', item.path)
@@ -485,7 +516,12 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     if (hasOffset) args.push('-itsoffset', String(round2(internalOffset)))
     args.push('-i', track.path!)
     externalSubInput = 1
-    summary.push(`${isTextTrack ? '烧录' : '叠加'}外部字幕 ${path.basename(track.path!)}`)
+    summary.push(
+      t('main.cmd.summaryExternalSub', {
+        mode: t(isTextTrack ? 'main.cmd.subModeBurn' : 'main.cmd.subModeOverlay'),
+        name: path.basename(track.path!)
+      })
+    )
   }
 
   /* ---------------- video filters ---------------- */
@@ -497,33 +533,37 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   if (!copyVideo) {
     if (scaleFilter) {
       filters.push(`scale=${scaleFilter}:flags=bicubic`)
-      summary.push(`缩放 ${scaleFilter}`)
+      summary.push(t('main.cmd.summaryScale', { value: scaleFilter }))
     }
     if (wantsFps) {
       filters.push(`fps=${v.fps}`)
-      summary.push(`${v.fps} fps`)
+      summary.push(t('main.cmd.summaryFps', { fps: v.fps }))
     }
   } else if (scaleFilter || wantsFps || v.rateControl === 'crf') {
-    warnings.push('视频为“直接复制”模式，缩放/帧率/码率设置已忽略。')
+    warnings.push(t('main.cmd.copyIgnoresVideo'))
   }
 
   /* Burn-in runs last so font sizes match the output resolution. */
   let burnText = false
   if (mode === 'burn' && track && isTextTrack) {
     if (copyVideo) {
-      warnings.push('视频为“直接复制”模式，无法烧录字幕；如需字幕请改为重新编码。')
+      warnings.push(t('main.cmd.copyCannotBurn'))
     } else {
       const burn = resolveTextBurnSource(media, item.path, track)
       if (burn) {
         filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
         burnText = true
       } else {
-        warnings.push(burnSourceMissingWarning(track))
+        warnings.push(burnSourceMissingWarning(track, t))
       }
-      if (burnText) summary.push(`烧录字幕${track.source === 'embedded' ? ` (内挂 #${track.streamIndex})` : ''}`)
+      if (burnText) {
+        summary.push(
+          `${t('main.cmd.summaryBurn')}${track.source === 'embedded' ? t('main.cmd.summaryBurnEmbedded', { n: track.streamIndex ?? '?' }) : ''}`
+        )
+      }
     }
   } else if (mode === 'burn' && track && !isTextTrack && !hasExternalSub && !copyVideo) {
-    warnings.push('内挂位图字幕（PGS/DVD/DVB）无法用滤镜烧录，已跳过字幕。')
+    warnings.push(t('main.cmd.embeddedBitmapNoBurn'))
   }
 
   const videoFilterChain = filters.join(',')
@@ -538,7 +578,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     const graph = `[0:${videoIn!.index}]${base}[vbase];[vbase][${externalSubInput}:v]overlay=eof_action=pass:repeatlast=0[vout]`
     args.push('-filter_complex', graph)
     args.push('-map', '[vout]')
-    summary.push('位图字幕 overlay 合成')
+    summary.push(t('main.cmd.summaryBitmapOverlay'))
   } else if (videoIn) {
     args.push('-map', `0:${videoIn.index}`)
     if (videoFilterChain) args.push('-vf', videoFilterChain)
@@ -548,52 +588,60 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   /* ---------------- video encoder ---------------- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
   let vencName = 'copy'
-  const flvWarn = flvCodecWarning(v.codec, out.container)
+  const flvWarn = flvCodecWarning(v.codec, out.container, t)
   if (flvWarn) warnings.push(flvWarn)
 
   if (copyVideo) {
     args.push('-c:v', 'copy')
-    summary.unshift('视频：直接复制 (不重编码)')
+    summary.unshift(t('main.cmd.summaryVideoCopy'))
   } else if (!videoIn) {
-    warnings.push('源文件没有可用的视频轨（或只有封面图），将只推送音频。')
+    warnings.push(t('main.cmd.noVideoTrack'))
   } else {
     vencName = spec.name
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
     const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
     applyVideoEncoderArgs(args, v, spec, fpsForGop, out.container)
     if (v.repeatHeaders && out.container === 'flv') args.push('-flags', '+cgop')
-    const hw = spec.kind === 'software' ? '' : ' [硬件]'
-    summary.unshift(`视频：${spec.name}${hw} · ${v.rateControl.toUpperCase()}${v.rateControl === 'crf' ? ` CRF ${v.crf}` : ` ${v.bitrateKbps}kbps`}`)
+    const hw = spec.kind === 'software' ? '' : t('main.cmd.hardwareTag')
+    summary.unshift(videoSummary(t, spec.name, hw, v))
     if (spec.kind === 'software' && v.bitrateKbps > 12000) {
-      warnings.push(`软件编码 ${spec.name} 在高码率下可能无法实时编码，建议改用硬件编码器或降低码率。`)
+      warnings.push(t('main.cmd.softwareHighBitrate', { encoder: spec.name }))
     }
     if (spec.kind === 'amf' && v.tune === 'zerolatency') {
-      warnings.push('AMF 低延迟模式（tune=zerolatency）与部分流媒体服务器不兼容，如遇黑屏请把 tune 改为「不设置」。')
+      warnings.push(t('main.cmd.amfLowLatency'))
     }
   }
 
   /* ---------------- audio encoder ---------------- */
   let aencName = 'none'
   if (a.codec === 'none') {
-    summary.push('音频：丢弃')
+    summary.push(t('main.cmd.summaryAudioNone'))
   } else if (!audioIn) {
-    warnings.push('源文件没有音频轨，将只推送视频。')
+    warnings.push(t('main.cmd.noAudioTrack'))
   } else if (a.codec === 'copy') {
     aencName = 'copy'
     args.push('-c:a', 'copy')
-    summary.push('音频：直接复制')
+    summary.push(t('main.cmd.summaryAudioCopy'))
   } else {
     if (a.loudnorm) {
       audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
-      summary.push('响度归一化 -16 LUFS')
+      summary.push(t('main.cmd.summaryLoudnorm'))
     }
     aencName = applyAudioArgs(args, a, audioFilters, audioIn.channels ?? 2)
-    summary.push(`音频：${aencName} ${a.bitrateKbps}kbps @ ${a.codec === 'libopus' ? 48000 : a.sampleRate}Hz`)
+    const avLayout = (audioIn.channels ?? 2) === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
+    summary.push(
+      t('main.cmd.summaryAudio', {
+        encoder: aencName,
+        bitrate: `${a.bitrateKbps}kbps`,
+        rate: a.codec === 'libopus' ? 48000 : a.sampleRate,
+        layout: avLayout
+      })
+    )
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
   if (out.container === 'flv' && aencName === 'libopus') {
-    warnings.push('FLV/RTMP 对 Opus 支持很差，多数服务器无法播放，建议改用 AAC。')
+    warnings.push(t('main.cmd.opusInFlv'))
   }
   if (out.container === 'mpegts' && aencName === 'aac') args.push('-bsf:a', 'aac_adtstoasc')
 
@@ -604,14 +652,14 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     else if (burnBitmapExternal) subtitleApplied = 'burn-bitmap'
   } else if (mode === 'copy' && track) {
     if (!isTextTrack) {
-      warnings.push('位图字幕（PGS/DVD/DVB）无法作为独立轨道在 RTMP/FLV 中传输，已跳过。')
+      warnings.push(t('main.cmd.bitmapNoCopy'))
     } else if (track.source === 'embedded') {
       args.push('-map', `0:${track.streamIndex}`, '-c:s', 'copy')
       subtitleApplied = 'copy'
-      summary.push('字幕：复制轨道')
-      if (out.container === 'flv') warnings.push('FLV/RTMP 通常不转发字幕轨；如需字幕请使用“烧录”模式。')
+      summary.push(t('main.cmd.summarySubCopy'))
+      if (out.container === 'flv') warnings.push(t('main.cmd.flvNoSubtitleTrack'))
     } else {
-      warnings.push('外部字幕文件无法作为独立轨道推流，请改用“烧录”模式。')
+      warnings.push(t('main.cmd.externalSubNoTrack'))
     }
   }
 
@@ -664,6 +712,7 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
   const sub = settings.subtitles
   const out = settings.output
   const available = getAvailableEncoderNames()
+  const t = translatorFor(req.language ?? DEFAULT_COMMAND_LANGUAGE)
   const warnings: string[] = []
   const summary: string[] = []
   const args: string[] = []
@@ -699,11 +748,11 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
   if (!copyVideo) {
     if (scaleFilter) {
       filters.push(`scale=${scaleFilter}:flags=bicubic`)
-      summary.push(`缩放 ${scaleFilter}`)
+      summary.push(t('main.cmd.summaryScale', { value: scaleFilter }))
     }
     if (wantsFps) {
       filters.push(`fps=${v.fps}`)
-      summary.push(`${v.fps} fps`)
+      summary.push(t('main.cmd.summaryFps', { fps: v.fps }))
     }
   }
 
@@ -714,16 +763,19 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
       filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
       burnText = true
     } else {
-      warnings.push(burnSourceMissingWarning(track))
+      warnings.push(burnSourceMissingWarning(track, t))
     }
-    if (burnText) summary.push(`烧录字幕${track.source === 'embedded' ? ` (内挂 #${track.streamIndex})` : ''}`)
+    if (burnText) {
+      summary.push(
+        `${t('main.cmd.summaryBurn')}${track.source === 'embedded' ? t('main.cmd.summaryBurnEmbedded', { n: track.streamIndex ?? '?' }) : ''}`
+      )
+    }
   }
   if (hasOffset && internalOffset > 0) {
-    warnings.push(`偏移 +${round2(internalOffset)}s 会延后所有内容，推流开头会有约 ${round2(internalOffset)} 秒的空档等待缓冲。`)
+    warnings.push(t('main.cmd.offsetPositive', { sec: round2(internalOffset) }))
   }
 
-  /* ---- mapping ---- */
-  if (videoIn) {
+  /* ---- mapping ---- */  if (videoIn) {
     args.push('-map', `0:${videoIn.index}`)
     if (filters.length > 0) args.push('-vf', filters.join(','))
   }
@@ -731,38 +783,46 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): {
 
   /* ---- video encoder ---- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
-  const flvWarn = flvCodecWarning(v.codec, out.container)
+  const flvWarn = flvCodecWarning(v.codec, out.container, t)
   if (flvWarn) warnings.push(flvWarn)
   if (copyVideo) {
     args.push('-c:v', 'copy')
-    summary.unshift('视频：直接复制 (不重编码)')
+    summary.unshift(t('main.cmd.summaryVideoCopy'))
   } else if (!videoIn) {
-    warnings.push('源文件没有可用的视频轨，将只推送音频。')
+    warnings.push(t('main.cmd.noVideoTrackEncoder'))
   } else {
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
     const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
     applyVideoEncoderArgs(args, v, spec, fpsForGop, out.container)
     if (v.repeatHeaders) args.push('-flags', '+cgop')
-    const hw = spec.kind === 'software' ? '' : ' [硬件]'
-    summary.unshift(`视频：${spec.name}${hw} · ${v.rateControl.toUpperCase()}${v.rateControl === 'crf' ? ` CRF ${v.crf}` : ` ${v.bitrateKbps}kbps`}`)
+    const hw = spec.kind === 'software' ? '' : t('main.cmd.hardwareTag')
+    summary.unshift(videoSummary(t, spec.name, hw, v))
   }
 
   /* ---- audio encoder ---- */
   const audioFilters: string[] = []
   if (a.codec === 'none') {
-    summary.push('音频：丢弃')
+    summary.push(t('main.cmd.summaryAudioNone'))
   } else if (!audioIn) {
-    warnings.push('源文件没有音频轨，将只推送视频。')
+    warnings.push(t('main.cmd.noAudioTrack'))
   } else if (a.codec === 'copy') {
     args.push('-c:a', 'copy')
-    summary.push('音频：直接复制')
+    summary.push(t('main.cmd.summaryAudioCopy'))
   } else {
     if (a.loudnorm) {
       audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
-      summary.push('响度归一化 -16 LUFS')
+      summary.push(t('main.cmd.summaryLoudnorm'))
     }
     const enc = applyAudioArgs(args, a, audioFilters, audioIn.channels ?? 2)
-    summary.push(`音频：${enc} ${a.bitrateKbps}kbps @ ${a.codec === 'libopus' ? 48000 : a.sampleRate}Hz`)
+    const copyLayout = (audioIn.channels ?? 2) === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
+    summary.push(
+      t('main.cmd.summaryAudio', {
+        encoder: enc,
+        bitrate: `${a.bitrateKbps}kbps`,
+        rate: a.codec === 'libopus' ? 48000 : a.sampleRate,
+        layout: copyLayout
+      })
+    )
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
@@ -844,7 +904,7 @@ function testPatternSize(v: VideoSettings): string {
  * applies it for FLV — RTMP flushes the header immediately — and its absence from the
  * test was itself a difference between the test and the stream.
  */
-export function buildTestCommand(settings: SessionSettings, url: string, streamKey: string): {
+export function buildTestCommand(settings: SessionSettings, url: string, streamKey: string, language: Language = DEFAULT_COMMAND_LANGUAGE): {
   args: string[]
   summary: string[]
   notes: string[]
@@ -853,6 +913,7 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
   const a = settings.audio
   const out = settings.output
   const available = getAvailableEncoderNames()
+  const t = translatorFor(language)
   const summary: string[] = []
   const notes: string[] = []
   const target = buildRtmpTarget(url, streamKey)
@@ -889,31 +950,40 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
   applyVideoEncoderArgs(args, v, spec, fps, out.container)
   if (v.repeatHeaders && flv) args.push('-flags', '+cgop')
   if (wantsCopy) {
-    notes.push('视频设置为「直接复制」，测试画面没有源视频轨可复制，测试改用 H.264 软件编码（画面参数不代表实际推流）。')
+    notes.push(t('main.cmd.testCopyVideoNote'))
   }
-  const hw = spec.kind === 'software' ? '' : ' [硬件]'
+  const hw = spec.kind === 'software' ? '' : t('main.cmd.hardwareTag')
   summary.push(
-    `视频：${spec.name}${hw} · ${v.rateControl.toUpperCase()}${v.rateControl === 'crf' ? ` CRF ${v.crf}` : ` ${v.bitrateKbps}kbps`} · ${pattern} ${fps}fps`
+    t('main.cmd.testSummaryVideo', {
+      encoder: spec.name,
+      hw,
+      mode: `${v.rateControl.toUpperCase()} ${
+        v.rateControl === 'crf' ? t('main.cmd.summaryVideoModeCrf', { crf: v.crf }) : t('main.cmd.summaryVideoModeBitrate', { kbps: v.bitrateKbps })
+      }`,
+      size: pattern,
+      fps
+    })
   )
 
   /* ---------------- audio encoder ---------------- */
   const audioFilters: string[] = []
   if (a.codec === 'none') {
     // No audio track at all: the test must push what the stream would push.
-    summary.push('音频：丢弃')
+    summary.push(t('main.cmd.testNoAudio'))
   } else {
     // The sine source is a single channel, which is what `applyAudioArgs` needs to
     // know before it decides whether a `pan` downmix is required.
     const enc = applyAudioArgs(args, a, audioFilters, 1)
     if (a.codec === 'copy') {
-      notes.push('音频设置为「复制源音频」，测试信号没有源音轨可复制，测试改用 AAC 编码。')
+      notes.push(t('main.cmd.testCopyAudioNote'))
     }
     const rate = enc === 'libopus' ? 48000 : a.sampleRate || 44100
-    const layout = Math.max(1, Math.min(2, a.channels || 2)) === 1 ? '单声道' : '立体声'
-    summary.push(`音频：${enc} ${a.rateControl === 'vbr' && enc !== 'libopus' ? 'VBR' : `${a.bitrateKbps}kbps`} @ ${rate}Hz ${layout}`)
+    const layout = Math.max(1, Math.min(2, a.channels || 2)) === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
+    const bitrate = a.rateControl === 'vbr' && enc !== 'libopus' ? 'VBR' : `${a.bitrateKbps}kbps`
+    summary.push(t('main.cmd.summaryAudio', { encoder: enc, bitrate, rate, layout }))
     if (a.loudnorm) {
       audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
-      summary.push('响度归一化 -16 LUFS')
+      summary.push(t('main.cmd.summaryLoudnorm'))
     }
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
@@ -925,9 +995,9 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
    * non-zero) — and "连接失败" would send the user hunting for a network problem that
    * does not exist. Emitted only when the test really encodes that codec.
    */
-  const codecWarning = flvCodecWarning(wantsCopy ? 'h264' : v.codec, out.container)
+  const codecWarning = flvCodecWarning(wantsCopy ? 'h264' : v.codec, out.container, t)
   if (codecWarning) notes.push(codecWarning)
-  if (flv && a.codec === 'libopus') notes.push('FLV/RTMP 对 Opus 支持很差，多数服务器无法播放，建议改用 AAC。')
+  if (flv && a.codec === 'libopus') notes.push(t('main.cmd.opusInFlv'))
 
   /* ---------------- muxing / destination ---------------- */
   /*

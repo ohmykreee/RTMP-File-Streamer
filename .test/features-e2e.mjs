@@ -111,7 +111,17 @@ fs.writeFileSync(
 // STREAMER_E2E moves the window off-screen and makes it click-through, so the
 // physical mouse cannot interfere; CDP keeps working normally.
 const appEnv = { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
-const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
+/*
+ * `--lang=zh-CN` pins the interface language.
+ *
+ * On a first launch the app detects its language from the system locale, and this
+ * suite asserts on Chinese UI text — so without the switch it would pass on a
+ * Chinese machine and fail on an English one for reasons that have nothing to do
+ * with the feature under test. Pinning it here also makes the detection itself
+ * deterministic: `zh-CN` must resolve to Chinese, which is checked in the unit
+ * suite against the pure rules.
+ */
+const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
   env: appEnv
 })
@@ -718,7 +728,7 @@ const RECEIVED = path.join(here, 'features_received.flv')
     fs.utimesSync(f, t, t)
   }
 
-  const second = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
+  const second = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
     cwd: root,
     env: appEnv
   })

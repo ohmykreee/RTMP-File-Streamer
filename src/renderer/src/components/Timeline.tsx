@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EngineStatus, PlaylistItem } from '@shared/types'
 import { formatDuration } from '../lib/format'
+import { useT } from '../i18n'
 
 interface TimelineProps {
   items: PlaylistItem[]
@@ -25,6 +26,7 @@ interface Segment {
  * restarting the encoder mid-file and splicing it into the published stream).
  */
 export default function Timeline({ items, status, onJumpToItem, disabled }: TimelineProps): React.JSX.Element {
+  const t = useT()
   const barRef = useRef<HTMLDivElement | null>(null)
   const [dragFraction, setDragFraction] = useState<number | null>(null)
   const [hoverFraction, setHoverFraction] = useState<number | null>(null)
@@ -140,9 +142,9 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
           onPointerDown={onPointerDown}
           onPointerMove={(e) => !draggingRef.current && setHoverFraction(fractionFromEvent(e.clientX))}
           onPointerLeave={() => setHoverFraction(null)}
-          title={disabled ? '播放列表为空' : '拖动可跳转到任意位置或文件'}
+          title={disabled ? t('timeline.emptyTitle') : t('timeline.dragHint')}
           role="slider"
-          aria-label="串流进度"
+          aria-label={t('timeline.progressAria')}
           aria-valuemin={0}
           aria-valuemax={Math.round(totalDuration)}
           aria-valuenow={Math.round(status.completedSec)}
@@ -156,7 +158,7 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
                 key={seg.item.id}
                 className={`timeline-seg st-${st}${isCurrent ? ' current' : ''}`}
                 style={{ left: `${seg.start * 100}%`, width: `${Math.max(0, (seg.end - seg.start) * 100)}%` }}
-                title={`${seg.item.name} · ${formatDuration(seg.duration)}`}
+                title={t('timeline.segment', { name: seg.item.name, duration: formatDuration(seg.duration) })}
               />
             )
           })}
@@ -169,7 +171,7 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
             meter. Only in buffered mode, where the encoder is genuinely ahead.
           */}
           {status.buffered && (
-            <div className="timeline-encoded" title={`编码进程已到 ${formatDuration(status.encodedSec ?? 0)}；跳转需要丢弃这段缓冲`}>
+            <div className="timeline-encoded" title={t('timeline.encodedTitle', { time: formatDuration(status.encodedSec ?? 0) })}>
               <span className="timeline-encoded-fill" style={{ width: `${encodedFraction * 100}%` }} />
             </div>
           )}
@@ -200,14 +202,16 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
       <div className="timeline-footer">
         <div className="timeline-pct mono">
           <strong>{progressPct.toFixed(1)}%</strong>
-          <span className="timeline-pct-label">总进度</span>
+          <span className="timeline-pct-label">{t('timeline.totalProgress')}</span>
         </div>
         {status.buffered && (
-          <div className="buffer-note" title="绿条 = 编码进程已经跑到的位置；跳转需要丢弃这段缓冲，因此会有一次重连">
+          <div className="buffer-note" title={t('timeline.bufferNoteTitle')}>
             <span className="buffer-swatch" aria-hidden />
             <span className="buffer-text">
-              缓冲领先 {bufferSec.toFixed(1)}s
-              {status.encoder ? ` · 编码 ${status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—'}` : ''}
+              {t('app.bufferLead', { sec: bufferSec.toFixed(1) })}
+              {status.encoder
+                ? t('timeline.bufferLeadEncoder', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })
+                : ''}
             </span>
           </div>
         )}

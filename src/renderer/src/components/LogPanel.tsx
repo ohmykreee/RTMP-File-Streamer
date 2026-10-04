@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { LogEntry, LogLevel, PersistedLogInfo } from '@shared/types'
+import type { TranslationKey } from '@shared/i18n'
 import { formatClock } from '../lib/format'
+import { useT } from '../i18n'
 
 interface LogPanelProps {
   logs: LogEntry[]
@@ -16,14 +18,16 @@ interface LogPanelProps {
  * The level filters, in button order.
  *
  * 「全部」 is not one of them: it is the "no filter" state and is handled
- * separately from the level toggles below it in the toolbar.
+ * separately from the level toggles below it in the toolbar. `error` shares its
+ * wording with the engine state pill, so it points at that key.
  */
-const LEVELS: { key: LogLevel; label: string }[] = [
-  { key: 'debug', label: '调试' },
-  { key: 'info', label: '信息' },
-  { key: 'warn', label: '警告' },
-  { key: 'error', label: '错误' },
-  { key: 'ffmpeg', label: 'FFmpeg' }
+const LEVELS: { key: LogLevel; labelKey: TranslationKey }[] = [
+  { key: 'debug', labelKey: 'log.level.debug' },
+  { key: 'info', labelKey: 'log.level.info' },
+  { key: 'warn', labelKey: 'log.level.warn' },
+  { key: 'error', labelKey: 'app.state.error' },
+  /* Its own label is the product name, which is the same in every language. */
+  { key: 'ffmpeg', labelKey: 'log.level.ffmpeg' }
 ]
 
 const LEVEL_TAG: Record<LogLevel, string> = {
@@ -35,6 +39,7 @@ const LEVEL_TAG: Record<LogLevel, string> = {
 }
 
 export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogsDir }: LogPanelProps): React.JSX.Element {
+  const t = useT()
   /**
    * Selected levels. An empty set means 「全部」 is active, which makes the two
    * states mutually exclusive by construction:
@@ -77,7 +82,7 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
       <header className="logs-head" onClick={onToggle}>
         <span className="logs-title">
           <span className={`chevron${expanded ? ' open' : ''}`}>▸</span>
-          运行日志
+          {t('log.title')}
           <span className="muted small">({countLabel})</span>
         </span>
         {/* The toolbar belongs to the log body: while the panel is collapsed it
@@ -88,9 +93,9 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
               type="button"
               className={`seg-btn${showingAll ? ' active' : ''}`}
               onClick={() => setLevels(new Set())}
-              title="显示全部日志（同时取消下面所有等级筛选）"
+              title={t('log.showAllTitle')}
             >
-              全部
+              {t('log.all')}
             </button>
             {/* 「全部」 is a different kind of control (it replaces the selection
                 rather than joining it), so it is set apart from the levels. */}
@@ -101,21 +106,21 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
                 type="button"
                 className={`seg-btn${levels.has(l.key) ? ' active' : ''}`}
                 onClick={() => toggleLevel(l.key)}
-                title={`只看「${l.label}」日志（可多选）`}
+                title={t('log.onlyLevelTitle', { level: t(l.labelKey) })}
               >
-                {l.label}
+                {t(l.labelKey)}
               </button>
             ))}
           </div>
           <label className="mini-check">
             <input type="checkbox" checked={autoscroll} onChange={(e) => setAutoscroll(e.target.checked)} />
-            自动滚动
+            {t('log.autoscroll')}
           </label>
-          <button className="btn tiny ghost" onClick={onOpenLogsDir} title="打开留存日志所在的目录">
-            📂 日志目录
+          <button className="btn tiny ghost" onClick={onOpenLogsDir} title={t('log.openDirTitle')}>
+            {t('log.openDir')}
           </button>
           <button className="btn tiny ghost" onClick={onClear}>
-            清空
+            {t('playlist.clear')}
           </button>
         </div>
       </header>
@@ -131,7 +136,7 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
           }}
         >
           {visible.length === 0 ? (
-            <p className="muted small pad">暂无日志</p>
+            <p className="muted small pad">{t('log.empty')}</p>
           ) : (
             visible.map((entry) => (
               <div key={entry.id} className={`log-line lv-${entry.level}`}>

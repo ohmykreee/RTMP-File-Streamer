@@ -14,6 +14,7 @@
  */
 import crypto from 'node:crypto'
 import net from 'node:net'
+import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 /* ------------------------------------------------------------------ *
@@ -166,9 +167,18 @@ async function openClient(port, { password = '', authString } = {}) {
  * @param {object} opts
  * @param {string} opts.bundlePath  path of the bundled `src/main/obs/websocket.ts`
  * @param {(name: string, ok: boolean, detail?: string) => void} opts.record
+ * @param {(key: string, params?: Record<string, unknown>) => string} [opts.t]
+ *   Message lookup handed to the server. Defaults to the reference (English) table
+ *   loaded from the i18n bundle next to the obs one, so the server still logs text.
  */
-export async function obsWebSocketChecks({ bundlePath, record }) {
+export async function obsWebSocketChecks({ bundlePath, record, t }) {
   const { ObsWebSocketServer, obsAuthString } = await import(pathToFileURL(bundlePath).href)
+  if (!t) {
+    const i18nPath = path.join(path.dirname(bundlePath), 'i18n.bundle.mjs')
+    const { TRANSLATIONS } = await import(pathToFileURL(i18nPath).href)
+    t = (key, params = {}) =>
+      String(TRANSLATIONS.zh[key] ?? key).replace(/\{(\w+)\}/g, (whole, name) => (params[name] === undefined ? whole : String(params[name])))
+  }
 
   /** A server wired to recording stubs, so request effects are observable. */
   function makeServer({ password = '' } = {}) {
@@ -187,7 +197,10 @@ export async function obsWebSocketChecks({ bundlePath, record }) {
       stopStream: async () => {
         state.stopped += 1
       },
-      log: (level, message) => state.logs.push(`${level}:${message}`)
+      log: (level, message) => state.logs.push(`${level}:${message}`),
+      // The server writes its log lines through the message table it is handed; the
+      // checks below read the Chinese wording this test has always asserted on.
+      t
     })
     // Port 0 = let the OS pick, so the suite never fights the app for 4455.
     server.start('127.0.0.1', 0)

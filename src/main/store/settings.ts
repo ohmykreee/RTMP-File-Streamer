@@ -1,7 +1,9 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { AppSettings, OutputSettings } from '@shared/types'
+import { app } from 'electron'
+import type { AppSettings, Language, OutputSettings } from '@shared/types'
 import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, DEFAULT_SETTINGS } from '@shared/defaults'
+import { isLanguage, resolveLanguage } from '@shared/i18n'
 import { dataDir, ensureDir } from './paths'
 
 let cached: AppSettings | null = null
@@ -9,6 +11,23 @@ let cached: AppSettings | null = null
 /** `<app>/Data/settings.json` — see `store/paths.ts`. */
 function settingsFile(): string {
   return path.join(dataDir(), 'settings.json')
+}
+
+/**
+ * The language the operating system is set to, as Electron reports it.
+ *
+ * `app.getLocale()` is the OS UI language (the same one Chromium would negotiate
+ * with `navigator.language` in the renderer), and it is read only after the app is
+ * ready, which every caller here is. A missing or empty value is passed through as
+ * an empty tag so `detectLanguage` falls back rather than guessing from the
+ * process environment, which on Windows says nothing useful about the UI language.
+ */
+export function getSystemLocale(): string {
+  try {
+    return app.getLocale()
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -28,6 +47,11 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
     // Absent in a file written before the switch existed; debug detail is the useful
     // default, so an old configuration keeps what it always had.
     debugLogging: typeof s.debugLogging === 'boolean' ? s.debugLogging : DEFAULT_SETTINGS.debugLogging,
+    // A stored language wins; otherwise the system locale decides. `languageSet`
+    // distinguishes the two, so a settings file written before i18n existed (which
+    // has neither key) is treated as "never chosen" and follows the OS.
+    language: resolveLanguage(s.language, getSystemLocale()),
+    languageSet: isLanguage(s.language),
     session: {
       video: { ...DEFAULT_SETTINGS.session.video, ...(session.video ?? {}) },
       audio: { ...DEFAULT_SETTINGS.session.audio, ...(session.audio ?? {}) },
@@ -110,4 +134,25 @@ export function saveSettings(patch: Partial<AppSettings>): AppSettings {
 
 export function getSettingsPath(): string {
   return settingsFile()
+}
+
+/**
+ * The active interface language.
+ *
+ * Read through `loadSettings()` rather than cached separately so the language and
+ * the settings file can never disagree about it.
+ */
+export function getLanguage(): Language {
+  return loadSettings().language
+}
+
+/**
+ * Records an explicit language choice.
+ *
+ * Writes both fields: the language itself, and `languageSet` so the choice stops
+ * being treated as a mirror of the system locale. Returns the stored settings so a
+ * caller can hand the renderer exactly what was persisted.
+ */
+export function setLanguage(language: Language): AppSettings {
+  return saveSettings({ language, languageSet: true })
 }

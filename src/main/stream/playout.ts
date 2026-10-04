@@ -4,6 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 import type { LogLevel } from '@shared/types'
+import type { Translate, TranslationKey } from '@shared/i18n'
+import { EN } from '@shared/i18n'
 
 /**
  * Two-process playout: an encoder writes MPEG-TS segments, a long-lived pusher
@@ -106,6 +108,15 @@ export interface PlayoutCallbacks {
   onPusherExit: (code: number | null) => void
   /** The encoder process ended; `materialSec` is what it added to the timeline. */
   onEncoderExit: (code: number | null, materialSec: number) => void
+  /**
+   * Message lookup for this class's log lines.
+   *
+   * Injected rather than imported: this module is also bundled on its own by the
+   * test harness, which runs without the application's settings store — importing
+   * it would drag Electron into that bundle and fail at load. Defaults to the
+   * reference language so a caller that does not care still gets readable output.
+   */
+  t?: Translate<TranslationKey>
 }
 
 export interface EncoderPass {
@@ -266,6 +277,8 @@ export class Playout {
    */
   private readonly leadLimitSec: number
   private readonly callbacks: PlayoutCallbacks
+  /** Log text lookup; the reference language when the caller supplies none. */
+  private readonly t: Translate<TranslationKey>
   /** Scratch folder for anything a pass needs on disk (logs, sidecars). */
   private readonly dir: string
 
@@ -338,6 +351,7 @@ export class Playout {
     this.outputArgs = outputArgs
     this.leadLimitSec = Math.max(0, leadLimitSec)
     this.callbacks = callbacks
+    this.t = callbacks.t ?? ((key) => EN[key])
     this.dir = fs.mkdtempSync(path.join(os.tmpdir(), TEMP_PREFIX))
   }
 
@@ -433,7 +447,7 @@ export class Playout {
     this.passMaterial.clear()
     this.tsPts = { pass: 0, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
     this.stopping = false
-    this.callbacks.log('info', '已丢弃缓冲并重开 RTMP 会话（跳转时需要这样做：缓冲里的内容无法撤回）。')
+    this.callbacks.log('info', this.t('main.engine.bufferDropped'))
     await this.start(pass, true)
   }
 
@@ -600,7 +614,7 @@ export class Playout {
       '-nostats',
       ...this.outputArgs
     ]
-    this.callbacks.log('debug', `推流进程: ${args.join(' ')}`)
+    this.callbacks.log('debug', this.t('main.engine.publisherCmd', { args: args.join(' ') }))
     // stdin is piped and owned by this process for the WHOLE session: encoder
     // passes come and go, the reader never sees EOF, and the RTMP session is
     // untouched by a seek or a file change.
@@ -610,7 +624,7 @@ export class Playout {
     })
     this.pusher = child
     this.pusherProgressBuf = ''
-    this.callbacks.log('info', `推流进程已启动（pid ${child.pid ?? '?'}），编码进程可在其背后重启。`)
+    this.callbacks.log('info', this.t('main.engine.publisherStarted', { pid: child.pid ?? '?' }))
     // Hand over whatever the encoder produced during the head start. Nothing else will:
     // this only runs on a `drain`, and the queue was filled before the publisher existed.
     this.pump()
@@ -641,17 +655,17 @@ export class Playout {
       // the session is supposed to be running means anything (see below).
       if (this.stopping || this.suppressPusherExit) return
       const code = (err as NodeJS.ErrnoException).code ?? err.message
-      this.callbacks.log('error', `写入推流进程失败（${code}）：推流进程会读到流结束而退出，本次发布会话将中断。`)
+      this.callbacks.log('error', this.t('main.playout.writeFailed', { code }))
     })
     child.on('error', (err) => {
-      this.callbacks.log('error', `推流进程错误: ${err.message}`)
+      this.callbacks.log('error', this.t('main.playout.processError', { error: err.message }))
     })
     child.on('exit', (code) => {
       if (this.pusher === child) this.pusher = null
       // A restart stops the publisher deliberately; reporting that as a fault would
       // make the engine abandon the session the restart was opening.
       if (this.stopping || this.suppressPusherExit) return
-      this.callbacks.log('warn', `推流进程结束（退出码 ${code ?? '未知'}）`)
+      this.callbacks.log('warn', this.t('main.engine.publisherExited', { code: code ?? this.t('main.engine.unknown') }))
       this.callbacks.onPusherExit(code)
     })
   }
@@ -727,12 +741,19 @@ export class Playout {
         this.holdReported = true
         this.callbacks.log(
           'debug',
-          `编码已领先推流 ${lead.toFixed(1)}s（上限 ${this.leadLimitSec.toFixed(1)}s），暂停编码进程输出等待推流追平——缓冲不再随播放列表增长。`
+          this.t('main.playout.leadHold', { lead: lead.toFixed(1), limit: this.leadLimitSec.toFixed(1) })
         )
       }
       this.callbacks.log(
         'debug',
-        `第 ${this.seq} 段突发产出 ${burstSec.toFixed(1)}s / 用时 ${burstWallSec.toFixed(2)}s（≈${(burstSec / burstWallSec).toFixed(1)}×），当前领先 ${lead.toFixed(1)}s；等推流把领先吃到 ${(this.leadLimitSec - leadReleaseMarginSec(this.leadLimitSec)).toFixed(1)}s 以内再恢复编码。`
+        this.t('main.playout.leadBurst', {
+          seq: this.seq,
+          burst: burstSec.toFixed(1),
+          wall: burstWallSec.toFixed(2),
+          rate: (burstSec / burstWallSec).toFixed(1),
+          lead: lead.toFixed(1),
+          release: (this.leadLimitSec - leadReleaseMarginSec(this.leadLimitSec)).toFixed(1)
+        })
       )
       // Backstop only: a publisher that has stopped reporting cannot drain anything.
       this.holdBackstop = setTimeout(() => {
@@ -741,7 +762,10 @@ export class Playout {
         const heldSec = (Date.now() - this.holdStartedAt) / 1000
         this.callbacks.log(
           'warn',
-          `编码已暂停 ${heldSec.toFixed(1)}s 仍未见推流进程推进（领先 ${(this.encodedSec - this.publishedSec).toFixed(1)}s）：推流端可能已卡住或网络中断，先恢复编码继续排空缓冲。`
+          this.t('main.playout.holdBackstop', {
+            held: heldSec.toFixed(1),
+            lead: (this.encodedSec - this.publishedSec).toFixed(1)
+          })
         )
         this.releaseEncoderHold()
       }, leadHoldBackstopSec(this.leadLimitSec) * 1000)
@@ -750,10 +774,7 @@ export class Playout {
     if (lead > this.leadLimitSec - leadReleaseMarginSec(this.leadLimitSec)) return
     const heldSec = (Date.now() - this.holdStartedAt) / 1000
     this.releaseEncoderHold()
-    this.callbacks.log(
-      'debug',
-      `推流已把缓冲吃到领先 ${lead.toFixed(1)}s，恢复编码进程输出（本次暂停 ${heldSec.toFixed(1)}s）。`
-    )
+    this.callbacks.log('debug', this.t('main.playout.holdReleased', { lead: lead.toFixed(1), held: heldSec.toFixed(1) }))
   }
 
   /** Lifts a hold and starts the burst accounting for the next one. */
@@ -805,10 +826,7 @@ export class Playout {
     if (silentSec > PUSHER_SILENCE_WARN_SEC) {
       if (!this.pusherSilenceReported) {
         this.pusherSilenceReported = true
-        this.callbacks.log(
-          'warn',
-          `推流进程已 ${silentSec.toFixed(0)}s 没有上报进度：它多半卡在向服务器写入（网络拥塞或服务器不收），此时缓冲区是满的、编码进程也被暂停，观众端会先缓冲再突然快进。`
-        )
+        this.callbacks.log('warn', this.t('main.playout.pusherSilent', { sec: silentSec.toFixed(0) }))
       }
     } else {
       this.pusherSilenceReported = false
@@ -828,13 +846,34 @@ export class Playout {
     const pusherQueuedKb = (this.pusher?.stdin?.writableLength ?? 0) / 1024
     this.callbacks.log(
       'debug',
-      `缓冲状态：推流已播 ${this.publishedSec.toFixed(1)}s（本窗口 ${airedSec.toFixed(1)}s ÷ ${wallSec.toFixed(1)}s = ${airRate.toFixed(2)}×，推流进程自报 ${this.pusherSpeed.toFixed(2)}×，已发送 ${(this.pusherSentBytes / 1048576).toFixed(1)}MB）；编码已产 ${this.encodedSec.toFixed(1)}s（本窗口 ${encodeRate.toFixed(2)}×），领先 ${(this.encodedSec - this.publishedSec).toFixed(1)}s / 上限 ${this.leadLimitSec.toFixed(1)}s，暂停 ${this.holdCount} 次；转发 ${(relay.relayedBytes / 1048576).toFixed(1)}MB，写入推流进程 ${(relay.pumpedBytes / 1048576).toFixed(1)}MB（其内部待写 ${pusherQueuedKb.toFixed(0)}KB / 我方待写 ${(relay.pendingBytes / 1024).toFixed(0)}KB）。`
+      this.t('main.playout.health', {
+        published: this.publishedSec.toFixed(1),
+        aired: airedSec.toFixed(1),
+        wall: wallSec.toFixed(1),
+        airRate: airRate.toFixed(2),
+        pusherSpeed: this.pusherSpeed.toFixed(2),
+        sentMb: (this.pusherSentBytes / 1048576).toFixed(1),
+        encoded: this.encodedSec.toFixed(1),
+        encodeRate: encodeRate.toFixed(2),
+        lead: (this.encodedSec - this.publishedSec).toFixed(1),
+        limit: this.leadLimitSec.toFixed(1),
+        holds: this.holdCount,
+        relayMb: (relay.relayedBytes / 1048576).toFixed(1),
+        pumpedMb: (relay.pumpedBytes / 1048576).toFixed(1),
+        queuedKb: pusherQueuedKb.toFixed(0),
+        pendingKb: (relay.pendingBytes / 1024).toFixed(0)
+      })
     )
     if (airRate < HEALTH_MIN_RATE) {
       this.lowRateWindows += 1
       this.callbacks.log(
         'warn',
-        `推流端本窗口只送出 ${airedSec.toFixed(1)}s / ${wallSec.toFixed(1)}s = ${airRate.toFixed(2)}×（低于实时，连续 ${this.lowRateWindows} 个窗口）：缓冲是满的、编码也在等它，所以瓶颈在推流链路（上行带宽 / 服务器接收 / 网络抖动），观众端会卡顿并在缓冲后用快进追赶。建议降低码率，或检查到服务器的链路质量。`
+        this.t('main.playout.lowRate', {
+          aired: airedSec.toFixed(1),
+          wall: wallSec.toFixed(1),
+          rate: airRate.toFixed(2),
+          windows: this.lowRateWindows
+        })
       )
     } else {
       this.lowRateWindows = 0
@@ -868,7 +907,7 @@ export class Playout {
         }
         this.pumpedBytes += chunk.length
       } catch (err) {
-        this.callbacks.log('debug', `写入推流进程失败（${String(err)}）。`)
+        this.callbacks.log('debug', this.t('main.playout.pumpFailed', { error: String(err) }))
         return
       }
     }
@@ -994,7 +1033,7 @@ export class Playout {
       } else if (key === 'progress' && value === 'end') {
         // The publisher has caught up with the encoder; it simply waits for the
         // next datagram, which is why this transport survives encoder restarts.
-        this.callbacks.log('debug', '推流进程已追平编码进度，等待后续内容。')
+        this.callbacks.log('debug', this.t('main.engine.publisherCaughtUp'))
       } else if (key === 'speed') {
         // no-op: the pusher is paced by -re, so this is always ~1x
       }
@@ -1093,7 +1132,7 @@ export class Playout {
       'mpegts',
       'pipe:1'
     ]
-    this.callbacks.log('debug', `编码进程（第 ${this.seq} 段）: ${args.join(' ')}`)
+    this.callbacks.log('debug', this.t('main.engine.encoderCmd', { seq: this.seq, args: args.join(' ') }))
     this.tsPts = { pass: this.seq, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
     // fd 0 is ignored (`-nostdin`), fd 1 is the transport stream, fd 2 is the log,
     // fd 3 is progress. fd 1 gets exactly one reader and is never given an encoding.
@@ -1118,7 +1157,7 @@ export class Playout {
     child.stdout?.on('data', (chunk: Buffer) => {
       if (isCurrent()) this.relay(chunk)
     })
-    this.callbacks.log('info', `编码进程已启动（第 ${this.seq} 段，pid ${child.pid ?? '?'}）。`)
+    this.callbacks.log('info', this.t('main.engine.encoderStarted', { seq: this.seq, pid: child.pid ?? '?' }))
     // `-progress pipe:3` reports how much material the pass has produced, which is
     // what the next pass must offset its timeline by. fd 1 keeps zero readers
     // besides the relay and is never decoded as text.
@@ -1130,7 +1169,7 @@ export class Playout {
     child.stderr?.setEncoding('utf8')
     child.stderr?.on('data', (chunk: string) => this.onEncoderLog(chunk))
     child.on('error', (err) => {
-      this.callbacks.log('error', `编码进程错误: ${err.message}`)
+      this.callbacks.log('error', this.t('main.playout.encoderProcessError', { error: err.message }))
     })
     child.on('exit', (code) => {
       const wasCurrent = this.encoder === child
@@ -1196,7 +1235,13 @@ export class Playout {
       const produced = this.passMaterial.get(passSeq) ?? 0
       this.callbacks.log(
         'debug',
-        `第 ${passSeq} 段已编码 ${produced.toFixed(1)}s，转发 ${(s.relayedBytes / 1024).toFixed(0)}KB / 已写入推流进程 ${(s.pumpedBytes / 1024).toFixed(0)}KB（缓冲 ${(s.pendingBytes / 1024).toFixed(0)}KB）`
+        this.t('main.playout.passProgress', {
+          seq: passSeq,
+          produced: produced.toFixed(1),
+          relayed: (s.relayedBytes / 1024).toFixed(0),
+          pumped: (s.pumpedBytes / 1024).toFixed(0),
+          buffered: (s.pendingBytes / 1024).toFixed(0)
+        })
       )
     }
   }
@@ -1233,10 +1278,13 @@ export class Playout {
     const materialSec = this.passMaterial.get(seq) ?? 0
     this.passMaterial.delete(seq)
     if (code !== 0) {
-      this.callbacks.log('warn', `编码进程以退出码 ${code ?? '未知'} 结束（文件 ${path.basename(pass.input)}）。`)
+      this.callbacks.log(
+        'warn',
+        this.t('main.engine.encoderPassExit', { code: code ?? this.t('main.engine.unknown'), name: path.basename(pass.input) })
+      )
     }
     if (materialSec <= 0) {
-      if (code === 0) this.callbacks.log('debug', '本次编码没有产出可推流的数据。')
+      if (code === 0) this.callbacks.log('debug', this.t('main.engine.encoderNoOutput'))
       this.callbacks.onEncoderExit(code, 0)
       return
     }
@@ -1246,7 +1294,15 @@ export class Playout {
     const pts = this.getTsPtsSpan()
     this.callbacks.log(
       'debug',
-      `第 ${pass.seq} 段完成（${span.toFixed(2)}s），时间线推进到 ${this.nextOffset.toFixed(2)}s；片上视频 PTS ${Number.isNaN(pts.firstSec) ? '?' : pts.firstSec.toFixed(2)}–${Number.isNaN(pts.lastSec) ? '?' : pts.lastSec.toFixed(2)}s（${pts.videoHeaders} 帧 / ${(this.relayedBytes / 1024).toFixed(0)}KB）`
+      this.t('main.playout.passDone', {
+        seq: pass.seq ?? 0,
+        span: span.toFixed(2),
+        next: this.nextOffset.toFixed(2),
+        first: Number.isNaN(pts.firstSec) ? '?' : pts.firstSec.toFixed(2),
+        last: Number.isNaN(pts.lastSec) ? '?' : pts.lastSec.toFixed(2),
+        frames: pts.videoHeaders,
+        kb: (this.relayedBytes / 1024).toFixed(0)
+      })
     )
     this.callbacks.onEncoderExit(code, span)
   }

@@ -1,8 +1,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { MediaInfo, PlaylistItem, SubtitleMode, SubtitleTrackRef } from '@shared/types'
-import { probeMedia, probeSubtitleFile, embeddedSubtitleRefs } from '../ffmpeg/probe'
+import { probeMedia, probeSubtitleFile, embeddedSubtitleRefs, DEFAULT_PROBE_LANGUAGE } from '../ffmpeg/probe'
 import { SUPPORTED_SUBTITLE_EXT } from '@shared/types'
+import type { Language } from '@shared/types'
+import { translatorFor } from '@shared/i18n'
 import { dataDir, ensureDir } from './paths'
 
 export interface PlaylistStore {
@@ -16,9 +18,11 @@ function newId(): string {
   return `it_${Date.now().toString(36)}_${idSeq.toString(36)}`
 }
 
-/** Probe cache keyed by path, invalidated when the file's size or mtime changes. */
+/** Probe cache keyed by path, invalidated when the file's size, mtime or language changes. */
 interface CacheEntry {
   key: string
+  /** Language the error text was rendered in; part of the cache identity. */
+  language: Language
   info: MediaInfo
 }
 const probeCache = new Map<string, CacheEntry>()
@@ -32,13 +36,16 @@ function fileKey(p: string): string {
   }
 }
 
-export async function probeCached(ffprobePath: string, filePath: string): Promise<MediaInfo> {
+export async function probeCached(ffprobePath: string, filePath: string, language?: Language): Promise<MediaInfo> {
   const abs = path.resolve(filePath)
   const key = fileKey(abs)
   const hit = probeCache.get(abs)
-  if (hit && hit.key === key) return hit.info
-  const info = await probeMedia(ffprobePath, abs)
-  if (!info.probeError) probeCache.set(abs, { key, info })
+  // A cached entry carries the error text it was probed with, so a language
+  // switch has to invalidate it — otherwise a stale Chinese/English message would
+  // survive in the playlist row until the file changed.
+  if (hit && hit.key === key && hit.language === (language ?? DEFAULT_PROBE_LANGUAGE)) return hit.info
+  const info = await probeMedia(ffprobePath, abs, language)
+  if (!info.probeError) probeCache.set(abs, { key, language: language ?? DEFAULT_PROBE_LANGUAGE, info })
   return info
 }
 
@@ -149,10 +156,12 @@ export interface AddItemsResult {
 export async function createPlaylistItems(
   ffprobePath: string,
   filePaths: string[],
-  defaults: { mode: SubtitleMode }
+  defaults: { mode: SubtitleMode; language?: Language }
 ): Promise<AddItemsResult> {
   const items: PlaylistItem[] = []
   const errors: { path: string; message: string }[] = []
+  const language = defaults.language ?? DEFAULT_PROBE_LANGUAGE
+  const t = translatorFor(language)
 
   for (const raw of filePaths) {
     const filePath = path.resolve(raw)
@@ -160,11 +169,11 @@ export async function createPlaylistItems(
     try {
       size = fs.statSync(filePath).size
     } catch {
-      errors.push({ path: filePath, message: '文件不存在或无法访问' })
+      errors.push({ path: filePath, message: t('main.dialog.probeMissing') })
       continue
     }
 
-    const info = await probeCached(ffprobePath, filePath)
+    const info = await probeCached(ffprobePath, filePath, language)
     if (info.probeError && info.streams.length === 0) {
       errors.push({ path: filePath, message: info.probeError })
     }
@@ -173,7 +182,7 @@ export async function createPlaylistItems(
 
     // Auto-attach sidecar subtitle files so "video + subtitles" needs one click.
     for (const subPath of findSidecarSubtitles(filePath)) {
-      const ref = await probeSubtitleFile(ffprobePath, subPath)
+      const ref = await probeSubtitleFile(ffprobePath, subPath, language)
       if (ref && !tracks.some((t) => t.id === ref.id)) tracks.push(ref)
     }
 
@@ -201,7 +210,8 @@ export async function createPlaylistItems(
 export async function attachSubtitleFile(
   ffprobePath: string,
   item: PlaylistItem,
-  subPath: string
+  subPath: string,
+  language?: Language
 ): Promise<SubtitleTrackRef | null> {
   let size = 0
   try {
@@ -212,7 +222,7 @@ export async function attachSubtitleFile(
   void size
   const existing = item.subtitleTracks.find((t) => t.source === 'external' && t.path && path.resolve(t.path) === path.resolve(subPath))
   if (existing) return existing
-  const ref = await probeSubtitleFile(ffprobePath, subPath)
+  const ref = await probeSubtitleFile(ffprobePath, subPath, language)
   return ref
 }
 

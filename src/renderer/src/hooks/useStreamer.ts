@@ -5,6 +5,7 @@ import type {
   AudioSettings,
   EngineStatus,
   FfmpegCapabilities,
+  Language,
   LogEntry,
   ObsWebSocketStatus,
   OutputSettings,
@@ -219,6 +220,24 @@ export function useStreamer() {
     [requireBridge]
   )
 
+  /**
+   * Switches the interface language.
+   *
+   * Its own IPC call rather than a `saveSettings` patch, because it also has to
+   * tell the main process to re-render the text it produces itself (log lines,
+   * ffmpeg diagnostics) and to record the choice as deliberate, so it stops
+   * following the system locale on the next launch. The returned settings replace
+   * the local copy like any other update, which is what re-renders the UI.
+   */
+  const setLanguage = useCallback(
+    async (language: Language) => {
+      const next = await requireBridge().setLanguage(language)
+      setSettings(next)
+      return next
+    },
+    [requireBridge]
+  )
+
   const chooseFfmpeg = useCallback(async () => {
     const api = requireBridge()
     const chosen = await api.pickFfmpeg()
@@ -414,6 +433,7 @@ export function useStreamer() {
     settings,
     session,
     saveSettings,
+    setLanguage,
     updateVideo,
     updateAudio,
     updateSubtitles,

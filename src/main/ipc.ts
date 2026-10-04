@@ -17,6 +17,7 @@ import type {
   SessionSettings
 } from '@shared/types'
 import { IPC, SUPPORTED_SUBTITLE_EXT, SUPPORTED_VIDEO_EXT } from '@shared/types'
+import type { Language } from '@shared/types'
 import { buildRtmpTarget } from '@shared/rtmp'
 import { buildCommandLine, buildTestCommand } from '@main/ffmpeg/command'
 import { ENCODER_CATALOGUE, getCapabilities, resolveBinaries, runProcess, setAvailableEncoderNames } from '@main/ffmpeg/capabilities'
@@ -24,6 +25,7 @@ import { embeddedSubtitleRefs } from '@main/ffmpeg/probe'
 import { probeCached } from '@main/store/playlist'
 import { deletePreset, getPresetLocation, listPresets, renamePreset, savePreset } from '@main/store/presets'
 import { getPersistedLogInfo } from '@main/store/logger'
+import { mainT } from './i18n'
 import { BUILTIN_PRESETS } from '@shared/defaults'
 
 /** Everything the IPC layer needs from the running application. */
@@ -31,6 +33,8 @@ export interface AppServices {
   getWindow: () => BrowserWindow | null
   getSettings: () => AppSettings
   mergeSettings: (patch: Partial<AppSettings>) => AppSettings
+  /** Records an explicit interface-language choice; see `store/settings.ts`. */
+  setLanguage: (language: Language) => AppSettings
   getPlaylist: () => PlaylistItem[]
   addItems: (paths: string[]) => Promise<PlaylistItem[]>
   attachSubtitle: (itemId: string, filePath: string) => Promise<PlaylistItem | null>
@@ -70,6 +74,19 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.getSettings, (): AppSettings => services.getSettings())
   ipcMain.handle(IPC.saveSettings, (_e, patch: Partial<AppSettings>): AppSettings => services.mergeSettings(patch ?? {}))
 
+  /**
+   * Switches the interface language.
+   *
+   * Also re-broadcasts the settings so every window (and the renderer's own copy)
+   * ends up with the value that was actually persisted — including `languageSet`,
+   * which is what stops the setting from following the system locale next launch.
+   */
+  ipcMain.handle(IPC.setLanguage, (_e, language: Language): AppSettings => {
+    const next = services.setLanguage(language)
+    win()?.webContents.send(IPC.evtSettings, next)
+    return next
+  })
+
   ipcMain.handle(IPC.showItemInFolder, (_e, filePath: string): void => {
     if (typeof filePath === 'string' && fs.existsSync(filePath)) shell.showItemInFolder(path.resolve(filePath))
   })
@@ -79,7 +96,7 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.getCapabilities, async (_e, force: boolean): Promise<FfmpegCapabilities> => {
     const settings = services.getSettings()
     const resolved = resolveBinaries(settings.ffmpegPath, settings.ffprobePath)
-    const caps = await getCapabilities(resolved.ffmpeg, resolved.ffprobe, resolved.source, force === true)
+    const caps = await getCapabilities(resolved.ffmpeg, resolved.ffprobe, resolved.source, force === true, settings.language)
     const names = new Set<string>()
     for (const enc of caps.encoders) {
       if (!enc.available) continue
@@ -94,10 +111,10 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.pickFfmpeg, async (): Promise<string | null> => {
     const filters =
       process.platform === 'win32'
-        ? [{ name: '可执行文件', extensions: ['exe'] }]
-        : [{ name: '所有文件', extensions: ['*'] }]
+        ? [{ name: mainT('main.dialog.executables'), extensions: ['exe'] }]
+        : [{ name: mainT('main.dialog.allFiles'), extensions: ['*'] }]
     const parent = win()
-    const options = { title: '选择 ffmpeg 可执行文件', properties: ['openFile'] as string[], filters }
+    const options = { title: mainT('main.dialog.pickFfmpeg'), properties: ['openFile'] as string[], filters }
     const res = parent ? await dialog.showOpenDialog(parent, options as never) : await dialog.showOpenDialog(options as never)
     if (res.canceled || res.filePaths.length === 0) return null
 
@@ -106,7 +123,7 @@ export function registerIpc(services: AppServices): void {
     const patch: Partial<AppSettings> = { ffmpegPath: chosen }
     if (fs.existsSync(sibling)) patch.ffprobePath = sibling
     services.mergeSettings(patch)
-    services.pushLog('info', `已设置 ffmpeg 路径: ${chosen}`)
+    services.pushLog('info', mainT('main.caps.ffmpegUpdated', { path: chosen }))
     return chosen
   })
 
@@ -114,15 +131,15 @@ export function registerIpc(services: AppServices): void {
 
   const mediaFilter = (exts: string[], label: string): { name: string; extensions: string[] }[] => [
     { name: label, extensions: exts.map((e) => e.replace(/^\./, '')) },
-    { name: '所有文件', extensions: ['*'] }
+    { name: mainT('main.dialog.allFiles'), extensions: ['*'] }
   ]
 
   ipcMain.handle(IPC.pickVideoFiles, async (): Promise<string[]> => {
     const parent = win()
     const options = {
-      title: '选择视频文件（可多选）',
+      title: mainT('main.dialog.pickVideos'),
       properties: ['openFile', 'multiSelections'] as string[],
-      filters: mediaFilter(SUPPORTED_VIDEO_EXT, '视频文件')
+      filters: mediaFilter(SUPPORTED_VIDEO_EXT, mainT('main.dialog.videoFiles'))
     }
     const res = parent ? await dialog.showOpenDialog(parent, options as never) : await dialog.showOpenDialog(options as never)
     return res.canceled ? [] : res.filePaths
@@ -131,9 +148,9 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.pickSubtitleFiles, async (): Promise<string[]> => {
     const parent = win()
     const options = {
-      title: '选择字幕文件',
+      title: mainT('main.dialog.pickSubtitles'),
       properties: ['openFile', 'multiSelections'] as string[],
-      filters: mediaFilter(SUPPORTED_SUBTITLE_EXT, '字幕文件')
+      filters: mediaFilter(SUPPORTED_SUBTITLE_EXT, mainT('main.dialog.subtitleFiles'))
     }
     const res = parent ? await dialog.showOpenDialog(parent, options as never) : await dialog.showOpenDialog(options as never)
     return res.canceled ? [] : res.filePaths
@@ -144,7 +161,7 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.probe, async (_e, filePath: string): Promise<ProbeResult> => {
     const settings = services.getSettings()
     const resolved = resolveBinaries(settings.ffmpegPath, settings.ffprobePath)
-    const info = await probeCached(resolved.ffprobe, filePath)
+    const info = await probeCached(resolved.ffprobe, filePath, settings.language)
     return { info, subtitles: embeddedSubtitleRefs(info) }
   })
 
@@ -157,7 +174,7 @@ export function registerIpc(services: AppServices): void {
     // into a drop would otherwise be probed as a "video" and fail to stream.
     const videos = list.filter((p) => SUPPORTED_VIDEO_EXT.includes(path.extname(String(p)).toLowerCase()))
     const skipped = list.length - videos.length
-    if (skipped > 0) services.pushLog('info', `已忽略 ${skipped} 个非视频文件。`)
+    if (skipped > 0) services.pushLog('info', mainT('main.engine.ignoredNonVideo', { n: skipped }))
     return services.addItems(videos)
   })
   ipcMain.handle(IPC.attachSubtitle, (_e, itemId: string, filePath: string): Promise<PlaylistItem | null> =>
@@ -199,19 +216,19 @@ export function registerIpc(services: AppServices): void {
 
   ipcMain.handle(IPC.savePreset, (_e, name: string, settings: SessionSettings): PresetsPayload => {
     const preset = savePreset({ name: String(name ?? ''), settings })
-    services.pushLog('info', `已保存预设「${preset.name}」→ ${getPresetLocation().file}`)
+    services.pushLog('info', mainT('main.dialog.presetSaved', { name: preset.name, path: getPresetLocation().file }))
     return presetsPayload()
   })
 
   ipcMain.handle(IPC.deletePreset, (_e, presetId: string): PresetsPayload => {
-    if (BUILTIN_PRESETS.some((p) => p.id === presetId)) throw new Error('内置预设不可删除')
+    if (BUILTIN_PRESETS.some((p) => p.id === presetId)) throw new Error(mainT('main.dialog.builtinNoDelete'))
     const remaining = deletePreset(String(presetId))
-    services.pushLog('info', `已删除预设（剩余 ${remaining.length} 个自定义预设）`)
+    services.pushLog('info', mainT('main.dialog.presetDeleted', { n: remaining.length }))
     return presetsPayload()
   })
 
   ipcMain.handle(IPC.renamePreset, (_e, presetId: string, name: string): PresetsPayload => {
-    if (BUILTIN_PRESETS.some((p) => p.id === presetId)) throw new Error('内置预设不可重命名')
+    if (BUILTIN_PRESETS.some((p) => p.id === presetId)) throw new Error(mainT('main.dialog.builtinNoRename'))
     renamePreset(String(presetId), String(name ?? ''))
     return presetsPayload()
   })
@@ -250,27 +267,29 @@ export function registerIpc(services: AppServices): void {
   ipcMain.handle(IPC.testRtmp, async (_e, req: RtmpTestRequest): Promise<RtmpTestResult> => {
     const settings = services.getSettings()
     const resolved = resolveBinaries(settings.ffmpegPath, settings.ffprobePath)
-    if (!resolved.ffmpeg) return { ok: false, message: '未找到 ffmpeg，无法测试连接', detail: '', elapsedMs: 0 }
+    if (!resolved.ffmpeg) return { ok: false, message: mainT('main.dialog.noFfmpegTest'), detail: '', elapsedMs: 0 }
 
     const url = String(req?.url ?? '').trim()
     const key = String(req?.streamKey ?? '').trim()
     if (!/^rtmps?:\/\//i.test(url)) {
-      return { ok: false, message: '地址必须是以 rtmp:// 或 rtmps:// 开头的推流地址', detail: '', elapsedMs: 0 }
+      return { ok: false, message: mainT('main.dialog.badUrl'), detail: '', elapsedMs: 0 }
     }
     // Test the session the caller sent (the settings on screen); fall back to the
     // persisted ones so a caller that predates the field still gets a test.
     const session = req?.session ?? settings.session
     // The stream key is optional: some servers take the whole path in the address.
     const target = buildRtmpTarget(url, key)
-    const test = buildTestCommand(session, url, key)
+    // The summary and notes are shown in the UI, so the test is built in the
+    // language the interface is running in.
+    const test = buildTestCommand(session, url, key, settings.language)
     const args = test.args
     const timeoutMs = Math.max(5, Math.min(60, Number(req?.timeoutSec) || 20)) * 1000
-    services.pushLog('debug', `RTMP 测试目标: ${target}`)
+    services.pushLog('debug', mainT('main.dialog.testTarget', { target }))
     // The summary is what makes "the test used different settings than the stream"
     // a visible fact instead of something the user has to infer from ffmpeg output.
-    services.pushLog('debug', `RTMP 测试参数: ${test.summary.join(' · ')}`)
-    for (const note of test.notes) services.pushLog('info', `RTMP 测试：${note}`)
-    services.pushLog('debug', `RTMP 测试命令: ${buildCommandLine(resolved.ffmpeg, args)}`)
+    services.pushLog('debug', mainT('main.dialog.testParams', { params: test.summary.join(' · ') }))
+    for (const note of test.notes) services.pushLog('info', mainT('main.dialog.testNote', { note }))
+    services.pushLog('debug', mainT('main.dialog.testCommand', { command: buildCommandLine(resolved.ffmpeg, args) }))
 
     const started = Date.now()
     // The ffmpeg run has its own timeout; this guard only covers a hang below
@@ -281,7 +300,7 @@ export function registerIpc(services: AppServices): void {
       runProcess(resolved.ffmpeg, args, timeoutMs),
       new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
         guard = setTimeout(
-          () => resolve({ code: -3, stdout: '', stderr: '[test aborted] 测试未能在时限内完成，已强制结束。' }),
+          () => resolve({ code: -3, stdout: '', stderr: mainT('main.dialog.testAborted') }),
           guardMs
         )
       })
@@ -303,19 +322,19 @@ export function registerIpc(services: AppServices): void {
 
     let message: string
     if (ok) {
-      message = `连接成功：已向 ${target} 推送 5 秒测试流（耗时 ${(elapsedMs / 1000).toFixed(1)}s）`
+      message = mainT('main.dialog.testOk', { target, sec: (elapsedMs / 1000).toFixed(1) })
     } else if (timeoutResult.code === -3) {
-      message = '测试卡住，已强制中止（超过等待上限）'
+      message = mainT('main.dialog.testStuck')
     } else if (timedOut) {
-      message = `测试超时（${timeoutMs / 1000}s）：服务器无响应或地址不可达`
+      message = mainT('main.dialog.testTimeout', { sec: timeoutMs / 1000 })
     } else {
       const errLine = combined
         .split(/\r?\n/)
         .reverse()
         .find((l) => failedPattern.test(l))
-      message = errLine ? errLine.trim() : `推流失败（ffmpeg 退出码 ${timeoutResult.code ?? '未知'}）`
+      message = errLine ? errLine.trim() : mainT('main.dialog.testFailed', { code: timeoutResult.code ?? mainT('main.engine.unknown') })
     }
-    services.pushLog(ok ? 'info' : 'error', `RTMP 测试：${message}`)
+    services.pushLog(ok ? 'info' : 'error', mainT('main.dialog.result', { message }))
     return { ok, message, detail, elapsedMs, summary: test.summary, notes: test.notes }
   })
 }

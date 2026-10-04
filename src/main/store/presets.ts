@@ -4,6 +4,7 @@ import type { OutputSettings, Preset, PresetLocation, SessionSettings } from '@s
 import { DEFAULT_SESSION } from '@shared/defaults'
 import { dataDir, ensureDir, getAppRoot } from './paths'
 import { normaliseOutput } from './settings'
+import { mainT } from '../i18n'
 
 /** Presets live beside the other state files in `<app>/Data`. */
 export function getPresetsFile(): string {
@@ -96,7 +97,7 @@ export interface SavePresetInput {
 /** Creates a preset, or overwrites the existing one with the same name. */
 export function savePreset(input: SavePresetInput): Preset {
   const name = String(input.name ?? '').trim().slice(0, 80)
-  if (!name) throw new Error('预设名称不能为空')
+  if (!name) throw new Error(mainT('main.dialog.presetNameRequired'))
 
   const presets = [...listPresets()]
   const index = presets.findIndex((p) => p.name.toLowerCase() === name.toLowerCase())
@@ -122,7 +123,7 @@ export function deletePreset(id: string): Preset[] {
 
 export function renamePreset(id: string, name: string): Preset[] {
   const trimmed = String(name ?? '').trim().slice(0, 80)
-  if (!trimmed) throw new Error('预设名称不能为空')
+  if (!trimmed) throw new Error(mainT('main.dialog.presetNameRequired'))
   const presets = listPresets().map((p) => (p.id === id ? { ...p, name: trimmed, savedAt: Date.now() } : p))
   presets.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
   writePresets(presets)

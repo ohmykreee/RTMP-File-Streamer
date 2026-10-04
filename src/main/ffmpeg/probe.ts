@@ -1,7 +1,17 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { runProcess } from './capabilities'
-import type { MediaInfo, MediaStreamInfo, SubtitleCodecFamily, SubtitleTrackRef } from '@shared/types'
+import type { Language, MediaInfo, MediaStreamInfo, SubtitleCodecFamily, SubtitleTrackRef } from '@shared/types'
+import { translatorFor } from '@shared/i18n'
+
+/**
+ * Language for the probe error text.
+ *
+ * Passed in rather than read from the settings store: this module is bundled for
+ * the offline test harness as well, where there is no Electron store to read, and
+ * an import of it there fails at load time rather than at the call.
+ */
+export const DEFAULT_PROBE_LANGUAGE: Language = 'en'
 
 const TEXT_SUBTITLE_CODECS = new Set([
   'subrip',
@@ -118,7 +128,8 @@ function toStreamInfo(s: FfprobeStream): MediaStreamInfo {
 }
 
 /** Run ffprobe and normalize the JSON into `MediaInfo`. */
-export async function probeMedia(ffprobePath: string, filePath: string): Promise<MediaInfo> {
+export async function probeMedia(ffprobePath: string, filePath: string, language: Language = DEFAULT_PROBE_LANGUAGE): Promise<MediaInfo> {
+  const t = translatorFor(language)
   const base: MediaInfo = {
     path: filePath,
     size: 0,
@@ -133,12 +144,12 @@ export async function probeMedia(ffprobePath: string, filePath: string): Promise
     const st = fs.statSync(filePath)
     base.size = st.size
   } catch {
-    base.probeError = '文件不存在或无法访问'
+    base.probeError = t('main.dialog.probeMissing')
     return base
   }
 
   if (!ffprobePath) {
-    base.probeError = '未找到 ffprobe，无法读取媒体信息'
+    base.probeError = t('main.dialog.noFfprobe')
     return base
   }
 
@@ -150,7 +161,7 @@ export async function probeMedia(ffprobePath: string, filePath: string): Promise
 
   const text = res.stdout.trim()
   if (!text) {
-    base.probeError = (res.stderr || 'ffprobe 未返回数据').split(/\r?\n/).filter(Boolean).slice(-3).join(' ')
+    base.probeError = (res.stderr || t('main.dialog.probeNoData')).split(/\r?\n/).filter(Boolean).slice(-3).join(' ')
     return base
   }
 
@@ -158,7 +169,7 @@ export async function probeMedia(ffprobePath: string, filePath: string): Promise
   try {
     parsed = JSON.parse(text) as FfprobeOutput
   } catch (err) {
-    base.probeError = `ffprobe JSON 解析失败: ${String(err)}`
+    base.probeError = t('main.dialog.probeJsonFailed', { error: String(err) })
     return base
   }
 
@@ -204,12 +215,16 @@ export function embeddedSubtitleRefs(info: MediaInfo): SubtitleTrackRef[] {
 }
 
 /** Probe a sidecar subtitle file (srt/ass/vtt/sup/idx+sub) into a track reference. */
-export async function probeSubtitleFile(ffprobePath: string, filePath: string): Promise<SubtitleTrackRef | null> {
+export async function probeSubtitleFile(
+  ffprobePath: string,
+  filePath: string,
+  language: Language = DEFAULT_PROBE_LANGUAGE
+): Promise<SubtitleTrackRef | null> {
   const ext = path.extname(filePath).toLowerCase()
   const fallbackFamily: SubtitleCodecFamily =
     ext === '.sup' || ext === '.sub' || ext === '.idx' ? 'bitmap' : ext === '.srt' || ext === '.ass' || ext === '.ssa' || ext === '.vtt' ? 'text' : 'unknown'
 
-  const info = await probeMedia(ffprobePath, filePath)
+  const info = await probeMedia(ffprobePath, filePath, language)
   const sub = info.subtitleStreams[0]
   if (!sub) {
     // ffprobe cannot always describe idx/sub pairs; fall back to the extension.

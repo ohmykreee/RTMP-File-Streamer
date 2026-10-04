@@ -1,22 +1,37 @@
-import { useCallback, useEffect, useState } from 'react'
-import type { EngineState, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import type { EngineState, Language, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
+import type { TranslationKey } from '@shared/i18n'
+import { translatorFor } from '@shared/i18n'
 import { useStreamer } from './hooks/useStreamer'
 import PlaylistPanel from './components/PlaylistPanel'
 import SettingsPanel from './components/SettingsPanel'
 import Timeline from './components/Timeline'
 import LogPanel from './components/LogPanel'
+import LanguageSwitcher from './components/LanguageSwitcher'
+import { I18nContext, LanguageContext, type T } from './i18n'
 import { formatBitrate, formatDuration } from './lib/format'
 
-const STATE_LABEL: Record<EngineState, string> = {
-  idle: '空闲',
-  preparing: '准备中',
-  connecting: '连接中',
-  live: '推流中',
-  reconnecting: '重连中',
-  draining: '播出剩余缓冲',
-  stopping: '停止中',
-  error: '错误'
+/**
+ * Engine state pills.
+ *
+ * Keys rather than text: the label is rendered through `t`, so switching the
+ * language re-renders this table too. `preparing` and `live` share their wording
+ * with the playlist's per-item badges (see `PlaylistPanel`), which is why they
+ * point at the same keys.
+ */
+const STATE_KEY: Record<EngineState, TranslationKey> = {
+  idle: 'app.state.idle',
+  preparing: 'app.state.preparing',
+  connecting: 'app.state.connecting',
+  live: 'app.state.live',
+  reconnecting: 'app.state.reconnecting',
+  draining: 'app.state.draining',
+  stopping: 'app.state.stopping',
+  error: 'app.state.error'
 }
+
+/** Shown until the settings (and with them the saved language) arrive. */
+const BOOT_LANGUAGE: Language = 'en'
 
 export default function App(): React.JSX.Element {
   const st = useStreamer()
@@ -30,6 +45,24 @@ export default function App(): React.JSX.Element {
   const [activePresetId, setActivePresetId] = useState('')
 
   const { playlist, status, session, capabilities, settings } = st
+
+  /*
+   * The active language comes from the settings, which the main process has
+   * already resolved (a saved choice, or the system locale on first launch). Until
+   * they arrive the UI is behind a spinner, so the fallback never reaches the
+   * screen — it only keeps the tree renderable while the first IPC round-trip is
+   * in flight.
+   */
+  const language: Language = settings?.language ?? BOOT_LANGUAGE
+  const t = useMemo<T>(() => translatorFor(language), [language])
+
+  /* Keep the document in step with the UI language: it drives font selection and
+     line-breaking, it is what a screen reader announces, and the window title is
+     taken from the document in Electron. */
+  useEffect(() => {
+    document.documentElement.lang = language
+    document.title = t('app.title')
+  }, [language, t])
 
   const currentItem: PlaylistItem | null = status.currentIndex >= 0 ? (playlist[status.currentIndex] ?? null) : null
   const isActive = status.state !== 'idle' && status.state !== 'error'
@@ -127,6 +160,23 @@ export default function App(): React.JSX.Element {
     [locked, run, st]
   )
 
+  /**
+   * Switches the interface language.
+   *
+   * Goes through the dedicated IPC call rather than a settings patch: choosing a
+   * language is a decision (it stops the setting from following the system locale
+   * on future launches) and the main process has to re-render its own strings in
+   * it, which `setLanguage` handles on the way through. The resulting settings are
+   * the same shape, so the hook stores them like any other settings update.
+   */
+  const changeLanguage = useCallback(
+    (next: Language) => {
+      if (locked) return
+      void run(() => st.setLanguage(next))
+    },
+    [locked, run, st]
+  )
+
   /* Warn before closing while a stream is live. */
   useEffect(() => {
     const handler = (e: BeforeUnloadEvent): void => {
@@ -179,193 +229,219 @@ export default function App(): React.JSX.Element {
     [st]
   )
 
-  if (st.bridgeMissing) {
-    return (
-      <div className="boot">
-        <div className="boot-error">
-          <h2>无法连接到主进程</h2>
-          <p>预加载脚本未能加载，界面无法与 FFmpeg 引擎通信。</p>
-          <p className="muted small">
-            请重新构建应用：先运行 <code>pnpm build</code>，再用 <code>pnpm start</code> 启动；
-            开发时使用 <code>pnpm dev</code>。
-          </p>
+  const tree = ((): React.JSX.Element => {
+    if (st.bridgeMissing) {
+      return (
+        <div className="boot">
+          <div className="boot-error">
+            <h2>{t('app.bootErrorTitle')}</h2>
+            <p>{t('app.bootErrorBody')}</p>
+            <p className="muted small">
+              {t('app.bootErrorRebuild1')}
+              <code>pnpm build</code>
+              {t('app.bootErrorRebuild2')}
+              <code>pnpm start</code>
+              {t('app.bootErrorRebuild3')}
+            </p>
+          </div>
         </div>
-      </div>
-    )
-  }
+      )
+    }
 
-  if (!st.ready || !settings || !session) {
+    if (!st.ready || !settings || !session) {
+      return (
+        <div className="boot">
+          <div className="boot-spinner" />
+          <p>{t('app.initializing')}</p>
+        </div>
+      )
+    }
+
     return (
-      <div className="boot">
-        <div className="boot-spinner" />
-        <p>正在初始化…</p>
+      <div className="app">
+        <header className="topbar">
+          <div className="brand">
+            <span className="brand-mark">▶</span>
+            <div>
+              <h1>{t('app.title')}</h1>
+              <p className="muted small">{t('app.tagline')}</p>
+            </div>
+          </div>
+
+          <div className="topbar-right">
+            {capabilities && !capabilities.ffmpegPath && <span className="pill danger">{t('app.ffmpegMissing')}</span>}
+            {capabilities?.ffmpegPath && (
+              <span className="pill subtle mono" title={capabilities.ffmpegVersion}>
+                FFmpeg {capabilities.ffmpegVersion.replace(/^ffmpeg version\s*/, '').split(/\s+/)[0]}
+              </span>
+            )}
+            <span className={`pill state-${status.state}`}>
+              <span className={`state-dot state-${status.state}`} />
+              {t(STATE_KEY[status.state])}
+              {status.connected && status.state === 'live' ? t('app.state.connectedSuffix') : ''}
+            </span>
+            {/* Last in the row: the language control is always in the same place,
+                whatever the state pills to its left are saying. */}
+            <LanguageSwitcher language={language} locked={locked} onSelect={changeLanguage} />
+          </div>
+        </header>
+
+        {actionError && (
+          <div className="banner error">
+            <span>{actionError}</span>
+            <button className="btn tiny ghost" onClick={() => setActionError(null)}>
+              {t('app.close')}
+            </button>
+          </div>
+        )}
+
+        {capabilities && !capabilities.ffmpegPath && (
+          <div className="banner warn">
+            <span>{t('app.ffmpegMissingHint')}</span>
+            <button className="btn tiny" onClick={() => void run(st.chooseFfmpeg)}>
+              {t('app.chooseFfmpeg')}
+            </button>
+          </div>
+        )}
+
+        <main className="workspace">
+          <PlaylistPanel
+            items={playlist}
+            currentIndex={status.currentIndex}
+            active={isActive}
+            busy={st.busy}
+            locked={locked}
+            onAddVideos={() => void run(st.addVideoFiles)}
+            onAddPaths={(paths) => void run(() => st.addPaths(paths))}
+            onRemove={(id) => void run(() => st.removeItem(id))}
+            onClear={() => void run(st.clearPlaylist)}
+            onReorder={(ids) => void run(() => st.reorderPlaylist(ids))}
+            onJump={(id) => void run(() => st.jumpToItem(id))}
+            onAttachSubtitle={(id) => void run(() => st.attachSubtitle(id))}
+            onUpdateItem={(id, patch) => void run(() => st.updateItem(id, patch))}
+            onReveal={(p) => void st.showItemInFolder(p)}
+            onResolveDroppedPaths={st.resolveDroppedPaths}
+            onFilesDropped={(paths) => void run(() => st.addPaths(paths))}
+          />
+
+          <SettingsPanel
+            settings={settings}
+            capabilities={capabilities}
+            capsLoading={st.capsLoading}
+            info={st.info}
+            busy={st.busy}
+            locked={locked}
+            presets={st.presets}
+            logInfo={logInfo}
+            activePresetId={activePresetId}
+            onSelectPreset={selectPreset}
+            onSavePreset={(name) => void run(() => st.savePreset(name))}
+            onDeletePreset={(id) => {
+              setActivePresetId('')
+              void run(() => st.deletePreset(id))
+            }}
+            onOpenConfigDir={() => void run(st.openConfigDir)}
+            onOpenLogsDir={() => void run(st.openLogsDir)}
+            onUpdateVideo={editVideo}
+            onUpdateAudio={editAudio}
+            onUpdateSubtitles={editSubtitles}
+            onUpdateOutput={editOutput}
+            onSaveSettings={st.saveSettings}
+            onChooseFfmpeg={() => void run(st.chooseFfmpeg)}
+            onRefreshCapabilities={(force) => void st.refreshCapabilities(force)}
+            onTestRtmp={testRtmp}
+            onPreviewCommand={() => st.previewCommand()}
+            obsStatus={st.obsStatus}
+            onApplyObsWebSocket={st.applyObsWebSocket}
+          />
+        </main>
+
+        <footer className="player">
+          <div className="player-info">
+            <div className="now-playing">
+              <span className="np-label muted small">
+                {t('app.currentIndex', {
+                  index: status.currentIndex >= 0 ? status.currentIndex + 1 : '—',
+                  total: playlist.length || 0
+                })}
+              </span>
+              <span className="np-name" title={currentItem?.path}>
+                {currentItem ? currentItem.name : t('app.nonePlaying')}
+              </span>
+            </div>
+            <div className="np-stats mono small">
+              <span title={t('app.statDurationTitle')}>
+                {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
+              </span>
+              {/* Buffered mode runs two processes: the figures above describe what has
+                  been PUBLISHED, the marked ones describe the ENCODER, which is free
+                  to run ahead of real time. */}
+              {status.encoder ? (
+                <>
+                  <span className="warn">
+                    {t('app.encoderSpeed', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })}
+                  </span>
+                  <span className="warn">fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
+                  <span className="warn">{formatBitrate(status.encoder.bitrateKbps)}</span>
+                  <span title={t('app.statLeadTitle')}>{t('app.bufferLead', { sec: status.encoder.leadSec.toFixed(1) })}</span>
+                  <span title={t('app.statSpeedTitle')}>
+                    {t('app.publisherSpeed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span title={t('app.statEncodeSpeedTitle')}>
+                    {t('app.speed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
+                  </span>
+                  <span title={t('app.statBitrateTitle')}>{formatBitrate(status.bitrateKbps)}</span>
+                  <span title={t('app.statFpsTitle')}>fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
+                </>
+              )}
+              {status.droppedFrames > 0 && <span className="warn">{t('app.droppedFrames', { n: status.droppedFrames })}</span>}
+              {status.reconnectCount > 0 && <span className="warn">{t('app.reconnectCount', { n: status.reconnectCount })}</span>}
+              <span title={t('app.statElapsedTitle')}>{t('app.elapsed', { duration: formatDuration(status.elapsedSec) })}</span>
+            </div>
+          </div>
+
+          <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
+
+          <div className="player-controls">
+            {/* The transport buttons only: the progress percentage belongs to the bar
+                and is rendered under it (see `Timeline`), not among the buttons. */}
+            <div className="controls">
+              {!isActive ? (
+                <button className="btn primary lg" onClick={() => void run(() => st.start())} disabled={!canStart || actionPending}>
+                  {t('app.start')}
+                </button>
+              ) : (
+                <>
+                  <button className="btn" onClick={() => void run(() => st.skipNext())} disabled={actionPending} title="Ctrl+→">
+                    {t('app.skipNext')}
+                  </button>
+                  <button className="btn danger" onClick={() => void run(() => st.stop())} disabled={actionPending}>
+                    {t('app.stop')}
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </footer>
+
+        <LogPanel
+          logs={st.logs}
+          onClear={() => void st.clearLogs()}
+          expanded={logsOpen}
+          onToggle={() => setLogsOpen((v) => !v)}
+          logInfo={logInfo}
+          onOpenLogsDir={() => void st.openLogsDir()}
+        />
       </div>
     )
-  }
+  })()
 
   return (
-    <div className="app">
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">▶</span>
-          <div>
-            <h1>RTMP 文件串流器</h1>
-            <p className="muted small">FFmpeg 本地文件直播推送 · 支持字幕烧录与多文件顺序串流</p>
-          </div>
-        </div>
-
-        <div className="topbar-right">
-          {capabilities && !capabilities.ffmpegPath && (
-            <span className="pill danger">未找到 FFmpeg</span>
-          )}
-          {capabilities?.ffmpegPath && (
-            <span className="pill subtle mono" title={capabilities.ffmpegVersion}>
-              FFmpeg {capabilities.ffmpegVersion.replace(/^ffmpeg version\s*/, '').split(/\s+/)[0]}
-            </span>
-          )}
-          <span className={`pill state-${status.state}`}>
-            <span className={`state-dot state-${status.state}`} />
-            {STATE_LABEL[status.state]}
-            {status.connected && status.state === 'live' ? ' · 已连接' : ''}
-          </span>
-        </div>
-      </header>
-
-      {actionError && (
-        <div className="banner error">
-          <span>{actionError}</span>
-          <button className="btn tiny ghost" onClick={() => setActionError(null)}>
-            关闭
-          </button>
-        </div>
-      )}
-
-      {capabilities && !capabilities.ffmpegPath && (
-        <div className="banner warn">
-          <span>未检测到 ffmpeg。请先安装 ffmpeg，或在「高级」选项卡中手动指定 ffmpeg 可执行文件路径。</span>
-          <button className="btn tiny" onClick={() => void run(st.chooseFfmpeg)}>
-            选择 ffmpeg
-          </button>
-        </div>
-      )}
-
-      <main className="workspace">
-        <PlaylistPanel
-          items={playlist}
-          currentIndex={status.currentIndex}
-          active={isActive}
-          busy={st.busy}
-          locked={locked}
-          onAddVideos={() => void run(st.addVideoFiles)}
-          onAddPaths={(paths) => void run(() => st.addPaths(paths))}
-          onRemove={(id) => void run(() => st.removeItem(id))}
-          onClear={() => void run(st.clearPlaylist)}
-          onReorder={(ids) => void run(() => st.reorderPlaylist(ids))}
-          onJump={(id) => void run(() => st.jumpToItem(id))}
-          onAttachSubtitle={(id) => void run(() => st.attachSubtitle(id))}
-          onUpdateItem={(id, patch) => void run(() => st.updateItem(id, patch))}
-          onReveal={(p) => void st.showItemInFolder(p)}
-          onResolveDroppedPaths={st.resolveDroppedPaths}
-          onFilesDropped={(paths) => void run(() => st.addPaths(paths))}
-        />
-
-        <SettingsPanel
-          settings={settings}
-          capabilities={capabilities}
-          capsLoading={st.capsLoading}
-          info={st.info}
-          busy={st.busy}
-          locked={locked}
-          presets={st.presets}
-          logInfo={logInfo}
-          activePresetId={activePresetId}
-          onSelectPreset={selectPreset}
-          onSavePreset={(name) => void run(() => st.savePreset(name))}
-          onDeletePreset={(id) => {
-            setActivePresetId('')
-            void run(() => st.deletePreset(id))
-          }}
-          onOpenConfigDir={() => void run(st.openConfigDir)}
-          onOpenLogsDir={() => void run(st.openLogsDir)}
-          onUpdateVideo={editVideo}
-          onUpdateAudio={editAudio}
-          onUpdateSubtitles={editSubtitles}
-          onUpdateOutput={editOutput}
-          onSaveSettings={st.saveSettings}
-          onChooseFfmpeg={() => void run(st.chooseFfmpeg)}
-          onRefreshCapabilities={(force) => void st.refreshCapabilities(force)}
-          onTestRtmp={testRtmp}
-          onPreviewCommand={() => st.previewCommand()}
-          obsStatus={st.obsStatus}
-          onApplyObsWebSocket={st.applyObsWebSocket}
-        />
-      </main>
-
-      <footer className="player">
-        <div className="player-info">
-          <div className="now-playing">
-            <span className="np-label muted small">
-              当前 #{status.currentIndex >= 0 ? status.currentIndex + 1 : '—'}/{playlist.length || 0}
-            </span>
-            <span className="np-name" title={currentItem?.path}>
-              {currentItem ? currentItem.name : '未开始串流'}
-            </span>
-          </div>
-          <div className="np-stats mono small">
-            <span title="已推流时长 / 当前文件时长">
-              {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
-            </span>
-            {/* Buffered mode runs two processes: the figures above describe what has
-                been PUBLISHED, the marked ones describe the ENCODER, which is free
-                to run ahead of real time. */}
-            {status.encoder ? (
-              <>
-                <span className="warn">
-                  [编码 ffmpeg] 速度 {status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—'}
-                </span>
-                <span className="warn">fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
-                <span className="warn">{formatBitrate(status.encoder.bitrateKbps)}</span>
-                <span title="编码进程领先推流进程的秒数，即缓冲深度">缓冲领先 {status.encoder.leadSec.toFixed(1)}s</span>
-                <span title="推流进程的节奏，稳定在 1× 左右">[推流] 速度 {status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—'}</span>
-              </>
-            ) : (
-              <>
-                <span title="编码速度">速度 {status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—'}</span>
-                <span title="实时码率">{formatBitrate(status.bitrateKbps)}</span>
-                <span title="编码帧率">fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
-              </>
-            )}
-            {status.droppedFrames > 0 && <span className="warn">丢帧 {status.droppedFrames}</span>}
-            {status.reconnectCount > 0 && <span className="warn">重连 {status.reconnectCount}</span>}
-            <span title="会话已运行时长">已运行 {formatDuration(status.elapsedSec)}</span>
-          </div>
-        </div>
-
-        <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
-
-        <div className="player-controls">
-          {/* The transport buttons only: the progress percentage belongs to the bar
-              and is rendered under it (see `Timeline`), not among the buttons. */}
-          <div className="controls">
-            {!isActive ? (
-              <button className="btn primary lg" onClick={() => void run(() => st.start())} disabled={!canStart || actionPending}>
-                ▶ 开始串流
-              </button>
-            ) : (
-              <>
-                <button className="btn" onClick={() => void run(() => st.skipNext())} disabled={actionPending} title="Ctrl+→">
-                  ⏭ 下一个文件
-                </button>
-                <button className="btn danger" onClick={() => void run(() => st.stop())} disabled={actionPending}>
-                  ⏹ 停止
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      </footer>
-
-      <LogPanel logs={st.logs} onClear={() => void st.clearLogs()} expanded={logsOpen} onToggle={() => setLogsOpen((v) => !v)} logInfo={logInfo} onOpenLogsDir={() => void st.openLogsDir()} />
-    </div>
+    <I18nContext.Provider value={t}>
+      <LanguageContext.Provider value={language}>{tree}</LanguageContext.Provider>
+    </I18nContext.Provider>
   )
 }

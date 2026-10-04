@@ -150,12 +150,33 @@ const output = {
 }
 fs.writeFileSync(
   settingsFile,
-  JSON.stringify({ ...savedSettings, session: { ...(savedSettings.session ?? {}), output } }, null, 2)
+  JSON.stringify(
+    {
+      ...savedSettings,
+      session: { ...(savedSettings.session ?? {}), output },
+      /*
+       * The saved language is reset alongside the output block, for the same reason:
+       * this suite's later section switches to Japanese and back, so a run that
+       * stopped halfway would otherwise leave a saved choice behind and make the
+       * NEXT run start in the wrong language — failing its own Chinese-text
+       * assertions for a reason that has nothing to do with the code.
+       */
+      language: 'zh',
+      languageSet: true
+    },
+    null,
+    2
+  )
 )
 note('app settings retargeted', output.server)
 
 /* ---------------- launch the real app ---------------- */
-const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
+/*
+ * `--lang=zh-CN` pins the interface language: this suite asserts on Chinese UI
+ * text, and a first launch otherwise detects the language from the system locale,
+ * which would make the result depend on the machine rather than on the app.
+ */
+const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
   env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
 })
@@ -628,6 +649,97 @@ const errorLines = await evaluate(
   'JSON.stringify([...document.querySelectorAll(".log-line.lv-error .log-msg")].map(e => e.textContent).slice(0,3))'
 )
 record('no error entries in the in-app log', errorLines === '[]' || errorLines === '[]', errorLines)
+
+/* ---------------- the language switcher ----------------
+ * The picker sits last in the top bar. Everything below reads the *rendered* text
+ * back, because "the setting was saved" is not the same claim as "the interface
+ * changed language": a value that reaches the store but not the components would
+ * pass a settings-only check. */
+const langBar = JSON.parse(
+  await evaluate(`(() => {
+    const right = document.querySelector('.topbar-right')
+    const btn = right?.querySelector('.lang-btn')
+    const children = right ? [...right.children] : []
+    return JSON.stringify({
+      present: !!btn,
+      isLast: children.length > 0 && children[children.length - 1] === btn?.parentElement,
+      badge: btn?.querySelector('.lang-badge')?.textContent?.trim() ?? null,
+      disabled: btn?.disabled ?? null
+    })
+  })()`)
+)
+record(
+  'the language button is the last control in the top bar',
+  langBar.present === true && langBar.isLast === true && langBar.badge === '中',
+  JSON.stringify(langBar)
+)
+
+await evaluate(`(() => {
+  document.querySelector('.lang-btn')?.click()
+  return 'ok'
+})()`)
+await delay(300)
+const langMenu = JSON.parse(
+  await evaluate(`(() => {
+    // The accessible name, not textContent: the badge and the language name are
+    // adjacent inline elements, so textContent concatenates them ("中中文").
+    const items = [...document.querySelectorAll('.lang-menu .lang-item')].map(b => b.getAttribute('aria-label'))
+    const active = document.querySelector('.lang-menu .lang-item.active')?.getAttribute('aria-label') ?? null
+    const checked = [...document.querySelectorAll('.lang-menu .lang-item')].map(b => b.getAttribute('aria-checked'))
+    return JSON.stringify({ items, active, checked })
+  })()`)
+)
+record(
+  'the language menu lists every language under its own name',
+  JSON.stringify(langMenu.items) === JSON.stringify(['中文 (当前)', '日本語', 'English']) &&
+    Array.isArray(langMenu.checked) &&
+    JSON.stringify(langMenu.checked) === JSON.stringify(['true', 'false', 'false']),
+  JSON.stringify(langMenu)
+)
+
+await evaluate(`(() => {
+  [...document.querySelectorAll('.lang-menu .lang-item')].find(b => b.textContent.includes('日本語'))?.click()
+  return 'ok'
+})()`)
+await delay(700)
+const afterSwitch = JSON.parse(
+  await evaluate(`(() => {
+    const stored = { title: document.querySelector('.brand h1')?.textContent?.trim() ?? null, htmlLang: document.documentElement.lang }
+    return JSON.stringify(stored)
+  })()`)
+)
+let savedLanguage = null
+try {
+  savedLanguage = JSON.parse(fs.readFileSync(settingsFile, 'utf8')).language ?? null
+} catch {
+  /* the file is rewritten on every settings change */
+}
+record(
+  'switching to Japanese re-renders the interface and persists the choice',
+  afterSwitch.title === 'RTMP ファイルストリーマー' && afterSwitch.htmlLang === 'ja' && savedLanguage === 'ja',
+  `${afterSwitch.title} / lang=${afterSwitch.htmlLang} / settings.json=${savedLanguage}`
+)
+
+/* Back to Chinese, so this suite's own wording assertions (and the next suite's)
+ * still describe what is on screen. */
+await evaluate(`(() => {
+  document.querySelector('.lang-btn')?.click()
+  return 'ok'
+})()`)
+await delay(300)
+await evaluate(`(() => {
+  [...document.querySelectorAll('.lang-menu .lang-item')].find(b => b.textContent.includes('中文'))?.click()
+  return 'ok'
+})()`)
+await delay(700)
+const backToZh = JSON.parse(
+  await evaluate(`(() => JSON.stringify({ title: document.querySelector('.brand h1')?.textContent?.trim() ?? null, lang: document.documentElement.lang }))()`)
+)
+record(
+  'switching back restores the Chinese interface',
+  backToZh.title === 'RTMP 文件串流器' && backToZh.lang === 'zh',
+  `${backToZh.title} / lang=${backToZh.lang}`
+)
 
 /* ---------------- state must live in the app's Data folder ----------------
  * Queried while the app is still alive: killing it first would leave this CDP

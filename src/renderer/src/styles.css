@@ -206,6 +206,125 @@ code {
   color: var(--success);
 }
 
+/* ------------------------------------------------------------------ *
+ * Language switcher (rightmost control in the top bar)
+ * ------------------------------------------------------------------ */
+
+.lang-switch {
+  position: relative;
+}
+
+/*
+ * Sized to a `pill` rather than a `btn`: it sits at the end of a row of status
+ * pills and must not out-shout the stream state next to it, but it keeps a
+ * button's hover feedback because it IS a button.
+ */
+.lang-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.13s, border-color 0.13s, color 0.13s;
+}
+
+.lang-btn:hover:not(:disabled) {
+  background: #24303d;
+  border-color: #43536a;
+  color: var(--text);
+}
+
+.lang-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.lang-globe {
+  font-size: 13px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.lang-badge {
+  min-width: 18px;
+  text-align: center;
+  font-weight: 600;
+}
+
+.lang-caret {
+  font-size: 9px;
+  opacity: 0.75;
+}
+
+.lang-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 168px;
+  padding: 5px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: #161d26;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.lang-menu-head {
+  padding: 4px 8px 6px;
+  font-size: 11px;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+
+.lang-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lang-item:hover {
+  background: #223040;
+}
+
+.lang-item.active {
+  background: rgba(47, 129, 247, 0.16);
+  color: var(--accent);
+}
+
+.lang-item-badge {
+  min-width: 18px;
+  text-align: center;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.lang-item.active .lang-item-badge {
+  color: var(--accent);
+}
+
+.lang-item-check {
+  margin-left: auto;
+  color: var(--accent);
+}
+
 .state-dot {
   width: 7px;
   height: 7px;

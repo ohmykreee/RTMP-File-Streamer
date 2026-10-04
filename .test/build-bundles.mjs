@@ -2,6 +2,7 @@
  * Builds the artefacts the verification harnesses need:
  *   .test/builder.bundle.mjs  - command builder for the plain-node harness
  *   .test/probe.bundle.mjs    - ffprobe wrapper for the plain-node harness
+ *   .test/i18n.bundle.mjs     - message tables + locale rules for the same harness
  *   .test/rtmp.bundle.mjs     - RTMP target composition for the same harness
  *   out/main/test-entry.cjs   - engine + builder for the Electron integration run
  *
@@ -68,6 +69,14 @@ const targets = [
   {
     entry: 'src/main/ffmpeg/probe.ts',
     out: '.test/probe.bundle.mjs',
+    format: 'esm',
+    platform: 'node'
+  },
+  {
+    // Message tables + locale rules, so the harness can assert that every language
+    // defines every key and that the detection rules match the documented ones.
+    entry: 'src/shared/i18n/index.ts',
+    out: '.test/i18n.bundle.mjs',
     format: 'esm',
     platform: 'node'
   },

@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
 import type { PlaylistItem, SubtitleMode } from '@shared/types'
 import { SUPPORTED_VIDEO_EXT } from '@shared/types'
-import { formatBytes, formatDuration, languageLabel } from '../lib/format'
+import { formatBytes, formatDuration, languageLabel, STATUS_KEY } from '../lib/format'
+import { useT } from '../i18n'
 
 interface PlaylistPanelProps {
   items: PlaylistItem[]
@@ -27,16 +28,8 @@ interface PlaylistPanelProps {
   onFilesDropped: (paths: string[]) => void
 }
 
-const STATUS_LABEL: Record<PlaylistItem['status'], string> = {
-  pending: '待串流',
-  preparing: '准备中',
-  live: '推流中',
-  done: '已完成',
-  skipped: '已跳过',
-  error: '错误'
-}
-
 export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Element {
+  const t = useT()
   const { items, currentIndex, locked } = props
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -115,17 +108,22 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
     >
       <header className="panel-head">
         <div>
-          <h2>播放列表</h2>
+          <h2>{t('playlist.title')}</h2>
           <p className="muted small">
-            {items.length} 个文件 · {formatDuration(totalDuration)} · {formatBytes(totalSize)}
+            {t('playlist.fileCount', { n: items.length })} · {formatDuration(totalDuration)} · {formatBytes(totalSize)}
           </p>
         </div>
         <div className="panel-head-actions">
-          <button className="btn primary" onClick={props.onAddVideos} disabled={props.busy || locked} title={locked ? '串流进行中，无法添加文件' : '添加视频文件（可多选）'}>
-            + 视频
+          <button
+            className="btn primary"
+            onClick={props.onAddVideos}
+            disabled={props.busy || locked}
+            title={locked ? t('playlist.addLockedTitle') : t('playlist.addTitle')}
+          >
+            {t('playlist.addVideos')}
           </button>
-          <button className="btn ghost" onClick={props.onClear} disabled={props.busy || items.length === 0 || locked} title="清空播放列表">
-            清空
+          <button className="btn ghost" onClick={props.onClear} disabled={props.busy || items.length === 0 || locked} title={t('playlist.clearTitle')}>
+            {t('playlist.clear')}
           </button>
         </div>
       </header>
@@ -133,15 +131,15 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
       {items.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon">🎬</div>
-          <p>还没有文件</p>
-          <p className="muted small">点击「+ 视频」选择本地文件，或直接把文件拖到这里</p>
-          <p className="muted small">同名同目录的字幕 (.srt/.ass/.vtt) 会自动关联</p>
+          <p>{t('playlist.emptyTitle')}</p>
+          <p className="muted small">{t('playlist.emptyHint')}</p>
+          <p className="muted small">{t('playlist.emptySubtitleHint')}</p>
         </div>
       ) : (
         <ol className="playlist-items">
           {items.map((item, idx) => {
             const isCurrent = idx === currentIndex
-            const selectedTrack = item.subtitleTracks.find((t) => t.id === item.selectedSubtitleId)
+            const selectedTrack = item.subtitleTracks.find((track) => track.id === item.selectedSubtitleId)
             const isOpen = expanded === item.id
             return (
               <li
@@ -168,37 +166,42 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                       <span>{formatBytes(item.size)}</span>
                       {item.subtitleTracks.length > 0 && (
                         <span className="badge subtle">
-                          字幕 ×{item.subtitleTracks.length}
-                          {selectedTrack ? ` · ${languageLabel(selectedTrack.language)}` : ''}
+                          {t('playlist.subtitleCount', { n: item.subtitleTracks.length })}
+                          {selectedTrack ? ` · ${languageLabel(selectedTrack.language, t)}` : ''}
                         </span>
                       )}
-                      {item.broken && <span className="badge danger">无法读取</span>}
+                      {item.broken && <span className="badge danger">{t('playlist.unreadable')}</span>}
                     </div>
                     {item.error && <div className="pi-error small">{item.error}</div>}
                   </div>
-                  <span className={`pi-status st-${item.status}`}>{STATUS_LABEL[item.status]}</span>
+                  <span className={`pi-status st-${item.status}`}>{t(STATUS_KEY[item.status])}</span>
                 </div>
 
                 <div className="pi-actions">
                   <button
                     className="btn tiny"
                     onClick={() => props.onJump(item.id)}
-                    title="从该文件开始串流"
+                    title={t('playlist.startFromHereTitle')}
                   >
-                    ▶ 从此开始
+                    {t('playlist.startFromHere')}
                   </button>
                   <button
                     className="btn tiny"
                     onClick={() => setExpanded(isOpen ? null : item.id)}
                     disabled={locked}
-                    title="字幕与同步设置"
+                    title={t('playlist.detailTitle')}
                   >
-                    {isOpen ? '收起' : '字幕/同步'}
+                    {isOpen ? t('playlist.collapse') : t('playlist.subtitleSync')}
                   </button>
-                  <button className="btn tiny" onClick={() => props.onAttachSubtitle(item.id)} disabled={locked} title="关联外部字幕文件">
-                    + 字幕
+                  <button
+                    className="btn tiny"
+                    onClick={() => props.onAttachSubtitle(item.id)}
+                    disabled={locked}
+                    title={t('playlist.attachSubtitleTitle')}
+                  >
+                    {t('playlist.addSubtitle')}
                   </button>
-                  <button className="btn tiny danger" onClick={() => props.onRemove(item.id)} disabled={locked} title="移除">
+                  <button className="btn tiny danger" onClick={() => props.onRemove(item.id)} disabled={locked} title={t('playlist.removeTitle')}>
                     ✕
                   </button>
                 </div>
@@ -206,58 +209,59 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                 {isOpen && (
                   <div className="pi-detail">
                     <label className="field">
-                      <span>字幕轨道</span>
+                      <span>{t('playlist.subtitleTrack')}</span>
                       <select
                         value={item.selectedSubtitleId ?? ''}
                         disabled={locked}
                         onChange={(e) => props.onUpdateItem(item.id, { selectedSubtitleId: e.target.value || null })}
                       >
-                        <option value="">（不使用字幕）</option>
-                        {item.subtitleTracks.map((t) => (
-                          <option key={t.id} value={t.id}>
-                            {t.source === 'embedded' ? `内挂 #${t.streamIndex}` : '外部文件'} · {languageLabel(t.language)} · {t.codec}
-                            {t.title ? ` · ${t.title}` : ''}
+                        <option value="">{t('playlist.noSubtitle')}</option>
+                        {item.subtitleTracks.map((track) => (
+                          <option key={track.id} value={track.id}>
+                            {track.source === 'embedded' ? t('playlist.embeddedTrack', { index: track.streamIndex ?? '?' }) : t('playlist.externalFile')} ·{' '}
+                            {languageLabel(track.language, t)} · {track.codec}
+                            {track.title ? ` · ${track.title}` : ''}
                           </option>
                         ))}
                       </select>
                     </label>
 
                     <label className="field">
-                      <span>字幕处理</span>
+                      <span>{t('playlist.subtitleMode')}</span>
                       <select value={item.mode} disabled={locked} onChange={(e) => props.onUpdateItem(item.id, { mode: e.target.value as SubtitleMode })}>
-                        <option value="off">关闭</option>
-                        <option value="burn">烧录进画面</option>
-                        <option value="copy">作为独立轨道复制</option>
+                        <option value="off">{t('playlist.modeOff')}</option>
+                        <option value="burn">{t('playlist.modeBurn')}</option>
+                        <option value="copy">{t('playlist.modeCopy')}</option>
                       </select>
                     </label>
 
                     <label className="field">
-                      <span>音视频延迟 (秒)</span>
+                      <span>{t('playlist.avDelay')}</span>
                       <input
                         type="number"
                         step="0.1"
                         value={item.syncOffsetSec}
                         disabled={locked}
                         onChange={(e) => props.onUpdateItem(item.id, { syncOffsetSec: Number(e.target.value) || 0 })}
-                        title="正值 = 音视频整体延后播放"
+                        title={t('playlist.avDelayTitle')}
                       />
                     </label>
 
                     <label className="field">
-                      <span>字幕延迟 (秒)</span>
+                      <span>{t('playlist.subtitleDelay')}</span>
                       <input
                         type="number"
                         step="0.1"
                         value={item.subtitleDelaySec}
                         disabled={locked}
                         onChange={(e) => props.onUpdateItem(item.id, { subtitleDelaySec: Number(e.target.value) || 0 })}
-                        title="正值 = 字幕延后出现"
+                        title={t('playlist.subtitleDelayTitle')}
                       />
                     </label>
 
                     <div className="pi-detail-footer">
                       <button className="btn tiny ghost" onClick={() => props.onReveal(item.path)}>
-                        在文件夹中显示
+                        {t('playlist.reveal')}
                       </button>
                       <button
                         className="btn tiny ghost"
@@ -266,7 +270,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                           props.onUpdateItem(item.id, { syncOffsetSec: 0, subtitleDelaySec: 0 })
                         }}
                       >
-                        重置延迟
+                        {t('playlist.resetDelay')}
                       </button>
                     </div>
                   </div>
@@ -276,7 +280,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
           })}
         </ol>
       )}
-      {fileDrag && !locked && <div className="drop-overlay">松开以添加文件</div>}
+      {fileDrag && !locked && <div className="drop-overlay">{t('playlist.dropToAdd')}</div>}
     </aside>
   )
 }

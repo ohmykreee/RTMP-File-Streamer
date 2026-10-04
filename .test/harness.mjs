@@ -164,7 +164,95 @@ async function makeItem(filePath, mode = 'burn') {
   }
 }
 
-console.log('\n=== 1. media probing ===')
+console.log('\n=== 1. i18n message tables ===')
+const { EN, TRANSLATIONS, assertCatalogsComplete, detectLanguage, resolveLanguage, LANGUAGES } = await import(
+  pathToFileURL(path.join(here, 'i18n.bundle.mjs')).href
+)
+{
+  // Every language must define exactly the reference key set. A missing entry is
+  // otherwise invisible: the UI quietly renders that one string in English.
+  const problems = assertCatalogsComplete(EN, { zh: TRANSLATIONS.zh, ja: TRANSLATIONS.ja })
+  record(
+    'message tables define the same key set in every language',
+    problems.length === 0,
+    problems.slice(0, 5).join(' | ') || `${Object.keys(EN).length} keys x ${LANGUAGES.length} languages`
+  )
+
+  // No empty translation, and no {placeholder} that only some languages carry — a
+  // dropped placeholder silently loses the value it was meant to insert.
+  const placeholders = (text) => (String(text).match(/\{(\w+)\}/g) ?? []).sort().join(',')
+  const empty = []
+  const mismatched = []
+  for (const [key, reference] of Object.entries(EN)) {
+    for (const language of ['zh', 'ja']) {
+      const text = TRANSLATIONS[language][key]
+      if (!String(text).trim()) empty.push(`${language}:${key}`)
+      if (placeholders(text) !== placeholders(reference)) mismatched.push(`${language}:${key} (${placeholders(text)} vs ${placeholders(reference)})`)
+    }
+  }
+  record('no translation is empty', empty.length === 0, empty.slice(0, 5).join(' | ') || `${Object.keys(EN).length * 2} strings`)
+  record(
+    'every translation keeps the reference placeholders',
+    mismatched.length === 0,
+    mismatched.slice(0, 5).join(' | ') || `${Object.keys(EN).length * 2} strings`
+  )
+
+  // The detection rules: Chinese (either script) -> Chinese, Japanese -> Japanese,
+  // everything else -> English.
+  const cases = [
+    ['zh-CN', 'zh'],
+    ['zh-Hans', 'zh'],
+    ['zh-TW', 'zh'],
+    ['zh-HK', 'zh'],
+    ['zh-Hant-TW', 'zh'],
+    ['ja', 'ja'],
+    ['ja-JP', 'ja'],
+    ['en-US', 'en'],
+    ['de-DE', 'en'],
+    ['ko-KR', 'en'],
+    ['', 'en'],
+    [undefined, 'en']
+  ]
+  const wrong = cases.filter(([locale, expected]) => detectLanguage(locale) !== expected).map(([l, e]) => `${l}->${detectLanguage(l)} (want ${e})`)
+  record(
+    'system locale detection follows the documented rules',
+    wrong.length === 0,
+    wrong.join(' | ') || cases.map(([l]) => `${l || '(empty)'}->${detectLanguage(l)}`).join(' ')
+  )
+
+  // A saved choice always wins, and an unusable stored value falls back to the
+  // system rather than leaving the app with a language it cannot render.
+  record(
+    'a saved language overrides the system locale',
+    resolveLanguage('ja', 'zh-CN') === 'ja' && resolveLanguage('en', 'ja-JP') === 'en',
+    `${resolveLanguage('ja', 'zh-CN')} / ${resolveLanguage('en', 'ja-JP')}`
+  )
+  record(
+    'an absent or invalid saved language falls back to detection',
+    resolveLanguage(undefined, 'ja-JP') === 'ja' && resolveLanguage('klingon', 'zh-TW') === 'zh' && resolveLanguage(null, 'fr-FR') === 'en',
+    `${resolveLanguage(undefined, 'ja-JP')} / ${resolveLanguage('klingon', 'zh-TW')} / ${resolveLanguage(null, 'fr-FR')}`
+  )
+
+  // The command builder's diagnostics are translated through the same table, so the
+  // language it is handed has to change the text it produces. Section 7 exercises
+  // the same builder in depth; this only pins the language seam, which everything
+  // else depends on.
+  const langSession = {
+    video: { codec: 'h264', encoder: 'x264', rateControl: 'cbr', bitrateKbps: 4000, maxBitrateKbps: 4000, bufferSizeKbps: 8000, crf: 22, preset: 'veryfast', tune: '', profile: 'high', keyframeIntervalSec: 2, bFrames: 0, scale: '', scaleWidth: 1280, scaleHeight: 720, scaleAuto: true, fps: 30, pixelFormat: 'yuv420p', repeatHeaders: true },
+    audio: { codec: 'aac', rateControl: 'cbr', bitrateKbps: 128, sampleRate: 44100, channels: 2, loudnorm: false },
+    subtitles: { mode: 'off' },
+    output: { server: 'rtmp://127.0.0.1:1/live/', streamKey: 'k', container: 'flv', extraOutputArgs: '', realtimePacing: true, buffered: false, bufferSec: 12, loopPlaylist: false, reconnectDelaySec: 3, maxReconnectAttempts: 10, dropLateFrames: false, obsWebSocket: { enabled: false, host: '127.0.0.1', port: 4455, password: '' } }
+  }
+  const zhSummary = buildTestCommand(langSession, 'rtmp://127.0.0.1:1/live', 'k', 'zh').summary.join(' / ')
+  const enSummary = buildTestCommand(langSession, 'rtmp://127.0.0.1:1/live', 'k', 'en').summary.join(' / ')
+  record(
+    'the command builder writes its summary in the requested language',
+    zhSummary !== enSummary && zhSummary !== '' && enSummary !== '',
+    `${zhSummary.slice(0, 44)} || ${enSummary.slice(0, 44)}`
+  )
+}
+
+console.log('\n=== 2. media probing ===')
 const clipA = path.join(here, 'clip_a.mp4')
 const clipB = path.join(here, 'clip_b.mp4')
 const { info: infoA, item: itemA } = await makeItem(clipA)
@@ -186,7 +274,7 @@ record(
   `subtitleStreams=${JSON.stringify(infoEmb.subtitleStreams.map((s) => `#${s.index}:${s.codec}`))} selected=${itemEmb.selectedSubtitleId}`
 )
 
-console.log('\n=== 2. command generation ===')
+console.log('\n=== 3. command generation ===')
 const { info: infoB, item: itemB } = await makeItem(clipB)
 
 // 2a. H.264 CBR + burn-in + scaling + fps
@@ -466,7 +554,7 @@ const builtHw = buildStreamCommand({
 record('hardware encoder requested is honoured when available', builtHw.vencName === 'h264_amf' || builtHw.vencName !== 'h264_amf', `resolved to ${builtHw.vencName}`)
 record('AMF pixel format switched to nv12', builtHw.vencName !== 'h264_amf' || builtHw.args[builtHw.args.indexOf('-pix_fmt') + 1] === 'nv12', builtHw.args[builtHw.args.indexOf('-pix_fmt') + 1])
 
-console.log('\n=== 3. executing generated commands ===')
+console.log('\n=== 4. executing generated commands ===')
 
 async function execute(name, args, expectFile) {
   const res = await run(FFMPEG, args, { timeoutMs: 180000 })
@@ -497,7 +585,7 @@ const hwOut = path.join(here, 'out_hw.mp4')
 fs.rmSync(hwOut, { force: true })
 const hwRes = await execute(`hardware encode with ${builtHw.vencName}`, builtHw.args, hwOut)
 
-console.log('\n=== 4. verifying subtitles were actually rendered ===')
+console.log('\n=== 5. verifying subtitles were actually rendered ===')
 // libass draws white glyphs with a black outline, so the subtitle band gains both
 // very bright and very dark pixels only when a cue is on screen. The first cue runs
 // from t=2s to t=8s, so the samples go inside it and before it.
@@ -557,7 +645,7 @@ async function renderedBurnChecks(label, outFile, tag) {
 await renderedBurnChecks('sidecar burn', burnOut, 'sub')
 await renderedBurnChecks('embedded burn', embBurnOut, 'emb')
 
-console.log('\n=== 5. RTMP push against a listening ffmpeg endpoint ===')
+console.log('\n=== 6. RTMP push against a listening ffmpeg endpoint ===')
 // ffmpeg can act as the ingest side with `-listen 1`, which is a real TCP RTMP handshake.
 const listenPort = 11935
 const listener = spawn(
@@ -653,7 +741,7 @@ if (receivedSize > 0) {
   }
 }
 
-console.log('\n=== 6. connection test command (used by the UI button) ===')
+console.log('\n=== 7. connection test command (used by the UI button) ===')
 {
   /*
    * The test button pushes a synthetic pattern, and every encoder setting in it must
@@ -825,7 +913,7 @@ console.log('\n=== 6. connection test command (used by the UI button) ===')
   )
 }
 
-console.log('\n=== 7. seek and sync-offset permutations actually land correctly ===')
+console.log('\n=== 8. seek and sync-offset permutations actually land correctly ===')
 
 /**
  * Measures what a muxed output really contains.
@@ -1001,7 +1089,7 @@ const offItem = { ...itemA, mode: 'off' }
  * 8. obs-websocket endpoint (the control API OBS clients speak)
  * ------------------------------------------------------------------ */
 
-console.log('\n=== 8. obs-websocket endpoint ===')
+console.log('\n=== 9. obs-websocket endpoint ===')
 await obsWebSocketChecks({
   bundlePath: bundle('src/main/obs/websocket.ts', path.join(here, 'obs.bundle.mjs')),
   record
@@ -1011,7 +1099,7 @@ await obsWebSocketChecks({
  * 9. buffered playout: the configured lead is a limit, not a wish
  * ------------------------------------------------------------------ */
 
-console.log('\n=== 9. encoder buffer is enforced ===')
+console.log('\n=== 10. encoder buffer is enforced ===')
 /*
  * The encoder runs flat out while the publisher takes material at 1x, so everything
  * ahead of the publisher is held in this process's memory. That queue used to be
@@ -1028,6 +1116,9 @@ console.log('\n=== 9. encoder buffer is enforced ===')
 {
   const { BUFFER_SEC_MIN } = await import(pathToFileURL(bundle('src/shared/defaults.ts', path.join(here, 'defaults.bundle.mjs'))).href)
   const { Playout } = await import(pathToFileURL(bundle('src/main/stream/playout.ts', path.join(here, 'playout.bundle.mjs'))).href)
+  // The playout writes its log lines through the message table, which it is handed
+  // rather than importing (see `PlayoutCallbacks.t`); the hold line is read below.
+  const zhText = (key) => TRANSLATIONS.zh[key] ?? key
   /** The hold acts on `-progress` reports (~0.5 s apart), so one interval of material overshoots. */
   const LEAD_SLACK_SEC = 4
   const WINDOW_SEC = 8
@@ -1044,7 +1135,8 @@ console.log('\n=== 9. encoder buffer is enforced ===')
         published = sec
       },
       onPusherExit: () => {},
-      onEncoderExit: () => {}
+      onEncoderExit: () => {},
+      t: zhText
     })
     await playout.start(
       {

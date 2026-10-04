@@ -16,12 +16,14 @@ import type {
   RtmpTestResult,
   SubtitleRenderSettings,
   SubtitleMode,
+  TranslationKey,
   VideoCodecName,
   VideoEncoderChoice,
   VideoRateControl,
   VideoSettings
 } from '@shared/types'
 import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
+import { useT } from '../i18n'
 
 interface SettingsPanelProps {
   settings: AppSettings
@@ -56,44 +58,58 @@ interface SettingsPanelProps {
 
 type TabKey = 'video' | 'audio' | 'subtitle' | 'output' | 'advanced'
 
-const TABS: { key: TabKey; label: string; icon: string }[] = [
-  { key: 'video', label: '视频编码', icon: '🎞' },
-  { key: 'audio', label: '音频编码', icon: '🔊' },
-  { key: 'subtitle', label: '字幕', icon: '💬' },
-  { key: 'output', label: '输出 / RTMP', icon: '📡' },
-  { key: 'advanced', label: '高级', icon: '⚙' }
+const TABS: { key: TabKey; labelKey: TranslationKey; icon: string }[] = [
+  { key: 'video', labelKey: 'settings.tabs.video', icon: '🎞' },
+  { key: 'audio', labelKey: 'settings.tabs.audio', icon: '🔊' },
+  { key: 'subtitle', labelKey: 'settings.tabs.subtitle', icon: '💬' },
+  { key: 'output', labelKey: 'settings.tabs.output', icon: '📡' },
+  { key: 'advanced', labelKey: 'settings.tabs.advanced', icon: '⚙' }
 ]
 
-const CODEC_LABEL: Record<VideoCodecName, string> = {
-  h264: 'H.264 / AVC（兼容性最好）',
-  hevc: 'H.265 / HEVC（同画质更省带宽）',
-  av1: 'AV1（最新，兼容性有限）',
-  copy: '直接复制源视频（不重编码）'
+const CODEC_KEY: Record<VideoCodecName, TranslationKey> = {
+  h264: 'settings.video.codec.h264',
+  hevc: 'settings.video.codec.hevc',
+  av1: 'settings.video.codec.av1',
+  copy: 'settings.video.codec.copy'
 }
 
-const RATE_CONTROL_LABEL: Record<VideoRateControl, string> = {
-  cbr: 'CBR 固定码率（直播推荐）',
-  vbr: 'VBR 可变码率',
-  abr: 'ABR 平均码率',
-  crf: 'CRF 恒定质量',
-  auto: '自动'
+const RATE_CONTROL_KEY: Record<VideoRateControl, TranslationKey> = {
+  cbr: 'settings.video.rc.cbr',
+  vbr: 'settings.video.rc.vbr',
+  abr: 'settings.video.rc.abr',
+  crf: 'settings.video.rc.crf',
+  auto: 'settings.video.rc.auto'
 }
 
-const AUDIO_CODEC_LABEL: Record<AudioCodecName, string> = {
-  aac: 'AAC（原生编码器 · 推荐）',
-  libmp3lame: 'MP3 (libmp3lame)',
-  libopus: 'Opus (libopus)',
-  copy: '复制源音频',
-  none: '不要音频'
+const AUDIO_CODEC_KEY: Record<AudioCodecName, TranslationKey> = {
+  aac: 'settings.audio.codec.aac',
+  libmp3lame: 'settings.audio.codec.mp3',
+  libopus: 'settings.audio.codec.opus',
+  copy: 'settings.audio.codec.copy',
+  none: 'settings.audio.codec.none'
 }
 
-const CONTAINER_LABEL: Record<ContainerName, string> = {
-  flv: 'FLV（标准 RTMP 推流）',
-  mpegts: 'MPEG-TS（SRT/HLS 场景）',
-  mkv: 'Matroska（本地文件测试）'
+const CONTAINER_KEY: Record<ContainerName, TranslationKey> = {
+  flv: 'settings.output.container.flv',
+  mpegts: 'settings.output.container.mpegts',
+  mkv: 'settings.output.container.mkv'
+}
+
+/** Libass alignment values, in the order the select lists them. */
+const ALIGNMENT_KEY: Record<number, TranslationKey> = {
+  1: 'settings.subtitle.align.bottomLeft',
+  2: 'settings.subtitle.align.bottomCenter',
+  3: 'settings.subtitle.align.bottomRight',
+  4: 'settings.subtitle.align.middleLeft',
+  5: 'settings.subtitle.align.middleCenter',
+  6: 'settings.subtitle.align.middleRight',
+  7: 'settings.subtitle.align.topLeft',
+  8: 'settings.subtitle.align.topCenter',
+  9: 'settings.subtitle.align.topRight'
 }
 
 export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Element {
+  const t = useT()
   const { settings, capabilities: caps } = props
   const [tab, setTab] = useState<TabKey>('video')
   const [testState, setTestState] = useState<{ running: boolean; result: RtmpTestResult | null }>({ running: false, result: null })
@@ -107,8 +123,20 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
   const encoderOptions = useMemo(() => {
     if (!caps) return []
     const list = caps.encoders.filter((e) => e.codec === v.codec)
-    return [{ value: 'auto' as VideoEncoderChoice, label: '自动选择（优先硬件）', available: true, presets: [] as string[], kind: 'auto', codec: v.codec, verified: undefined as boolean | undefined, note: undefined as string | undefined }, ...list]
-  }, [caps, v.codec])
+    return [
+      {
+        value: 'auto' as VideoEncoderChoice,
+        label: t('settings.video.encoder.auto'),
+        available: true,
+        presets: [] as string[],
+        kind: 'auto',
+        codec: v.codec,
+        verified: undefined as boolean | undefined,
+        note: undefined as string | undefined
+      },
+      ...list
+    ]
+  }, [caps, t, v.codec])
 
   const activeEncoder = useMemo(() => encoderOptions.find((e) => e.value === v.encoder) ?? encoderOptions[0], [encoderOptions, v.encoder])
 
@@ -128,7 +156,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
     // itself never arrives.
     const guard = new Promise<RtmpTestResult>((resolve) =>
       window.setTimeout(
-        () => resolve({ ok: false, message: '测试超时：31 秒内未返回结果，已中止等待。', detail: '', elapsedMs: 31000 }),
+        () => resolve({ ok: false, message: t('settings.output.testTimeout'), detail: '', elapsedMs: 31000 }),
         31000
       )
     )
@@ -196,17 +224,17 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
       />
 
       <nav className="tabs">
-        {TABS.map((t) => (
-          <button key={t.key} className={`tab${tab === t.key ? ' active' : ''}`} onClick={() => setTab(t.key)}>
-            <span className="tab-icon">{t.icon}</span>
-            {t.label}
+        {TABS.map((tabDef) => (
+          <button key={tabDef.key} className={`tab${tab === tabDef.key ? ' active' : ''}`} onClick={() => setTab(tabDef.key)}>
+            <span className="tab-icon">{tabDef.icon}</span>
+            {t(tabDef.labelKey)}
           </button>
         ))}
       </nav>
 
       {props.locked && (
         <div className="lock-note">
-          <span>🔒 串流进行中，设置已锁定（串流使用的参数在开始时已确定）。停止串流后可修改。</span>
+          <span>{t('settings.lockedNote')}</span>
         </div>
       )}
 
@@ -214,11 +242,11 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* ---------------------------------------------------------- VIDEO */}
         {tab === 'video' && (
           <>
-            <Field label="视频编码格式" hint="RTMP 推流最通用的是 H.264">
+            <Field label={t('settings.video.codec')} hint={t('settings.video.codecHint')}>
               <select value={v.codec} onChange={(e) => props.onUpdateVideo({ codec: e.target.value as VideoCodecName, encoder: 'auto' })}>
-                {(Object.keys(CODEC_LABEL) as VideoCodecName[]).map((c) => (
+                {(Object.keys(CODEC_KEY) as VideoCodecName[]).map((c) => (
                   <option key={c} value={c}>
-                    {CODEC_LABEL[c]}
+                    {t(CODEC_KEY[c])}
                   </option>
                 ))}
               </select>
@@ -226,12 +254,12 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
             {v.codec !== 'copy' && (
               <>
-                <Field label="编码器" hint="硬件编码器可大幅降低 CPU 占用；带 ✓ 表示已实测可用">
+                <Field label={t('settings.video.encoder')} hint={t('settings.video.encoderHint')}>
                   <select value={v.encoder} onChange={(e) => props.onUpdateVideo({ encoder: e.target.value as VideoEncoderChoice })}>
                     {encoderOptions.map((e) => (
                       <option key={e.value} value={e.value} disabled={!e.available && e.value !== 'auto'}>
                         {e.label}
-                        {e.value !== 'auto' && !e.available ? '（不可用）' : ''}
+                        {e.value !== 'auto' && !e.available ? t('settings.video.encoderUnavailable') : ''}
                         {e.verified ? ' ✓' : ''}
                       </option>
                     ))}
@@ -240,20 +268,20 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 {activeEncoder?.note && <p className="hint warn small">{activeEncoder.note}</p>}
 
                 <div className="field-grid">
-                  <Field label="码率控制模式">
+                  <Field label={t('settings.video.rateControl')}>
                     <select value={v.rateControl} onChange={(e) => props.onUpdateVideo({ rateControl: e.target.value as VideoRateControl })}>
-                      {(Object.keys(RATE_CONTROL_LABEL) as VideoRateControl[])
+                      {(Object.keys(RATE_CONTROL_KEY) as VideoRateControl[])
                         .filter((r) => r !== 'auto')
                         .map((r) => (
                           <option key={r} value={r}>
-                            {RATE_CONTROL_LABEL[r]}
+                            {t(RATE_CONTROL_KEY[r])}
                           </option>
                         ))}
                     </select>
                   </Field>
 
                   {v.rateControl === 'crf' ? (
-                    <Field label="CRF 质量 (0-51，越小越清晰)" hint="18≈视觉无损，23≈默认，28≈体积小">
+                    <Field label={t('settings.video.crf')} hint={t('settings.video.crfHint')}>
                       <input
                         type="number"
                         min={0}
@@ -264,8 +292,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                     </Field>
                   ) : (
                     <BitrateField
-                      label="视频码率"
-                      hint="1080p60 建议 4500–9000；720p30 建议 2500–4000"
+                      label={t('settings.video.bitrate')}
+                      hint={t('settings.video.bitrateHint')}
                       valueKbps={v.bitrateKbps}
                       minKbps={100}
                       onChange={(bitrateKbps) => props.onUpdateVideo({ bitrateKbps })}
@@ -274,7 +302,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
                   {v.rateControl !== 'cbr' && v.rateControl !== 'crf' && (
                     <BitrateField
-                      label="最大码率"
+                      label={t('settings.video.maxBitrate')}
                       valueKbps={v.maxBitrateKbps}
                       minKbps={100}
                       onChange={(maxBitrateKbps) => props.onUpdateVideo({ maxBitrateKbps })}
@@ -282,8 +310,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                   )}
 
                   <BitrateField
-                    label="缓冲区大小"
-                    hint="0 = 按码率自动推算"
+                    label={t('settings.video.bufferSize')}
+                    hint={t('settings.video.bufferSizeHint')}
                     valueKbps={v.bufferSizeKbps}
                     minKbps={0}
                     allowZero
@@ -292,7 +320,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 </div>
 
                 <div className="field-grid">
-                  <Field label="编码预设 (preset)" hint="越快越省 CPU，同码率画质略低">
+                  <Field label={t('settings.video.preset')} hint={t('settings.video.presetHint')}>
                     {presetOptions.length > 0 ? (
                       <select value={v.preset} onChange={(e) => props.onUpdateVideo({ preset: e.target.value })}>
                         {presetOptions.map((p) => (
@@ -306,23 +334,23 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                     )}
                   </Field>
 
-                  <Field label="tune">
+                  <Field label={t('settings.video.tune')}>
                     <select value={v.tune} onChange={(e) => props.onUpdateVideo({ tune: e.target.value })}>
-                      <option value="">（不设置）</option>
-                      <option value="zerolatency">zerolatency（零延迟）</option>
-                      <option value="film">film（电影）</option>
-                      <option value="animation">animation（动画）</option>
-                      <option value="grain">grain（保留颗粒）</option>
-                      <option value="fastdecode">fastdecode（易解码）</option>
+                      <option value="">{t('settings.video.tuneUnset')}</option>
+                      <option value="zerolatency">{t('settings.video.tune.zerolatency')}</option>
+                      <option value="film">{t('settings.video.tune.film')}</option>
+                      <option value="animation">{t('settings.video.tune.animation')}</option>
+                      <option value="grain">{t('settings.video.tune.grain')}</option>
+                      <option value="fastdecode">{t('settings.video.tune.fastdecode')}</option>
                     </select>
                   </Field>
 
-                  <Field label="profile">
+                  <Field label={t('settings.video.profile')}>
                     <select value={v.profile} onChange={(e) => props.onUpdateVideo({ profile: e.target.value })}>
-                      <option value="">（不设置）</option>
-                      <option value="baseline">baseline（最兼容）</option>
+                      <option value="">{t('settings.video.tuneUnset')}</option>
+                      <option value="baseline">{t('settings.video.profile.baseline')}</option>
                       <option value="main">main</option>
-                      <option value="high">high（推荐）</option>
+                      <option value="high">{t('settings.video.profile.high')}</option>
                     </select>
                   </Field>
                 </div>
@@ -335,11 +363,11 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 onChange={(patch) => props.onUpdateVideo(patch)}
               />
 
-              <Field label="帧率 (fps)" hint="0 = 保持源帧率">
+              <Field label={t('settings.video.fps')} hint={t('settings.video.fpsHint')}>
                 <input type="number" min={0} max={240} value={v.fps} onChange={(e) => props.onUpdateVideo({ fps: Number(e.target.value) })} />
               </Field>
 
-              <Field label="关键帧间隔 (秒)" hint="直播建议 1–2 秒，影响观众加入直播的速度">
+              <Field label={t('settings.video.keyframe')} hint={t('settings.video.keyframeHint')}>
                 <input
                   type="number"
                   min={0}
@@ -350,13 +378,13 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 />
               </Field>
 
-              <Field label="B 帧数量" hint="直播建议 0；B 帧会增加编码延迟">
+              <Field label={t('settings.video.bFrames')} hint={t('settings.video.bFramesHint')}>
                 <input type="number" min={0} max={4} value={v.bFrames} onChange={(e) => props.onUpdateVideo({ bFrames: Number(e.target.value) })} />
               </Field>
             </div>
 
             <div className="field-grid">
-              <Field label="像素格式" hint="yuv420p 兼容性最好；10bit 源需转换">
+              <Field label={t('settings.video.pixelFormat')} hint={t('settings.video.pixelFormatHint')}>
                 <select value={v.pixelFormat} onChange={(e) => props.onUpdateVideo({ pixelFormat: e.target.value })}>
                   <option value="yuv420p">yuv420p (8-bit 4:2:0)</option>
                   <option value="yuv422p">yuv422p (8-bit 4:2:2)</option>
@@ -368,8 +396,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             </div>
 
             <Toggle
-              label="每个关键帧重复 SPS/PPS 头"
-              hint="部分 RTMP 服务器需要，建议保持开启"
+              label={t('settings.video.repeatHeaders')}
+              hint={t('settings.video.repeatHeadersHint')}
               checked={v.repeatHeaders}
               onChange={(checked) => props.onUpdateVideo({ repeatHeaders: checked })}
             />
@@ -379,15 +407,15 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* ---------------------------------------------------------- AUDIO */}
         {tab === 'audio' && (
           <>
-            <Field label="音频编码格式" hint="RTMP/FLV 标准只支持 AAC 与 MP3">
+            <Field label={t('settings.audio.codec')} hint={t('settings.audio.codecHint')}>
               <select value={a.codec} onChange={(e) => props.onUpdateAudio({ codec: e.target.value as AudioCodecName })}>
-                {(Object.keys(AUDIO_CODEC_LABEL) as AudioCodecName[]).map((c) => {
+                {(Object.keys(AUDIO_CODEC_KEY) as AudioCodecName[]).map((c) => {
                   const supported = caps?.audioEncoders.find((x) => x.value === c)
                   const disabled = c !== 'copy' && c !== 'none' && supported ? !supported.available : false
                   return (
                     <option key={c} value={c} disabled={disabled}>
-                      {AUDIO_CODEC_LABEL[c]}
-                      {disabled ? '（当前 ffmpeg 不支持）' : ''}
+                      {t(AUDIO_CODEC_KEY[c])}
+                      {disabled ? t('settings.audio.codecUnsupported') : ''}
                     </option>
                   )
                 })}
@@ -397,7 +425,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             {a.codec !== 'copy' && a.codec !== 'none' && (
               <>
                 <div className="field-grid">
-                  <Field label="码率 (kbps)" hint="立体声建议 128–192">
+                  <Field label={t('settings.audio.bitrate')} hint={t('settings.audio.bitrateHint')}>
                     <input
                       type="number"
                       min={16}
@@ -407,7 +435,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                       onChange={(e) => props.onUpdateAudio({ bitrateKbps: Number(e.target.value) })}
                     />
                   </Field>
-                  <Field label="采样率 (Hz)">
+                  <Field label={t('settings.audio.sampleRate')}>
                     <select value={a.sampleRate} onChange={(e) => props.onUpdateAudio({ sampleRate: Number(e.target.value) })}>
                       <option value={48000}>48000</option>
                       <option value={44100}>44100</option>
@@ -415,65 +443,61 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                       <option value={22050}>22050</option>
                     </select>
                   </Field>
-                  <Field label="声道数">
+                  <Field label={t('settings.audio.channels')}>
                     <select value={a.channels} onChange={(e) => props.onUpdateAudio({ channels: Number(e.target.value) })}>
-                      <option value={2}>立体声 (2)</option>
-                      <option value={1}>单声道 (1)</option>
+                      <option value={2}>{t('settings.audio.stereo')}</option>
+                      <option value={1}>{t('settings.audio.mono')}</option>
                     </select>
                   </Field>
-                  <Field label="码率模式">
+                  <Field label={t('settings.audio.rateControl')}>
                     <select value={a.rateControl} onChange={(e) => props.onUpdateAudio({ rateControl: e.target.value as AudioRateControl })}>
-                      <option value="cbr">CBR 固定码率</option>
-                      <option value="vbr">VBR 可变码率</option>
+                      <option value="cbr">{t('settings.audio.rc.cbr')}</option>
+                      <option value="vbr">{t('settings.audio.rc.vbr')}</option>
                     </select>
                   </Field>
                 </div>
 
                 <Toggle
-                  label="响度归一化 (loudnorm, -16 LUFS)"
-                  hint="不同来源的视频音量差异较大时开启，可让音量更一致（略微增加 CPU 占用）"
+                  label={t('settings.audio.loudnorm')}
+                  hint={t('settings.audio.loudnormHint')}
                   checked={a.loudnorm}
                   onChange={(checked) => props.onUpdateAudio({ loudnorm: checked })}
                 />
               </>
             )}
 
-            {a.codec === 'copy' && (
-              <p className="hint small">
-                直接复制源音频可保持原始质量，但要求源音频编码能被 FLV 容器承载（AAC/MP3）。若服务器报错请改用 AAC。
-              </p>
-            )}
+            {a.codec === 'copy' && <p className="hint small">{t('settings.audio.copyHint')}</p>}
           </>
         )}
 
         {/* ------------------------------------------------------- SUBTITLE */}
         {tab === 'subtitle' && (
           <>
-            <Field label="默认字幕处理方式" hint="每个文件可以在左侧列表中单独覆盖">
+            <Field label={t('settings.subtitle.mode')} hint={t('settings.subtitle.modeHint')}>
               <select value={s.mode} onChange={(e) => props.onUpdateSubtitles({ mode: e.target.value as SubtitleMode })}>
-                <option value="off">关闭字幕</option>
-                <option value="burn">烧录进画面（推荐，所有播放器可见）</option>
-                <option value="copy">作为独立字幕轨复制（多数 RTMP 不转发）</option>
+                <option value="off">{t('settings.subtitle.modeOff')}</option>
+                <option value="burn">{t('settings.subtitle.modeBurn')}</option>
+                <option value="copy">{t('settings.subtitle.modeCopy')}</option>
               </select>
             </Field>
 
             {s.mode === 'burn' && (
               <>
-                <Field label="样式来源" hint="ASS/SSA 内挂字幕自带样式，可保留或强制覆盖">
+                <Field label={t('settings.subtitle.styleSource')} hint={t('settings.subtitle.styleSourceHint')}>
                   <select
                     value={s.styleMode}
                     onChange={(e) => props.onUpdateSubtitles({ styleMode: e.target.value as SubtitleRenderSettings['styleMode'] })}
                   >
-                    <option value="preserve">保留原字幕样式</option>
-                    <option value="force">使用下面的样式覆盖</option>
-                    <option value="plain">强制为纯文本样式</option>
+                    <option value="preserve">{t('settings.subtitle.stylePreserve')}</option>
+                    <option value="force">{t('settings.subtitle.styleForce')}</option>
+                    <option value="plain">{t('settings.subtitle.stylePlain')}</option>
                   </select>
                 </Field>
 
                 {s.styleMode !== 'preserve' && (
                   <>
                     <div className="field-grid">
-                      <Field label="字体名称" hint="需为本机已安装字体，如 Microsoft YaHei / SimHei / Arial">
+                      <Field label={t('settings.subtitle.fontName')} hint={t('settings.subtitle.fontNameHint')}>
                         <input value={s.fontName} onChange={(e) => props.onUpdateSubtitles({ fontName: e.target.value })} list="font-presets" />
                         <datalist id="font-presets">
                           <option value="Microsoft YaHei" />
@@ -485,7 +509,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                           <option value="Segoe UI" />
                         </datalist>
                       </Field>
-                      <Field label="字号">
+                      <Field label={t('settings.subtitle.fontSize')}>
                         <input
                           type="number"
                           min={8}
@@ -494,7 +518,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                           onChange={(e) => props.onUpdateSubtitles({ fontSize: Number(e.target.value) })}
                         />
                       </Field>
-                      <Field label="描边粗细">
+                      <Field label={t('settings.subtitle.outlineWidth')}>
                         <input
                           type="number"
                           min={0}
@@ -504,13 +528,13 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                           onChange={(e) => props.onUpdateSubtitles({ outlineWidth: Number(e.target.value) })}
                         />
                       </Field>
-                      <Field label="阴影">
+                      <Field label={t('settings.subtitle.shadow')}>
                         <input type="number" min={0} max={10} value={s.shadow} onChange={(e) => props.onUpdateSubtitles({ shadow: Number(e.target.value) })} />
                       </Field>
                     </div>
 
                     <div className="field-grid">
-                      <Field label="文字颜色">
+                      <Field label={t('settings.subtitle.primaryColor')}>
                         <div className="color-row">
                           <input
                             type="color"
@@ -520,7 +544,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                           <input value={s.primaryColor} onChange={(e) => props.onUpdateSubtitles({ primaryColor: e.target.value })} />
                         </div>
                       </Field>
-                      <Field label="描边颜色">
+                      <Field label={t('settings.subtitle.outlineColor')}>
                         <div className="color-row">
                           <input
                             type="color"
@@ -530,7 +554,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                           <input value={s.outlineColor} onChange={(e) => props.onUpdateSubtitles({ outlineColor: e.target.value })} />
                         </div>
                       </Field>
-                      <Field label="垂直边距 (px)">
+                      <Field label={t('settings.subtitle.marginVertical')}>
                         <input
                           type="number"
                           min={0}
@@ -539,48 +563,44 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                           onChange={(e) => props.onUpdateSubtitles({ marginVertical: Number(e.target.value) })}
                         />
                       </Field>
-                      <Field label="对齐方式">
+                      <Field label={t('settings.subtitle.alignment')}>
                         <select value={s.alignment} onChange={(e) => props.onUpdateSubtitles({ alignment: Number(e.target.value) })}>
-                          <option value={1}>左下</option>
-                          <option value={2}>底部居中</option>
-                          <option value={3}>右下</option>
-                          <option value={4}>左中</option>
-                          <option value={5}>正中</option>
-                          <option value={6}>右中</option>
-                          <option value={7}>左上</option>
-                          <option value={8}>顶部居中</option>
-                          <option value={9}>右上</option>
+                          {(Object.keys(ALIGNMENT_KEY).map(Number) as number[]).map((value) => (
+                            <option key={value} value={value}>
+                              {t(ALIGNMENT_KEY[value])}
+                            </option>
+                          ))}
                         </select>
                       </Field>
                     </div>
 
                     <div className="toggle-row">
-                      <Toggle label="加粗" checked={s.bold} onChange={(c) => props.onUpdateSubtitles({ bold: c })} compact />
-                      <Toggle label="斜体" checked={s.italic} onChange={(c) => props.onUpdateSubtitles({ italic: c })} compact />
+                      <Toggle label={t('settings.subtitle.bold')} checked={s.bold} onChange={(c) => props.onUpdateSubtitles({ bold: c })} compact />
+                      <Toggle label={t('settings.subtitle.italic')} checked={s.italic} onChange={(c) => props.onUpdateSubtitles({ italic: c })} compact />
                     </div>
                   </>
                 )}
 
                 <p className="hint small">
-                  烧录使用 ffmpeg 的 <code>subtitles</code> 滤镜（libass）。
-                  {caps && !caps.hasSubtitleFilter && <strong className="warn"> 当前 ffmpeg 未编译该滤镜，烧录将失败。</strong>}
-                  内挂 PGS/DVD 位图字幕无法用滤镜烧录，请改用外部文本字幕。
+                  {/* Split around the inline <code> and the conditional <strong>, so
+                      each language can order the pieces its own way. */}
+                  {t('settings.subtitle.burnHint1')}
+                  <code>subtitles</code>
+                  {t('settings.subtitle.burnHint2')}
+                  {caps && !caps.hasSubtitleFilter && <strong className="warn">{t('settings.subtitle.burnHint3')}</strong>}
+                  {t('settings.subtitle.burnHint4')}
                 </p>
               </>
             )}
 
-            {s.mode === 'copy' && (
-              <p className="hint warn small">
-                FLV 容器与绝大多数 RTMP 服务器不会转发字幕轨道；除非你的服务器专门支持，否则请使用「烧录」模式。
-              </p>
-            )}
+            {s.mode === 'copy' && <p className="hint warn small">{t('settings.subtitle.copyHint')}</p>}
           </>
         )}
 
         {/* --------------------------------------------------------- OUTPUT */}
         {tab === 'output' && (
           <>
-            <Field label="RTMP 推流地址">
+            <Field label={t('settings.output.server')}>
               <input
                 value={o.server}
                 placeholder="rtmp://127.0.0.1/live/"
@@ -589,37 +609,37 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               />
             </Field>
 
-            <Field label="串流密钥 (可选)" hint="留空则不携带密钥">
+            <Field label={t('settings.output.streamKey')} hint={t('settings.output.streamKeyHint')}>
               <div className="secret-row">
                 <input
                   type={showKey ? 'text' : 'password'}
                   value={o.streamKey}
-                  placeholder="无"
+                  placeholder={t('settings.output.nonePlaceholder')}
                   onChange={(e) => props.onUpdateOutput({ streamKey: e.target.value })}
                   spellCheck={false}
                   autoComplete="off"
                 />
                 <button type="button" className="btn tiny ghost secret-toggle" onClick={() => setShowKey((v) => !v)}>
-                  {showKey ? '隐藏' : '显示'}
+                  {showKey ? t('settings.output.hide') : t('settings.output.show')}
                 </button>
               </div>
             </Field>
 
             <div className="row-actions">
               <button className="btn primary" onClick={runTest} disabled={testState.running || props.busy}>
-                {testState.running ? '正在测试…' : '测试连接（按当前编码设置）'}
+                {testState.running ? t('settings.output.testing') : t('settings.output.testConnection')}
               </button>
               <button className="btn ghost" onClick={showCommand}>
-                查看 ffmpeg 命令
+                {t('settings.output.viewCommand')}
               </button>
             </div>
 
             {testState.result && (
               <div className={`test-result ${testState.result.ok ? 'ok' : 'fail'}`}>
-                <strong>{testState.result.ok ? '✓ 连接成功' : '✗ 连接失败'}</strong>
+                <strong>{testState.result.ok ? t('settings.output.testOk') : t('settings.output.testFail')}</strong>
                 <p>{testState.result.message}</p>
                 {testState.result.summary && testState.result.summary.length > 0 && (
-                  <p className="test-summary">测试参数：{testState.result.summary.join(' · ')}</p>
+                  <p className="test-summary">{t('settings.output.testSummary', { summary: testState.result.summary.join(' · ') })}</p>
                 )}
                 {testState.result.notes?.map((n) => (
                   <p className="hint warn small" key={n}>
@@ -628,7 +648,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 ))}
                 {testState.result.detail && (
                   <details>
-                    <summary>ffmpeg 输出</summary>
+                    <summary>{t('settings.output.ffmpegOutput')}</summary>
                     <pre>{testState.result.detail}</pre>
                   </details>
                 )}
@@ -638,7 +658,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             {commandPreview && (
               <div className="command-preview">
                 <div className="cp-head">
-                  <span>当前设置的 ffmpeg 命令</span>
+                  <span>{t('settings.output.commandPreviewTitle')}</span>
                   <div>
                     <button
                       className="btn tiny"
@@ -646,10 +666,10 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                         void navigator.clipboard.writeText(commandPreview)
                       }}
                     >
-                      复制
+                      {t('settings.output.copy')}
                     </button>
                     <button className="btn tiny ghost" onClick={() => setCommandPreview(null)}>
-                      关闭
+                      {t('app.close')}
                     </button>
                   </div>
                 </div>
@@ -657,21 +677,21 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               </div>
             )}
 
-            <Field label="输出容器格式">
+            <Field label={t('settings.output.container')}>
               <select value={o.container} onChange={(e) => props.onUpdateOutput({ container: e.target.value as ContainerName })}>
-                {(Object.keys(CONTAINER_LABEL) as ContainerName[]).map((c) => {
+                {(Object.keys(CONTAINER_KEY) as ContainerName[]).map((c) => {
                   const supported = caps?.containerFormats.find((x) => x.value === c)
                   return (
                     <option key={c} value={c} disabled={supported ? !supported.available : false}>
-                      {CONTAINER_LABEL[c]}
-                      {supported && !supported.available ? '（当前 ffmpeg 不支持）' : ''}
+                      {t(CONTAINER_KEY[c])}
+                      {supported && !supported.available ? t('settings.audio.codecUnsupported') : ''}
                     </option>
                   )
                 })}
               </select>
             </Field>
 
-            <Field label="追加自定义参数" hint="追加到 ffmpeg 输出参数末尾，例如 -flvflags no_duration_filesize">
+            <Field label={t('settings.output.extraArgs')} hint={t('settings.output.extraArgsHint')}>
               <input
                 value={o.extraOutputArgs}
                 placeholder=""
@@ -681,10 +701,10 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             </Field>
 
             {/* ------------------------------------- OBS WebSocket ---------- */}
-            <h3 className="section-title">OBS WebSocket 控制</h3>
+            <h3 className="section-title">{t('settings.obs.title')}</h3>
             <Toggle
-              label="启用 obs-websocket 兼容接口"
-              hint="使用 obs-websocket 控制本应用"
+              label={t('settings.obs.enabled')}
+              hint={t('settings.obs.enabledHint')}
               checked={o.obsWebSocket.enabled}
               onChange={(c) => {
                 updateObs({ enabled: c })
@@ -697,7 +717,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             {o.obsWebSocket.enabled && (
               <>
                 <div className="field-grid">
-                  <Field label="监听地址">
+                  <Field label={t('settings.obs.host')}>
                     <input
                       value={o.obsWebSocket.host}
                       placeholder="127.0.0.1"
@@ -708,7 +728,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                       spellCheck={false}
                     />
                   </Field>
-                  <Field label="端口">
+                  <Field label={t('settings.obs.port')}>
                     <input
                       type="number"
                       min={OBS_PORT_MIN}
@@ -720,12 +740,12 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                       }}
                     />
                   </Field>
-                  <Field label="密码" hint="无则客户端无需认证直接连接">
+                  <Field label={t('settings.obs.password')} hint={t('settings.obs.passwordHint')}>
                     <div className="secret-row">
                       <input
                         type={showKey ? 'text' : 'password'}
                         value={o.obsWebSocket.password}
-                        placeholder="无"
+                        placeholder={t('settings.output.nonePlaceholder')}
                         onChange={(e) => {
                           updateObs({ password: e.target.value })
                           applyObs()
@@ -734,7 +754,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                         autoComplete="off"
                       />
                       <button type="button" className="btn tiny ghost secret-toggle" onClick={() => setShowKey((v) => !v)}>
-                        {showKey ? '隐藏' : '显示'}
+                        {showKey ? t('settings.output.hide') : t('settings.output.show')}
                       </button>
                     </div>
                   </Field>
@@ -742,24 +762,28 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
                 <div className="row-actions">
                   <button className="btn" onClick={() => void applyObsNow()} disabled={obsRestarting}>
-                    {obsRestarting ? '正在应用…' : '应用并重启接口'}
+                    {obsRestarting ? t('settings.obs.applying') : t('settings.obs.apply')}
                   </button>
                   <span className={`pill ${props.obsStatus?.running ? 'ok' : 'subtle'}`}>
                     {props.obsStatus?.running
-                      ? `● 运行中 ${props.obsStatus.url}`
+                      ? t('settings.obs.running', { url: props.obsStatus.url })
                       : props.obsStatus?.error
-                        ? `● 未运行：${props.obsStatus.error}`
-                        : '○ 未运行'}
+                        ? t('settings.obs.error', { error: props.obsStatus.error })
+                        : t('settings.obs.notRunning')}
                   </span>
                   {props.obsStatus?.running && props.obsStatus.clients > 0 && (
-                    <span className="pill subtle">已连接 {props.obsStatus.clients}</span>
+                    <span className="pill subtle">{t('settings.obs.clients', { n: props.obsStatus.clients })}</span>
                   )}
                 </div>
 
                 <p className="hint small">
-                  兼容 obs-websocket 5.x 握手。已实现
-                  <code> SetStreamServiceSettings</code>（推流地址 / 串流密钥）、<code>StartStream</code>、<code>StopStream</code>，
-                  以及客户端连接时会询问的 GetVersion / GetStreamStatus 等只读请求；其余请求一律返回成功，不会报错。
+                  {t('settings.obs.compatHint1')}
+                  <code> SetStreamServiceSettings</code>
+                  {t('settings.obs.compatHint2')}
+                  <code>StartStream</code>
+                  {t('settings.obs.compatHint3')}
+                  <code>StopStream</code>
+                  {t('settings.obs.compatHint4')}
                 </p>
               </>
             )}
@@ -769,7 +793,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {/* ------------------------------------------------------- ADVANCED */}
         {tab === 'advanced' && (
           <>
-            <h3 className="section-title">串流控制</h3>
+            <h3 className="section-title">{t('settings.advanced.streamControl')}</h3>
             {/*
               The switch and its delay share a row, switch first: the delay only means
               anything while buffering is on, and reading them side by side is what
@@ -778,8 +802,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             */}
             <div className="field-grid stream-mode-grid">
               <Toggle
-                label="双引擎推流"
-                hint="编码 + 推流分离（推荐）"
+                label={t('settings.advanced.buffered')}
+                hint={t('settings.advanced.bufferedHint')}
                 checked={o.buffered}
                 onChange={(c) =>
                   props.onUpdateOutput({
@@ -792,11 +816,11 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 }
               />
               <DelayField
-                label="编码缓冲 (秒)"
+                label={t('settings.advanced.bufferSec')}
                 hint={
                   o.buffered
-                    ? `编码最多领先推流多少秒：${BUFFER_SEC_MIN}–${BUFFER_SEC_MAX} s。每 1 秒约占 码率/8 KB 内存，越大越能扛住编码变慢`
-                    : '需先开启双引擎推流'
+                    ? t('settings.advanced.bufferHint', { min: BUFFER_SEC_MIN, max: BUFFER_SEC_MAX })
+                    : t('settings.advanced.bufferHintDisabled')
                 }
                 value={o.bufferSec}
                 min={BUFFER_SEC_MIN}
@@ -809,26 +833,26 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               />
             </div>
             <Toggle
-              label="实时节奏推流 (-re)"
-              hint="关闭缓冲时按源文件原速度推送"
+              label={t('settings.advanced.realtimePacing')}
+              hint={t('settings.advanced.realtimePacingHint')}
               checked={o.realtimePacing}
               onChange={(c) => props.onUpdateOutput({ realtimePacing: c })}
             />
             <Toggle
-              label="播放列表循环"
-              hint="最后一个文件结束后回到第一个文件；关闭则结束时停止推流"
+              label={t('settings.advanced.loop')}
+              hint={t('settings.advanced.loopHint')}
               checked={o.loopPlaylist}
               onChange={(c) => props.onUpdateOutput({ loopPlaylist: c })}
             />
             <Toggle
-              label="丢弃迟到帧"
-              hint="编码跟不上时丢帧而不是累积延迟，适合低延迟场景"
+              label={t('settings.advanced.dropLateFrames')}
+              hint={t('settings.advanced.dropLateFramesHint')}
               checked={o.dropLateFrames}
               onChange={(c) => props.onUpdateOutput({ dropLateFrames: c })}
             />
 
             <div className="field-grid">
-              <Field label="断线重连间隔 (秒)">
+              <Field label={t('settings.advanced.reconnectDelay')}>
                 <input
                   type="number"
                   min={1}
@@ -837,7 +861,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                   onChange={(e) => props.onUpdateOutput({ reconnectDelaySec: Number(e.target.value) })}
                 />
               </Field>
-              <Field label="最大重连次数" hint="0 = 不自动重连">
+              <Field label={t('settings.advanced.maxReconnect')} hint={t('settings.advanced.maxReconnectHint')}>
                 <input
                   type="number"
                   min={0}
@@ -848,32 +872,32 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               </Field>
             </div>
 
-            <h3 className="section-title">FFmpeg</h3>
+            <h3 className="section-title">{t('settings.advanced.ffmpegSection')}</h3>
             <div className="kv-list">
               <div className="kv">
-                <span>ffmpeg 路径</span>
-                <code>{caps?.ffmpegPath || '未找到'}</code>
+                <span>{t('settings.advanced.ffmpegPath')}</span>
+                <code>{caps?.ffmpegPath || t('settings.advanced.notFound')}</code>
               </div>
               <div className="kv">
-                <span>ffprobe 路径</span>
-                <code>{caps?.ffprobePath || '未找到'}</code>
+                <span>{t('settings.advanced.ffprobePath')}</span>
+                <code>{caps?.ffprobePath || t('settings.advanced.notFound')}</code>
               </div>
               <div className="kv">
-                <span>版本</span>
+                <span>{t('settings.advanced.version')}</span>
                 <code>{caps?.ffmpegVersion || '—'}</code>
               </div>
               <div className="kv">
-                <span>来源</span>
+                <span>{t('settings.advanced.source')}</span>
                 <code>{caps?.source ?? '—'}</code>
               </div>
             </div>
 
             <div className="row-actions">
               <button className="btn" onClick={props.onChooseFfmpeg}>
-                手动指定 ffmpeg 路径
+                {t('settings.advanced.chooseFfmpeg')}
               </button>
               <button className="btn ghost" onClick={() => props.onRefreshCapabilities(true)} disabled={props.capsLoading}>
-                {props.capsLoading ? '检测中…' : '重新检测编码器'}
+                {props.capsLoading ? t('settings.advanced.detecting') : t('settings.advanced.redetect')}
               </button>
             </div>
 
@@ -887,21 +911,21 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               </div>
             )}
 
-            <h3 className="section-title">可用编码器</h3>
+            <h3 className="section-title">{t('settings.advanced.availableEncoders')}</h3>
             <div className="encoder-table">
               {caps?.encoders.map((e) => (
                 <div key={e.value} className={`enc-row${e.available ? '' : ' off'}`}>
                   <span className={`dot ${e.available ? (e.kind === 'software' ? 'sw' : 'hw') : 'na'}`} />
                   <span className="enc-name">{e.label}</span>
-                  <span className="enc-kind">{e.kind === 'software' ? '软件' : e.kind.toUpperCase()}</span>
+                  <span className="enc-kind">{e.kind === 'software' ? t('settings.advanced.software') : e.kind.toUpperCase()}</span>
                 </div>
               ))}
             </div>
 
-            <h3 className="section-title">关于</h3>
+            <h3 className="section-title">{t('settings.about.title')}</h3>
             <div className="kv-list">
               <div className="kv">
-                <span>应用版本</span>
+                <span>{t('settings.about.version')}</span>
                 <code>{props.info?.version ?? '—'}</code>
               </div>
               <div className="kv">
@@ -911,41 +935,45 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 </code>
               </div>
               <div className="kv">
-                <span>平台</span>
+                <span>{t('settings.about.platform')}</span>
                 <code>
                   {props.info?.platform ?? '—'} {props.info?.arch ?? ''}
                 </code>
               </div>
               <div className="kv">
-                <span>配置目录</span>
+                <span>{t('settings.about.configDir')}</span>
                 <code>{props.info?.userDataPath ?? '—'}</code>
               </div>
             </div>
 
-            <h3 className="section-title">日志留存</h3>
+            <h3 className="section-title">{t('settings.advanced.logRetention')}</h3>
             <Toggle
-              label="调试输出 (debug)"
-              hint="把 debug 级日志写进界面与日志文件；关闭后只保留 info 及以上——排查串流问题需要它，长期挂机可以关掉以减小日志体积"
+              label={t('settings.advanced.debugLogging')}
+              hint={t('settings.advanced.debugLoggingHint')}
               checked={props.settings.debugLogging}
               onChange={(c) => void props.onSaveSettings({ debugLogging: c })}
             />
             <div className="kv-list">
               <div className="kv">
-                <span>日志目录</span>
+                <span>{t('settings.advanced.logsDir')}</span>
                 <code>{props.logInfo?.dir ?? '—'}</code>
               </div>
               <div className="kv">
-                <span>当前占用</span>
+                <span>{t('settings.advanced.logUsage')}</span>
                 <code>
                   {props.logInfo
-                    ? `${props.logInfo.fileCount} 个文件 / ${(props.logInfo.totalBytes / 1024).toFixed(0)} KB · 上限 ${(props.logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB`
+                    ? t('settings.advanced.logUsageValue', {
+                        n: props.logInfo.fileCount,
+                        kb: (props.logInfo.totalBytes / 1024).toFixed(0),
+                        mb: (props.logInfo.budgetBytes / 1024 / 1024).toFixed(0)
+                      })
                     : '—'}
                 </code>
               </div>
             </div>
             <div className="row-actions">
               <button className="btn ghost" onClick={props.onOpenLogsDir}>
-                📂 打开日志目录
+                {t('settings.advanced.openLogsDir')}
               </button>
             </div>
           </>
@@ -976,6 +1004,7 @@ function PresetBar({
   onDeletePreset: (presetId: string) => void
   onOpenConfigDir: () => void
 }): React.JSX.Element {
+  const t = useT()
   const [menuOpen, setMenuOpen] = useState(false)
   const [name, setName] = useState('')
 
@@ -994,7 +1023,7 @@ function PresetBar({
 
   const presetOptions = (
     <>
-      <optgroup label="内置预设">
+      <optgroup label={t('settings.preset.builtinGroup')}>
         {all
           .filter((p) => p.builtin)
           .map((p) => (
@@ -1004,7 +1033,7 @@ function PresetBar({
           ))}
       </optgroup>
       {userPresets.length > 0 && (
-        <optgroup label="我的预设">
+        <optgroup label={t('settings.preset.userGroup')}>
           {userPresets.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
@@ -1017,7 +1046,7 @@ function PresetBar({
 
   return (
     <div className="preset-bar">
-      <span className="preset-label">预设</span>
+      <span className="preset-label">{t('settings.preset.label')}</span>
 
       <select
         className="preset-select"
@@ -1027,16 +1056,16 @@ function PresetBar({
           const preset = all.find((p) => p.id === e.target.value)
           if (preset) onSelectPreset(preset)
         }}
-        title="应用一个预设（覆盖当前所有选项卡的设置）"
+        title={t('settings.preset.selectTitle')}
       >
-        <option value="">（自定义）</option>
+        <option value="">{t('settings.preset.custom')}</option>
         {presetOptions}
       </select>
 
-      {active?.builtin && <span className="badge subtle">内置</span>}
+      {active?.builtin && <span className="badge subtle">{t('settings.preset.builtinBadge')}</span>}
 
-      <button className="btn tiny" onClick={() => setMenuOpen((v) => !v)} disabled={locked} title="把当前所有设置保存为预设">
-        💾 保存为预设
+      <button className="btn tiny" onClick={() => setMenuOpen((v) => !v)} disabled={locked} title={t('settings.preset.saveTitle')}>
+        {t('settings.preset.saveAs')}
       </button>
 
       {active && !active.builtin && (
@@ -1044,24 +1073,24 @@ function PresetBar({
           className="btn tiny danger"
           onClick={() => onDeletePreset(active.id)}
           disabled={locked}
-          title={`删除预设「${active.name}」`}
+          title={t('settings.preset.deleteTitle', { name: active.name })}
         >
-          删除
+          {t('settings.preset.delete')}
         </button>
       )}
 
-      <button className="btn tiny ghost" onClick={onOpenConfigDir} title={presets?.location.dir ?? '数据目录'}>
-        📂 数据目录
+      <button className="btn tiny ghost" onClick={onOpenConfigDir} title={presets?.location.dir ?? t('settings.preset.dataDirTitle')}>
+        {t('settings.preset.dataDir')}
       </button>
 
       {menuOpen && (
         <div className="preset-menu">
-          <div className="preset-menu-title">保存当前全部设置（视频/音频/字幕/输出/高级）为预设</div>
+          <div className="preset-menu-title">{t('settings.preset.menuTitle')}</div>
           <div className="preset-menu-row">
             <input
               autoFocus
               value={name}
-              placeholder="预设名称，例如 1080p60 游戏直播"
+              placeholder={t('settings.preset.namePlaceholder')}
               maxLength={80}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
@@ -1070,19 +1099,19 @@ function PresetBar({
               }}
             />
             <button className="btn primary" onClick={save} disabled={!name.trim()}>
-              保存
+              {t('settings.preset.saveButton')}
             </button>
             <button className="btn ghost" onClick={() => setMenuOpen(false)}>
-              取消
+              {t('settings.preset.cancel')}
             </button>
           </div>
           <div className="preset-menu-note muted small">
             {writable ? (
               <>
-                同名预设会被覆盖 · 保存位置：<code>{presets?.location.file ?? '—'}</code>
+                {t('settings.preset.overwriteNote')} <code>{presets?.location.file ?? '—'}</code>
               </>
             ) : (
-              <span className="warn">数据目录不可写：{presets?.location.dir}</span>
+              <span className="warn">{t('settings.preset.notWritable', { dir: presets?.location.dir ?? '—' })}</span>
             )}
           </div>
         </div>
@@ -1216,6 +1245,7 @@ function BitrateField({
   allowZero?: boolean
   onChange: (kbps: number) => void
 }): React.JSX.Element {
+  const t = useT()
   const [unit, setUnit] = useState<BitrateUnit>('kbps')
   // Keep what the user typed so a partial entry (e.g. "1.") is not rewritten.
   const [draft, setDraft] = useState<string | null>(null)
@@ -1249,7 +1279,7 @@ function BitrateField({
           onChange={(e) => commit(e.target.value)}
           onBlur={() => setDraft(null)}
         />
-        <select value={unit} onChange={(e) => switchUnit(e.target.value as BitrateUnit)} aria-label={`${label}单位`}>
+        <select value={unit} onChange={(e) => switchUnit(e.target.value as BitrateUnit)} aria-label={t('settings.video.bitrateUnitAria', { label })}>
           <option value="kbps">kbps</option>
           <option value="mbps">Mbps</option>
         </select>
@@ -1279,6 +1309,7 @@ function ResolutionField({
   value: VideoSettings
   onChange: (patch: Partial<VideoSettings>) => void
 }): React.JSX.Element {
+  const t = useT()
   const enabled = Boolean(value.scale?.trim())
 
   const setEnabled = (on: boolean): void => {
@@ -1326,7 +1357,7 @@ function ResolutionField({
 
   return (
     <div className="field res-field">
-      <span className="field-label">分辨率</span>
+      <span className="field-label">{t('settings.video.resolution')}</span>
 
       <div className="res-inputs">
         <label className="toggle compact res-enable">
@@ -1334,7 +1365,7 @@ function ResolutionField({
           <span className="toggle-track" aria-hidden>
             <span className="toggle-thumb" />
           </span>
-          <span className="toggle-text">缩放输出</span>
+          <span className="toggle-text">{t('settings.video.scaleOutput')}</span>
         </label>
 
         <select
@@ -1342,9 +1373,9 @@ function ResolutionField({
           value={activePreset?.label ?? ''}
           disabled={!enabled}
           onChange={(e) => applyPreset(e.target.value)}
-          aria-label="分辨率预设"
+          aria-label={t('settings.video.resolutionPresetAria')}
         >
-          <option value="">自定义…</option>
+          <option value="">{t('settings.video.resolutionCustom')}</option>
           {SCALE_PRESETS.map((p) => (
             <option key={p.label} value={p.label}>
               {p.label}
@@ -1360,8 +1391,8 @@ function ResolutionField({
             value={value.scaleWidth || ''}
             disabled={!enabled}
             onChange={(e) => setWidth(Number(e.target.value) || 0)}
-            aria-label="宽度"
-            placeholder="宽"
+            aria-label={t('settings.video.widthAria')}
+            placeholder={t('settings.video.widthPlaceholder')}
           />
           <span className="res-x">×</span>
           <input
@@ -1371,18 +1402,18 @@ function ResolutionField({
             value={value.scaleAuto ? '' : value.scaleHeight || ''}
             disabled={!enabled || value.scaleAuto}
             onChange={(e) => setHeight(Number(e.target.value) || 0)}
-            aria-label="高度"
-            placeholder={value.scaleAuto ? '自动' : '高'}
-            title={value.scaleAuto ? '宽度自适应已开启，高度按源画面比例计算' : ''}
+            aria-label={t('settings.video.heightAria')}
+            placeholder={value.scaleAuto ? t('settings.video.rc.auto') : t('settings.video.heightPlaceholder')}
+            title={value.scaleAuto ? t('settings.video.heightAutoTitle') : ''}
           />
         </div>
 
-        <label className={`auto-check${!enabled ? ' disabled' : ''}`} title="勾选后高度按源画面比例自动计算（宽度 × 自动高度）">
+        <label className={`auto-check${!enabled ? ' disabled' : ''}`} title={t('settings.video.scaleAutoTitle')}>
           <input type="checkbox" checked={value.scaleAuto} disabled={!enabled} onChange={(e) => setAuto(e.target.checked)} />
-          高度自适应
+          {t('settings.video.scaleAutoLabel')}
         </label>
       </div>
-      <em className="field-hint">关闭「缩放输出」则保持源分辨率；高度自适应时按源画面比例计算</em>
+      <em className="field-hint">{t('settings.video.scaleHint')}</em>
     </div>
   )
 }

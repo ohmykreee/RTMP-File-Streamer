@@ -1,6 +1,8 @@
 import crypto from 'node:crypto'
 import net, { type Server, type Socket } from 'node:net'
 import type { EngineState, ObsWebSocketSettings, ObsWebSocketStatus } from '@shared/types'
+import type { Translate, TranslationKey } from '@shared/i18n'
+import { EN } from '@shared/i18n'
 
 /**
  * A minimal obs-websocket v5 compatible control endpoint.
@@ -63,6 +65,15 @@ export interface ObsWebSocketDeps {
   startStream: () => Promise<unknown>
   stopStream: () => Promise<unknown>
   log: (level: 'debug' | 'info' | 'warn' | 'error', message: string) => void
+  /**
+   * Message lookup for the log lines this server produces.
+   *
+   * Injected rather than imported: this module is also bundled on its own for the
+   * obs-websocket protocol test, which runs without the application's settings
+   * store — an import of it would pull Electron into that bundle and fail at load.
+   * Defaults to the reference language so a caller that does not care still works.
+   */
+  t?: Translate<TranslationKey>
 }
 
 /* ------------------------------------------------------------------ *
@@ -167,6 +178,8 @@ interface Client {
 
 export class ObsWebSocketServer {
   private readonly deps: ObsWebSocketDeps
+  /** Log text lookup; the reference language when the caller supplies none. */
+  private readonly t: Translate<TranslationKey>
   private server: Server | null = null
   private clients = new Set<Client>()
   private nextId = 1
@@ -176,6 +189,7 @@ export class ObsWebSocketServer {
 
   constructor(deps: ObsWebSocketDeps) {
     this.deps = deps
+    this.t = deps.t ?? ((key) => EN[key])
   }
 
   /* ---------------------------------------------------------- *
@@ -203,7 +217,7 @@ export class ObsWebSocketServer {
       const wasRunning = this.server !== null
       this.stop()
       this.lastError = ''
-      if (wasRunning) this.deps.log('info', 'obs-websocket 控制服务已关闭。')
+      if (wasRunning) this.deps.log('info', this.t('main.engine.obsStopped'))
       return this.status()
     }
 
@@ -234,7 +248,13 @@ export class ObsWebSocketServer {
       this.boundHost = host
       this.boundPort = port
       this.lastError = ''
-      this.deps.log('info', `obs-websocket 控制服务已启动：ws://${host}:${port}（${this.deps.settings().password ? '需要密码' : '无需密码'}）`)
+      this.deps.log(
+        'info',
+        this.t('main.engine.obsStarted', {
+          url: `ws://${host}:${port}`,
+          auth: this.t(this.deps.settings().password ? 'main.engine.obsNeedsPassword' : 'main.engine.obsNoPassword')
+        })
+      )
     })
     // The listener address is only known after the async listen callback; keep
     // the requested values so `status()` is correct even before it fires.
@@ -656,22 +676,27 @@ export class ObsWebSocketServer {
           return { status: REQUEST_STATUS.invalidData, comment: 'streamServiceSettings 缺少 server / streamKey', response: {} }
         }
         this.deps.applyStreamTarget({ ...(server !== undefined ? { server } : {}), ...(key !== undefined ? { streamKey: key } : {}) })
-        this.deps.log('info', `obs-websocket：已更新推流地址${server !== undefined ? ` server=${server}` : ''}${key !== undefined ? ' 与串流密钥' : ''}`)
+        this.deps.log(
+          'info',
+          this.t('main.engine.obsTargetUpdated') +
+            (server !== undefined ? this.t('main.engine.obsServerSet', { server }) : '') +
+            (key !== undefined ? this.t('main.engine.obsKeySet') : '')
+        )
         return { status: REQUEST_STATUS.success, comment: '', response: {} }
       }
 
       case 'StartStream': {
         if (this.engineBusy()) {
-          return { status: REQUEST_STATUS.success, comment: '串流已在进行中', response: {} }
+          return { status: REQUEST_STATUS.success, comment: this.t('main.engine.obsAlreadyStreaming'), response: {} }
         }
         await this.deps.startStream()
-        this.deps.log('info', 'obs-websocket：已请求开始串流。')
+        this.deps.log('info', this.t('main.engine.obsStartRequested'))
         return { status: REQUEST_STATUS.success, comment: '', response: {} }
       }
 
       case 'StopStream': {
         await this.deps.stopStream()
-        this.deps.log('info', 'obs-websocket：已请求停止串流。')
+        this.deps.log('info', this.t('main.engine.obsStopRequested'))
         return { status: REQUEST_STATUS.success, comment: '', response: {} }
       }
 

@@ -49,7 +49,9 @@ try {
   /* first run: nothing to restore */
 }
 
-const appProc = spawn(electron, ['.', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
+/* `--lang=zh-CN` pins the UI language so the assertions on Chinese control text do
+   not depend on the machine's system locale. */
+const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
   env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
 })

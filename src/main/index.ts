@@ -6,10 +6,12 @@ import { resolveBinaries } from './ffmpeg/capabilities'
 import { registerIpc, type AppServices } from './ipc'
 import { ObsWebSocketServer } from './obs/websocket'
 import { StreamEngine } from './stream/engine'
-import { getSettingsPath, loadSettings, saveSettings } from './store/settings'
+import { getSettingsPath, loadSettings, saveSettings, setLanguage as persistLanguage } from './store/settings'
 import { getPresetLocation, listPresets } from './store/presets'
 import { setupDataPaths } from './store/paths'
 import { appendLogEntry, closeLogSession, getPersistedLogInfo, startLogSession } from './store/logger'
+import { mainT } from './i18n'
+import { EN, TRANSLATIONS, assertCatalogsComplete } from '@shared/i18n'
 import { BUILTIN_PRESETS, LOG_HISTORY_LIMIT } from '@shared/defaults'
 import {
   attachSubtitleFile,
@@ -84,8 +86,11 @@ const engine = new StreamEngine({
   probeMedia: async (filePath: string) => {
     const s = loadSettings()
     const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)
-    return probeCached(resolved.ffprobe, filePath)
-  }
+    return probeCached(resolved.ffprobe, filePath, s.language)
+  },
+  // Read on every use rather than captured, so a language switch mid-session is
+  // reflected in the next log line.
+  getLanguage: () => loadSettings().language
 })
 
 engine.setSink({
@@ -114,29 +119,34 @@ const services: AppServices = {
     // Written at `info` so the log always records which detail level it was collected
     // at — a log with no debug entries should say why, not look like a quiet run.
     if (before.debugLogging !== next.debugLogging) {
-      pushLog(
-        'info',
-        next.debugLogging
-          ? '已开启调试输出：debug 级日志将写入界面与日志文件。'
-          : '已关闭调试输出：debug 级日志不再写入界面与日志文件（info 及以上仍然记录）。'
-      )
+      pushLog('info', next.debugLogging ? mainT('main.engine.debugOn') : mainT('main.engine.debugOff'))
     }
     return next
   },
+  setLanguage: (language) => persistLanguage(language),
   getPlaylist: () => playlist,
   addItems: async (paths: string[]) => {
     const s = loadSettings()
     const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)
-    pushLog('info', `正在解析 ${paths.length} 个文件…`)
-    const { items, errors } = await createPlaylistItems(resolved.ffprobe, paths, { mode: s.session.subtitles.mode })
-    for (const err of errors) pushLog('error', `无法读取「${path.basename(err.path)}」: ${err.message}`)
+    pushLog('info', mainT('main.engine.parsingFiles', { n: paths.length }))
+    const { items, errors } = await createPlaylistItems(resolved.ffprobe, paths, {
+      mode: s.session.subtitles.mode,
+      language: s.language
+    })
+    for (const err of errors) pushLog('error', mainT('main.engine.unreadableFile', { name: path.basename(err.path), message: err.message }))
     if (items.length > 0) {
       playlist = [...playlist, ...items]
       engine.setPlaylist(playlist)
       mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
       schedulePersist()
       const withSubs = items.filter((i) => i.subtitleTracks.length > 0).length
-      pushLog('info', `已添加 ${items.length} 个文件${withSubs > 0 ? `，其中 ${withSubs} 个已自动关联字幕` : ''}。`)
+      pushLog(
+        'info',
+        mainT('main.engine.addedFiles', {
+          n: items.length,
+          extra: withSubs > 0 ? mainT('main.engine.addedFilesSubs', { n: withSubs }) : ''
+        })
+      )
     }
     return items
   },
@@ -145,9 +155,9 @@ const services: AppServices = {
     if (!item) return null
     const s = loadSettings()
     const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)
-    const ref = await attachSubtitleFile(resolved.ffprobe, item, filePath)
+    const ref = await attachSubtitleFile(resolved.ffprobe, item, filePath, s.language)
     if (!ref) {
-      pushLog('error', `无法解析字幕文件: ${path.basename(filePath)}`)
+      pushLog('error', mainT('main.engine.subtitleUnreadable', { name: path.basename(filePath) }))
       return null
     }
     if (!item.subtitleTracks.some((t) => t.id === ref.id)) item.subtitleTracks.push(ref)
@@ -155,7 +165,7 @@ const services: AppServices = {
     if (item.mode === 'off') item.mode = s.session.subtitles.mode === 'off' ? 'burn' : s.session.subtitles.mode
     engine.setPlaylist(playlist)
     mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
-    pushLog('info', `已为「${item.name}」添加字幕 ${path.basename(filePath)}`)
+    pushLog('info', mainT('main.engine.subtitleAttached', { name: item.name, file: path.basename(filePath) }))
     schedulePersist()
     return item
   },
@@ -228,7 +238,10 @@ const obs = new ObsWebSocketServer({
   engineState: () => engine.getStatus().state,
   startStream: () => engine.start(),
   stopStream: () => engine.stop(),
-  log: (level, message) => pushLog(level, message)
+  log: (level, message) => pushLog(level, message),
+  // Read through the settings on every call, so a language switch is reflected in
+  // the endpoint's next log line rather than at the next restart.
+  t: (key, params) => mainT(key, params)
 })
 
 /* ------------------------------------------------------------------ *
@@ -244,7 +257,9 @@ function createWindow(): void {
     show: false,
     backgroundColor: '#0d1117',
     autoHideMenuBar: true,
-    title: 'RTMP 文件串流器',
+    // The window title, like the interface, follows the language resolved at
+    // startup (a saved choice, or the system locale on first launch).
+    title: mainT('app.title'),
     webPreferences: {
       // electron-vite emits the preload bundle as ESM (.mjs); that requires sandbox: false.
       preload: path.join(__dirname, '../preload/index.mjs'),
@@ -305,7 +320,36 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null)
 
     // Start persisting logs before anything can go wrong.
-    startLogSession(`app start (pid ${process.pid})`)
+    startLogSession(mainT('main.engine.appStarted', { pid: process.pid }))
+
+    /*
+     * Resolve the interface language before the window exists.
+     *
+     * `loadSettings()` is what detects it (a saved choice wins; otherwise the
+     * system locale decides, and the merged result is available immediately), and
+     * the window title is built from it — so this has to run first. The log line
+     * records which language a first launch landed on, which is the only way to
+     * tell "the detection chose wrong" from "the user never set it" afterwards.
+     */
+    const initial = loadSettings()
+    pushLog(
+      'info',
+      initial.languageSet
+        ? mainT('main.engine.languageSaved', { language: initial.language })
+        : mainT('main.engine.languageDetected', { language: initial.language })
+    )
+
+    /*
+     * Report translation drift once per launch.
+     *
+     * A key missing from a translation is invisible in use — the UI renders that one
+     * string in the fallback language, which reads as a styling accident rather than
+     * a bug — so the check is run here (and in the unit suite) instead of being left
+     * to whoever notices a stray English sentence.
+     */
+    for (const problem of assertCatalogsComplete(EN, { zh: TRANSLATIONS.zh, ja: TRANSLATIONS.ja })) {
+      pushLog('warn', `[i18n] ${problem}`)
+    }
 
     createWindow()
     registerIpc(services)
@@ -320,18 +364,18 @@ if (!app.requestSingleInstanceLock()) {
       playlist = persisted
       engine.setPlaylist(playlist)
       mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
-      pushLog('info', `已恢复上次的播放列表（${persisted.length} 个文件）。`)
+      pushLog('info', mainT('main.engine.restoredPlaylist', { n: persisted.length }))
       // Refresh durations in the background; files may have moved or changed.
       const s = loadSettings()
       const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)
       void (async () => {
         let changed = false
         for (const item of playlist) {
-          const info = await probeCached(resolved.ffprobe, item.path)
+          const info = await probeCached(resolved.ffprobe, item.path, s.language)
           if (info.probeError && info.streams.length === 0) {
             item.broken = true
             item.status = 'pending'
-            pushLog('warn', `「${item.name}」无法访问：${info.probeError}`)
+            pushLog('warn', mainT('main.engine.itemInaccessible', { name: item.name, message: info.probeError }))
             changed = true
             continue
           }
@@ -357,27 +401,35 @@ if (!app.requestSingleInstanceLock()) {
     const s = loadSettings()
     const resolved = resolveBinaries(s.ffmpegPath, s.ffprobePath)
     if (resolved.ffmpeg) {
-      pushLog('info', `ffmpeg: ${resolved.ffmpeg} (来源: ${resolved.source})`)
+      pushLog('info', mainT('main.engine.ffmpegResolved', { path: resolved.ffmpeg, source: resolved.source }))
       if (resolved.ffprobe) pushLog('debug', `ffprobe: ${resolved.ffprobe}`)
-      else pushLog('warn', '未找到 ffprobe，无法读取媒体时长与字幕轨道信息。')
+      else pushLog('warn', mainT('main.engine.ffprobeMissing'))
     } else {
-      pushLog('error', '未找到 ffmpeg。请安装 ffmpeg 并在“设置”中指定其路径后再开始串流。')
+      pushLog('error', mainT('main.engine.ffmpegMissing'))
     }
-    pushLog('debug', `配置文件: ${getSettingsPath()}`)
+    pushLog('debug', mainT('main.engine.configFile', { path: getSettingsPath() }))
     {
       const loc = getPresetLocation()
-      pushLog('info', `数据目录: ${loc.dir}${loc.writable ? '' : ' — 不可写，无法保存设置与预设'}`)
-      pushLog('debug', `缓存目录: ${dataPaths.cacheDir}`)
+      pushLog(
+        'info',
+        mainT('main.engine.dataDir', { dir: loc.dir }) + (loc.writable ? '' : mainT('main.engine.dataDirReadOnly'))
+      )
+      pushLog('debug', mainT('main.engine.cacheDir', { dir: dataPaths.cacheDir }))
       const logInfo = getPersistedLogInfo()
       pushLog(
         'info',
-        `日志留存: ${logInfo.currentFile || '（未启用）'}（目录共 ${logInfo.fileCount} 个文件 / ${(logInfo.totalBytes / 1024).toFixed(0)} KB，上限 ${(logInfo.budgetBytes / 1024 / 1024).toFixed(0)} MB）`
+        mainT('main.engine.logRetention', {
+          file: logInfo.currentFile || mainT('main.engine.logRetentionOff'),
+          files: logInfo.fileCount,
+          kb: (logInfo.totalBytes / 1024).toFixed(0),
+          mb: (logInfo.budgetBytes / 1024 / 1024).toFixed(0)
+        })
       )
       if (dataPaths.migratedFrom) {
-        pushLog('info', `已从旧位置迁移设置: ${dataPaths.migratedFrom}`)
+        pushLog('info', mainT('main.engine.migrated', { path: dataPaths.migratedFrom }))
       }
       const userCount = listPresets().length
-      pushLog('debug', `已加载 ${userCount} 个自定义预设 + ${BUILTIN_PRESETS.length} 个内置预设`)
+      pushLog('debug', mainT('main.engine.presetsLoaded', { user: userCount, builtin: BUILTIN_PRESETS.length }))
     }
 
     app.on('activate', () => {
@@ -398,7 +450,7 @@ if (!app.requestSingleInstanceLock()) {
       saveTimer = null
     }
     persistPlaylist(playlist)
-    pushLog('info', '应用退出，日志会话已关闭。')
+    pushLog('info', mainT('main.engine.exiting'))
     closeLogSession()
     obs.stop()
   })

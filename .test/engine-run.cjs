@@ -278,7 +278,10 @@ async function main() {
     getFfmpegPath: () => FFMPEG,
     getSettings: () => settings,
     getMedia: (p) => mediaCache.get(p),
-    probeMedia: async (p) => (p === clipA ? infoA : infoB)
+    probeMedia: async (p) => (p === clipA ? infoA : infoB),
+    // The engine writes its log lines through the message table; the driver runs
+    // without the settings store, so it names the language explicitly.
+    getLanguage: () => 'zh'
   })
 
   engine.setSink({
