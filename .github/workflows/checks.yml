@@ -75,6 +75,13 @@ jobs:
       # federicocarboni/setup-ffmpeg, src/dists/johnvansickle.js. Plain bash + curl,
       # no third-party action, so nothing to trust beyond GitHub itself.
       #
+      # Everything lands in $RUNNER_TEMP, never in the checkout: a 40 MB tarball has
+      # no business in the workspace (the first version of this step wrote it there
+      # and died with `curl: (23) Failure writing output to destination`). The sidecar
+      # is piped straight into md5sum so it never hits the disk, and `df` is printed
+      # first because "destination" is the workspace when a download fails, and
+      # knowing how much room it had is the whole diagnosis.
+      #
       # x86_64 is the architecture of every GitHub-hosted Ubuntu runner. The guard is
       # deliberately in the script rather than assumed: without it an architecture
       # change would surface as "cannot execute binary file" from somewhere deep
@@ -85,17 +92,19 @@ jobs:
           [ "$(uname -m)" = x86_64 ] || { echo "::error::this step installs the amd64 build; $(uname -m) would need a different one"; exit 1; }
 
           base=https://johnvansickle.com/ffmpeg
-          version=$(curl -fsSL "$base/release-readme.txt" | awk '/^[[:space:]]*version:/{print $2; exit}')
           archive=ffmpeg-release-amd64-static.tar.xz
+          version=$(curl -fsSL "$base/release-readme.txt" | awk '/^[[:space:]]*version:/{print $2; exit}')
           echo "johnvansickle release $version"
 
+          cd "$RUNNER_TEMP"
+          df -h .
           curl -fsSL -o "$archive" "$base/releases/$archive"
-          curl -fsSL -o "$archive.md5" "$base/releases/$archive.md5"
-          md5sum --check --status "$archive.md5"
+          curl -fsSL "$base/releases/$archive.md5" | md5sum --check --status - \
+            || { echo "::error::$archive failed its md5 check (truncated download, or the publisher replaced the file mid-flight)"; exit 1; }
 
-          mkdir -p "$RUNNER_TEMP/ffmpeg"
-          tar -xJf "$archive" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
-          rm -f "$archive" "$archive.md5"
+          mkdir -p ffmpeg
+          tar -xJf "$archive" -C ffmpeg --strip-components=1
+          rm -f "$archive"
           echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
 
       # Printed rather than assumed: the suite spawns bare `ffmpeg`, so the PATH
