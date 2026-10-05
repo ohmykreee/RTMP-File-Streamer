@@ -1,0 +1,112 @@
+# The gate every other workflow starts with, in one place.
+#
+# `build.yml` (push to `main`, manual) and `release.yml` (release created) used to
+# carry a byte-identical `checks` job each, so the two always drifted apart. They
+# now both `uses:` this file, and the only thing either of them owns is what
+# happens AFTER the gate: build.yml stops at the artifact, release.yml attaches it
+# to the release. Nothing here builds or uploads — it is pass/fail only.
+#
+# Two gates, in this order:
+#   1. typecheck  — `pnpm typecheck` (node + web projects)
+#   2. backend tests — `pnpm run test:unit`: ffmpeg command vectors executed for
+#      real, subtitle burn-in, encoder-lead bounding, a local RTMP push, and the
+#      obs-websocket endpoint over a real socket. This is the whole
+#      non-Electron suite; the Electron suites stay out of CI on purpose.
+#
+# Ubuntu only, on purpose:
+#   * the tests need a real ffmpeg/ffprobe on PATH, and the static Linux build
+#     installed below is how CI gets one without packaging ffmpeg into the app
+#   * the checks say nothing about a platform — the app code under test is
+#     platform-independent JS/TS, and the three packaged builds are compiled on
+#     their own runners afterwards. Running this gate again on macOS or Windows
+#     would only make every build twice as slow
+#   * `runs-on: ubuntu-latest` is a job-level key, so this reusable workflow
+#     cannot be pointed at another runner by a caller
+name: Checks
+
+on:
+  workflow_call:
+
+jobs:
+  checks:
+    name: typecheck + backend tests
+    runs-on: ubuntu-latest
+    # Well above the 10-minute watchdog inside the harness: the watchdog is what
+    # reports a stuck ffmpeg, this is only the backstop for a stuck runner.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@master
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          # Exact version, matching local development: a floating `26` would let the
+          # compiler (and its lib types) drift between CI and a local run.
+          node-version: 26.7.0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.8.1
+
+      # `--ignore-scripts`: nothing here needs a postinstall. In particular this
+      # skips Electron's ~100 MB binary download, which the gate never launches.
+      - name: Prepare workspace
+        run: pnpm ci --ignore-scripts
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      # --- FFmpeg --------------------------------------------------------------
+      # The app deliberately does not bundle ffmpeg/ffprobe (GPL, and large), so a
+      # runner has none and `test:unit` would fail on its first transcode. This build
+      # is picked because it is a single statically-linked tarball that carries
+      # exactly what the suite asserts on: libx264, aac, libass (subtitle burn-in)
+      # and the signalstats filter.
+      #
+      # The URL carries no version: `ffmpeg-release-amd64-static.tar.xz` is the
+      # publisher's "latest" — they overwrite that one file in place, which is also
+      # why a pinned version would be a 404 the day it rotates. The version is read
+      # only to say in the log which build the tests actually ran against, and the
+      # publisher's own md5 sidecar is checked before anything is executed.
+      #
+      # Structure (version read, then archive) follows the johnvansickle installer in
+      # federicocarboni/setup-ffmpeg, src/dists/johnvansickle.js. Plain bash + curl,
+      # no third-party action, so nothing to trust beyond GitHub itself.
+      #
+      # x86_64 is the architecture of every GitHub-hosted Ubuntu runner. The guard is
+      # deliberately in the script rather than assumed: without it an architecture
+      # change would surface as "cannot execute binary file" from somewhere deep
+      # inside the test suite instead of here.
+      - name: Install FFmpeg (static Linux x86_64)
+        run: |
+          set -euo pipefail
+          [ "$(uname -m)" = x86_64 ] || { echo "::error::this step installs the amd64 build; $(uname -m) would need a different one"; exit 1; }
+
+          base=https://johnvansickle.com/ffmpeg
+          version=$(curl -fsSL "$base/release-readme.txt" | awk '/^[[:space:]]*version:/{print $2; exit}')
+          archive=ffmpeg-release-amd64-static.tar.xz
+          echo "johnvansickle release $version"
+
+          curl -fsSL -o "$archive" "$base/releases/$archive"
+          curl -fsSL -o "$archive.md5" "$base/releases/$archive.md5"
+          md5sum --check --status "$archive.md5"
+
+          mkdir -p "$RUNNER_TEMP/ffmpeg"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/ffmpeg" --strip-components=1
+          rm -f "$archive" "$archive.md5"
+          echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
+
+      # Printed rather than assumed: the suite spawns bare `ffmpeg`, so the PATH
+      # wiring has to be shown working, and the burn-in checks need libass to find a
+      # font — a fontless runner otherwise fails inside a black-box transcode.
+      - name: Report the toolchain the tests will use
+        run: |
+          set -euo pipefail
+          ffmpeg -hide_banner -version | head -1
+          which ffmpeg ffprobe
+          fc-match Arial
+
+      - name: Backend tests
+        run: pnpm run test:unit

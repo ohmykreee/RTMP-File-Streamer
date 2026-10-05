@@ -17,6 +17,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { installWatchdog, phase } from './harness-util.mjs'
+import { esbuildCommand } from './find-esbuild.mjs'
 import { obsWebSocketChecks } from './obs-websocket.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -33,21 +34,11 @@ const disarmWatchdog = installWatchdog(600000, 'test:unit')
  * so it is bundled here the same way build-bundles.mjs bundles the builder.
  */
 function bundle(entry, outfile) {
-  const candidates = ['@esbuild+win32-x64@0.25.12', '@esbuild+win32-x64@0.28.2']
-  const store = path.join(root, 'node_modules', '.pnpm')
-  let exe = null
-  const dirs = fs.existsSync(store) ? fs.readdirSync(store).filter((d) => d.startsWith('@esbuild+win32-x64@')) : []
-  for (const dir of [...candidates.filter((c) => dirs.includes(c)), ...dirs]) {
-    const candidate = path.join(store, dir, 'node_modules', '@esbuild', 'win32-x64', 'esbuild.exe')
-    if (fs.existsSync(candidate)) {
-      exe = candidate
-      break
-    }
-  }
-  if (!exe) throw new Error('esbuild not found; run `pnpm install` first')
+  const esbuild = esbuildCommand()
+  if (!esbuild) throw new Error('esbuild not found; run `pnpm install` first')
   const res = spawnSync(
-    exe,
-    [entry, '--bundle', '--platform=node', '--format=esm', `--outfile=${outfile}`, '--alias:@shared=./src/shared', '--alias:@main=./src/main', '--log-level=warning'],
+    esbuild.command,
+    esbuild.args([entry, '--bundle', '--platform=node', '--format=esm', `--outfile=${outfile}`, '--alias:@shared=./src/shared', '--alias:@main=./src/main', '--log-level=warning']),
     { cwd: root, encoding: 'utf8' }
   )
   if (res.status !== 0) throw new Error(`bundle failed for ${entry}:\n${res.stderr || res.stdout}`)

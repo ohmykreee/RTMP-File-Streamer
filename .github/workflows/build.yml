@@ -15,6 +15,11 @@
 #
 # It stops at the artifact on purpose. A merge to `main` is a build, not a
 # publication; attaching to a release is `release.yml`'s job.
+#
+# Three jobs, and only the first one is shared: the gate (`checks.yml` — typecheck
+# plus the backend test suite, on Ubuntu) and then one packaging job per runner.
+# Both packaging jobs `needs: checks`, so a red test stops the build before either
+# runner is spent on it.
 name: Build
 
 on:
@@ -30,34 +35,12 @@ permissions:
   contents: read
 
 jobs:
-  # The gate runs in every workflow that produces something. It is duplicated
-  # rather than shared through a reusable workflow so that each workflow is
-  # self-contained and can be dispatched on its own.
+  # The gate: typecheck plus the backend test suite. It lives in `checks.yml` and is
+  # shared with `release.yml`, so the two cannot drift; it runs on Ubuntu only and
+  # never builds, uploads, or launches Electron.
   checks:
-    name: typecheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@master
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          # Exact version, matching local development: a floating `26` would let the
-          # compiler (and its lib types) drift between CI and a local run.
-          node-version: 26.7.0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 12.8.1
-
-      - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
-
-      - name: Typecheck
-        run: pnpm run typecheck
+    name: checks
+    uses: ./.github/workflows/checks.yml
 
   portable-linux-host:
     name: portable (Windows + Linux, x86_64)

@@ -14,7 +14,7 @@ src/preload/         contextBridge 暴露 window.streamer
 src/renderer/        React 界面
 .test/               自动化验证（unit / e2e 两套入口）
 build/               图标与 data-placeholder（打包时复制成程序目录的 Data/）
-.github/workflows/   build.yml（打包产物）· release.yml（附到 release）—— 见 §2 的说明，checks.yml 已丢失
+.github/workflows/   checks.yml（共用门禁：类型检查 + 后端测试）· build.yml（打包产物）· release.yml（附到 release）—— 见 §2
 ```
 
 产物只有一个：`release/win-unpacked/`（`--dir` 打包，绿色版）。**不生成单文件便携 exe，也不生成 NSIS 安装包**，
@@ -41,7 +41,7 @@ pnpm run test:e2e ui     # 只跑指定套件，可写多个：node .test/e2e.mj
 pnpm run test:ci         # 类型检查 → 构建 → test:unit → test:e2e
 ```
 
-`test:unit` 会按需生成 fixture、打包被测模块，再跑断言；`test:e2e` 需要先 `pnpm build`（`test:ci` 已包含）。
+`test:unit` 会按需生成 fixture、把被测模块从 `src/` 现场打包，再跑断言；`test:e2e` 需要先 `pnpm build`（`test:ci` 已包含）。
 两套都会在首个失败处停下并给出失败项，`e2e` 还带看门狗：某个套件超时会被杀掉并以非零码报告，不会挂住整轮。
 
 **个别断言的阈值贴着实测值，会偶发波动**：`unit` 的「编码领先被压在上限附近」（12s 上限 + 4s 容差，
@@ -60,25 +60,40 @@ pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.
 
 ### CI
 
-仓库当前**只有两个 workflow**（`.github/workflows/`）：
+仓库有**三个 workflow**（`.github/workflows/`），其中一个是共用的门禁：
 
 | 工作流 | 触发 | 做什么 |
 | --- | --- | --- |
-| `build.yml` | push 到 `main`、手动 | 类型检查 → 打包三个平台的**绿色版 zip** → 上传为 artifact（**不上传任何中间产物**） |
-| `release.yml` | release created、手动 | 同上，并把三个 zip **附到该 release**（`softprops/action-gh-release`）；`main` 上的 push 到此为止，不写 release |
+| `checks.yml` | 只被 `workflow_call` 调用 | 类型检查 → **后端测试**（`pnpm run test:unit`）。只在 Ubuntu 上跑，不打包、不上传、不启动 Electron |
+| `build.yml` | push 到 `main`、手动 | 先 `uses: checks.yml`，通过后打包三个平台的**绿色版 zip** → 上传为 artifact（**不上传任何中间产物**） |
+| `release.yml` | release created、手动 | 先 `uses: checks.yml`，再打包 + 最后把三个 zip **附到该 release**（`softprops/action-gh-release`，`if: github.event_name == 'release'`）；手动触发时只验证产物齐全，不写 release |
 
+触发链是**一条直线**：`checks` 先跑，绿了才进打包 job（两个平台的打包 job 都写着 `needs: checks`），
+`release.yml` 再多一个 `attach` job（`needs: [portable-linux-host, portable-macos]`）。
+**两个工作流的差别只剩最后一步**：`build.yml` 停在 artifact，`release.yml` 附到 release。
+门禁本身只有一份实现，两个工作流共用 `checks.yml` —— 以前是各自复制一遍，只会越改越不一样。
+
+**macOS 上不再重复跑门禁**：它只负责编译 macOS 端（`needs: checks` 保证门禁已经绿过）。`runs-on: ubuntu-latest`
+写在 `checks.yml` 的 job 上，是 job 级键，所以调用方也改不了它 —— 门禁就只有 Ubuntu 这一个出口。
+
+- **门禁自带 ffmpeg**：CI 里没有 ffmpeg/ffprobe，而 `test:unit` 会真的转码。`checks.yml` 用纯 bash + curl 拉
+  johnvansickle 的**静态 Linux x86_64** 构建，解到 `$RUNNER_TEMP/ffmpeg` 后写进 `$GITHUB_PATH`。
+  **URL 里没有版本号**：`releases/ffmpeg-release-amd64-static.tar.xz` 就是发布者的「latest」（原地覆盖同一个文件，
+  所以钉版本反而会 404），版本号只从 `release-readme.txt` 读出来打进日志；下载物按对方给的 `.md5` 校验后再解压。
+  **静态构建自带 libx264/aac/libass/signalstats**，正好是这套断言需要的。
+  脚本里那句 `uname -m` 判断是刻意留的：x86_64 是 GitHub 托管 Ubuntu runner 的架构，真变了要在这里报错，
+  而不是让测试套件深处冒出 "cannot execute binary file"
+- **`test:unit` 不需要先 `pnpm build`**：它把所有被测模块从 `src/` 现场 esbuild 打包（`.test/build-bundles.mjs`），
+  所以门禁里没有 electron-vite 构建，`pnpm ci --ignore-scripts` 也就顺带跳过了 Electron 那 ~100 MB 的二进制下载。
+  需要 `out/` 的只有 `test:e2e`
 - 三个产物：`rtmp-file-streamer-win-x86_64.zip`、`rtmp-file-streamer-linux-x86_64.zip`、`rtmp-file-streamer-mac.zip`
 - **Windows 与 Linux 在同一个 Ubuntu job 里交叉构建**（各占一个独立 step），macOS 单独一个 runner：这是 electron-builder 的硬约束，不是选择
 - 压缩用各平台自带工具、纯 bash：Ubuntu 上用 `zip`（保留可执行位，Linux 启动器与 `chrome-sandbox` 解压后需要它），macOS 上用 `ditto`（`.app` 里的符号链接与签名只有它能保住）。**不用 tar.gz**：同一份产物实测 gzip -9 是 153.8 MB，zip 是 151 MB，更大且 Windows 用户更不好打开
 - 工具链与本地开发**完全一致**（见 `package.json` 的 `engines`/`packageManager`），安装命令固定为 `pnpm ci --ignore-scripts`：本项目不依赖任何 postinstall
 
-> **`checks.yml` 与 `.test/validate-workflows.mjs` 目前不在仓库里**：两个文件都存在过，被 `de24988`（提交信息只说改 macOS
-> 架构名）连同一批 Mac 命名改动一起删掉了 —— 该提交删除了 62 行的 `checks.yml`。于是现在**没有任何 PR 级检查**，
-> 而 `build.yml` / `release.yml` 里的类型检查步骤仍以 `npm` 而不是 `pnpm` 运行。要恢复：
-> `git checkout de24988^ -- .github/workflows/checks.yml .test/validate-workflows.mjs`（见 TODO）。
-
-**测试套件不进 CI 是有意的**：命令层会真的转码、烧字幕、本地推流，而本项目刻意不打包 ffmpeg，所以 CI 里没有可用的
-ffmpeg/ffprobe。想让 CI 也跑测试，先读 TODO §4 的取舍。
+**Electron 那套 e2e 仍然不进 CI**（要窗口、要 CDP、要打包产物），CI 只跑非 Electron 的 `test:unit`。
+门禁在 Ubuntu 上跑，所以断言里的时间阈值（见本节上面的「偶发波动」）会比开发机更容易贴边：
+真红了先单独重跑一次再判断是不是回归。
 
 ### 随包附带 FFmpeg（可选）
 
@@ -241,8 +256,10 @@ fd 3  `-progress`   -> 机器可读进度，用来算时间轴
 - **kill 是异步的**。被杀进程的数据和 exit 事件都还会到达；不按身份过滤就会污染转发流、并把完成事件算到别的段上
 - **临时目录会泄漏**：`Playout` 在 `os.tmpdir()` 建 `rtmp-streamer-*`。`stop()` 会清自己的，但被 kill 的进程不会。
   现在**构造时会扫掉 1 小时前的同类目录**（`sweepStaleTempDirs()`），不要删掉它
-- **esbuild 不要直接执行 `node_modules/.pnpm/@esbuild+win32-x64@*/.../esbuild.exe`**，用
-  `.test/build-bundles.mjs` 里已经写好的解析逻辑
+- **esbuild 的路径不要各处内联**，用 `.test/find-esbuild.mjs` 的 `esbuildCommand()`：它按当前平台找
+  `@esbuild/<platform>-<arch>`（pnpm 的 isolated 布局下就在 `.pnpm` 里），找不到才退回 `bin/esbuild` 那个 JS shim
+  （shim 也叫 `esbuild`，只能靠「谁来执行」区分，所以返回的是 `{ command, args() }`）。
+  写死 `win32-x64` 的旧版本让整套非 Electron 测试在 Linux CI 上直接死在打包阶段
 - **引擎测试的 ingest 用 `ffmpeg -listen 1`，一次只接受一个连接**。双引擎的跳转会重开会话，所以测试必须等下一个
   listener 就绪（`waitForListener()`），否则会把"ingest 没准备好"误判成"推流失败"
 - **`-listen 1` 写的 FLV 头部是坏的**（管道上无法回写 filesize/duration），测试里用 `patchFlvHeader()` 就地修。

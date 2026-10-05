@@ -14,39 +14,15 @@
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { esbuildCommand } from './find-esbuild.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
-const require = createRequire(import.meta.url)
 
-/** esbuild ships a native binary; resolve it through pnpm's isolated store. */
-function resolveEsbuild() {
-  const candidates = [
-    path.join(root, 'node_modules', 'esbuild', 'bin', 'esbuild'),
-    path.join(root, 'node_modules', '@esbuild', 'win32-x64', 'esbuild.exe')
-  ]
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c
-  }
-  const store = path.join(root, 'node_modules', '.pnpm')
-  if (fs.existsSync(store)) {
-    for (const dir of fs.readdirSync(store)) {
-      if (!dir.startsWith('@esbuild+win32-x64@')) continue
-      const exe = path.join(store, dir, 'node_modules', '@esbuild', 'win32-x64', 'esbuild.exe')
-      if (fs.existsSync(exe)) return exe
-    }
-  }
-  // Fall back to the JS entry point executed through node.
-  try {
-    return require.resolve('esbuild/bin/esbuild')
-  } catch {
-    return null
-  }
-}
-
-const esbuild = resolveEsbuild()
+/* esbuild ships a native binary per platform; `.test/find-esbuild.mjs` knows where
+ * pnpm's isolated store keeps the one for the machine this is running on. */
+const esbuild = esbuildCommand()
 if (!esbuild) {
   console.error('esbuild not found; run `pnpm install` first')
   process.exit(1)
@@ -102,9 +78,7 @@ for (const t of targets) {
   ]
   for (const e of t.external ?? []) args.push(`--external:${e}`)
 
-  const runner = esbuild.endsWith('.exe') || esbuild.endsWith('esbuild') ? esbuild : process.execPath
-  const finalArgs = runner === process.execPath ? [esbuild, ...args] : args
-  const res = spawnSync(runner, finalArgs, { cwd: root, encoding: 'utf8' })
+  const res = spawnSync(esbuild.command, esbuild.args(args), { cwd: root, encoding: 'utf8' })
   if (res.status !== 0) {
     console.error(`build failed for ${t.entry}:\n${res.stderr || res.stdout}`)
     process.exit(1)

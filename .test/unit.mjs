@@ -8,6 +8,10 @@
  *                  transcodes, a local RTMP listener, and the obs-websocket
  *                  protocol against a real TCP client)
  *
+ * Every module under test is bundled from `src/`, so this run does NOT need
+ * `pnpm build` first — that is what lets CI treat it as the backend gate without
+ * paying for an electron-vite build it would otherwise throw away.
+ *
  * Everything log-worthy goes to stdout unchanged; this file only sequences the
  * stages and fails fast with the stage name.
  */
@@ -31,11 +35,6 @@ function step(label, script, args = []) {
 
 /** The clips every downstream suite streams from. */
 const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_d.mp4', 'clip_a.srt', 'clip_emb.mkv']
-
-if (!fs.existsSync(path.join(root, 'out', 'main', 'index.js'))) {
-  console.error('Build output missing. Run `pnpm build` first (or use `pnpm test`, which builds).')
-  process.exit(1)
-}
 
 const missing = FIXTURES.filter((f) => !fs.existsSync(path.join(here, f)))
 if (missing.length > 0) {

@@ -8,6 +8,10 @@
 # Same build layout as `build.yml`: Windows and Linux in one Ubuntu job, each as a
 # self-contained package→archive→upload step, and macOS on its own runner because
 # electron-builder will not build for darwin anywhere else.
+#
+# The gate is the same file `build.yml` uses (`checks.yml`: typecheck + backend
+# tests, Ubuntu only). Only the last job differs — this workflow attaches the
+# archives to the release, `build.yml` stops at the artifacts.
 name: Release
 
 on:
@@ -22,28 +26,8 @@ permissions:
 
 jobs:
   checks:
-    name: typecheck
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@master
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 26.7.0
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: 12.8.1
-
-      - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
-
-      - name: Typecheck
-        run: pnpm run typecheck
+    name: checks
+    uses: ./.github/workflows/checks.yml
 
   portable-linux-host:
     name: portable (Windows + Linux, x86_64)
@@ -114,6 +98,7 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+
   portable-macos:
     name: portable (macOS)
     needs: checks
@@ -165,6 +150,10 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  # The one job that makes this workflow different from `build.yml`. It runs on
+  # both triggers so a manual run still proves all three archives were produced
+  # and collected; only the upload itself is reserved for a real release event,
+  # because a dispatch carries no release to attach to.
   attach:
     name: attach to release
     needs: [portable-linux-host, portable-macos]
