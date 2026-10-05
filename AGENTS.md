@@ -169,11 +169,33 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
 
 ## 9. Release note
 
-发版时输出一份 release note（英文），**只分点列修改项，一条一句话**。
+发版时输出一份 release note（英文），结构固定为五个分类，每个修改项一条 bullet，**一条一句话**：
 
-- 一句话说清「改了什么、对谁有影响」，不写为什么这么改、不贴 diff、不复述提交信息
-- 按类分组（用户可见 / CI 构建 / 内部清理 / 文档），组内按重要性排
-- 破坏性变更、需要用户手动操作的、以及已知未验证的部分单独点出来
+```
+UI:
+- <what changed, and what it means for the user>
+
+Backend:
+- <engine / IPC / 存储 / 命令构建 层面的改动>
+
+CI/CD:
+- <workflow 与流水线的改动>
+
+Chores:
+- <清理与重构>
+
+Docs:
+- <文档改动>
+```
+
+- **分类固定五个，顺序固定**：`UI` / `Backend` / `CI/CD` / `Chores` / `Docs`。某类没有内容就整类省略，不要留空标题，
+  不要临时发明新分类
+- 一条一句话：说清「改了什么、对谁有影响」。不写为什么这么改、不贴 diff、不复述提交信息
+- 功能开发与功能移除**都要写**，不要只记清理项
+- 技术标识符（文件名、选项名、函数名、配置键）**只在能帮读者定位时才出现**：`settings.json`、`.test/hls/` 这类
+  路径和 `.github/workflows/checks.yml` 这种要照做的名称值得写；代码行号、内部函数名不值得
+- 不用加粗、不用嵌套列表、不写「Overview / 验证 / 提交列表 / 安装说明」这类小节 —— 只有分类与 bullet
+- 破坏性变更、需要用户手动操作的、以及已知未验证的部分，各自单独一条 bullet 并在句子里点明
 - 最终版本号只写在 `package.json`（`app.getVersion()` 会读它），release note 里不要复制一份会被忘记同步的版本号
 
 ## 10. 文档只写关键信息
