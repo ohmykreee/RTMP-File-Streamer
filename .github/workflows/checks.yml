@@ -59,63 +59,58 @@ jobs:
         run: pnpm run typecheck
 
       # --- FFmpeg --------------------------------------------------------------
-      # The app deliberately does not bundle ffmpeg/ffprobe (GPL, and large), so a
-      # runner has none and `test:unit` would fail on its first transcode. This build
-      # is picked because it is a single statically-linked tarball that carries
-      # exactly what the suite asserts on: libx264, aac, libass (subtitle burn-in)
-      # and the signalstats filter.
+      # The app deliberately does not bundle ffmpeg/ffprobe (GPL, and large), and the
+      # Ubuntu runner image does not preinstall it, so the gate installs it — from the
+      # distribution's own archive, which is the distro-sanctioned way to get it and
+      # comes with Canonical's security updates.
       #
-      # The URL carries no version: `ffmpeg-release-amd64-static.tar.xz` is the
-      # publisher's "latest" — they overwrite that one file in place, which is also
-      # why a pinned version would be a 404 the day it rotates. The version is read
-      # only to say in the log which build the tests actually ran against, and the
-      # publisher's own md5 sidecar is checked before anything is executed.
+      # `libavcodec-extra` is NOT optional here. Ubuntu splits the GPL/patent-encumbered
+      # encoders out of the base library: plain `ffmpeg` depends on the plain
+      # `libavcodec<NN>`, while the `-extra` build is the one that links libx264,
+      # libx265, libmp3lame and libopus. The suite really encodes with libx264 (fixture
+      # generation, the burn-in transcode, the "copy falls back to software" case) and
+      # asserts on libx265, so without it a batch of checks fail with "Unknown encoder".
+      # The extra package installs the same shared object the base one would, so
+      # `ffmpeg` itself needs no swap — it just gains the encoders.
       #
-      # Structure (version read, then archive) follows the johnvansickle installer in
-      # federicocarboni/setup-ffmpeg, src/dists/johnvansickle.js. Plain bash + curl,
-      # no third-party action, so nothing to trust beyond GitHub itself.
+      # What the checks then run against is Canonical's build for whichever Ubuntu the
+      # runner is on. `ubuntu-latest` is 24.04 today (FFmpeg 6.1.1) and is announced to
+      # become 26.04 during 2026 (FFmpeg 8.0.1); both ship the encoders and filters
+      # this suite uses, and the install line below needs no change between them
+      # because `libavcodec-extra` is a version-less metapackage (24.04 resolves it to
+      # libavcodec-extra60, 26.04 to libavcodec-extra62) that pulls the same GPL
+      # encoder set in either release.
       #
-      # Everything lands in $RUNNER_TEMP, never in the checkout: a 40 MB tarball has
-      # no business in the workspace (the first version of this step wrote it there
-      # and died with `curl: (23) Failure writing output to destination`). The sidecar
-      # is piped straight into md5sum so it never hits the disk, and `df` is printed
-      # first because "destination" is the workspace when a download fails, and
-      # knowing how much room it had is the whole diagnosis.
-      #
-      # x86_64 is the architecture of every GitHub-hosted Ubuntu runner. The guard is
-      # deliberately in the script rather than assumed: without it an architecture
-      # change would surface as "cannot execute binary file" from somewhere deep
-      # inside the test suite instead of here.
-      - name: Install FFmpeg (static Linux x86_64)
+      # The deliberate trade: a distro-maintained, signed build that is what a user
+      # running this app on Ubuntu actually has, over a newer tarball from a
+      # third-party site — and no 40 MB download for the gate to get wrong. Neither
+      # release is the upstream tip; the point is that the suite runs against a real
+      # distribution build, not against whatever is newest today.
+      - name: Install FFmpeg (Ubuntu archive)
         run: |
-          set -euo pipefail
-          [ "$(uname -m)" = x86_64 ] || { echo "::error::this step installs the amd64 build; $(uname -m) would need a different one"; exit 1; }
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg libavcodec-extra
 
-          base=https://johnvansickle.com/ffmpeg
-          archive=ffmpeg-release-amd64-static.tar.xz
-          version=$(curl -fsSL "$base/release-readme.txt" | awk '/^[[:space:]]*version:/{print $2; exit}')
-          echo "johnvansickle release $version"
-
-          cd "$RUNNER_TEMP"
-          df -h .
-          curl -fsSL -o "$archive" "$base/releases/$archive"
-          curl -fsSL "$base/releases/$archive.md5" | md5sum --check --status - \
-            || { echo "::error::$archive failed its md5 check (truncated download, or the publisher replaced the file mid-flight)"; exit 1; }
-
-          mkdir -p ffmpeg
-          tar -xJf "$archive" -C ffmpeg --strip-components=1
-          rm -f "$archive"
-          echo "$RUNNER_TEMP/ffmpeg" >> "$GITHUB_PATH"
-
-      # Printed rather than assumed: the suite spawns bare `ffmpeg`, so the PATH
-      # wiring has to be shown working, and the burn-in checks need libass to find a
-      # font — a fontless runner otherwise fails inside a black-box transcode.
+      # Verified rather than assumed, because everything below is real transcoding:
+      # a build without the encoders, or without a font for libass to draw with, would
+      # otherwise fail deep inside a black-box encode where the cause is invisible.
+      # The subtitle sample is generated here rather than read from `.test/` — those
+      # fixtures do not exist yet, they are made by `test:unit` further down.
       - name: Report the toolchain the tests will use
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           ffmpeg -hide_banner -version | head -1
+          # `which`, not a hardcoded path: this is what proves the install landed on PATH.
           which ffmpeg ffprobe
-          fc-match Arial
+          ffmpeg -hide_banner -filters | grep -E ' (subtitles|signalstats|metadata) ' \
+            || { echo "::error::this ffmpeg is missing subtitles/signalstats/metadata"; exit 1; }
+          # The suite asserts on rendered subtitle pixels, so "libass can draw text"
+          # gets its own line instead of surfacing as a mystery YMAX=0 later.
+          printf '1\n00:00:00,000 --> 00:00:01,000\nfont probe\n' > "$RUNNER_TEMP/probe.srt"
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=black:s=320x240:d=1 \
+            -vf "subtitles=$RUNNER_TEMP/probe.srt" -frames:v 1 -f null - \
+            || { echo "::error::the subtitles filter cannot render text — the burn-in checks will fail"; exit 1; }
 
       - name: Backend tests
         run: pnpm run test:unit

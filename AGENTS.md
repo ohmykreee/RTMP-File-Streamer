@@ -76,13 +76,11 @@ pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.
 **macOS 上不再重复跑门禁**：它只负责编译 macOS 端（`needs: checks` 保证门禁已经绿过）。`runs-on: ubuntu-latest`
 写在 `checks.yml` 的 job 上，是 job 级键，所以调用方也改不了它 —— 门禁就只有 Ubuntu 这一个出口。
 
-- **门禁自带 ffmpeg**：CI 里没有 ffmpeg/ffprobe，而 `test:unit` 会真的转码。`checks.yml` 用纯 bash + curl 拉
-  johnvansickle 的**静态 Linux x86_64** 构建，解到 `$RUNNER_TEMP/ffmpeg` 后写进 `$GITHUB_PATH`。
-  **URL 里没有版本号**：`releases/ffmpeg-release-amd64-static.tar.xz` 就是发布者的「latest」（原地覆盖同一个文件，
-  所以钉版本反而会 404），版本号只从 `release-readme.txt` 读出来打进日志；下载物按对方给的 `.md5` 校验后再解压。
-  **静态构建自带 libx264/aac/libass/signalstats**，正好是这套断言需要的。
-  脚本里那句 `uname -m` 判断是刻意留的：x86_64 是 GitHub 托管 Ubuntu runner 的架构，真变了要在这里报错，
-  而不是让测试套件深处冒出 "cannot execute binary file"
+- **门禁自带 ffmpeg**：CI 里没有 ffmpeg/ffprobe（runner 镜像不预装），而 `test:unit` 会真的转码，所以门禁直接从
+  **Ubuntu 官方源**装：`apt-get install -y --no-install-recommends ffmpeg libavcodec-extra`。
+  - **`libavcodec-extra` 不能省**：Ubuntu 把 GPL/专利相关的编码器拆到 `-extra` 变体里，基础 `ffmpeg` 依赖的是普通
+    `libavcodec<NN>`。测试真的用 `libx264` 编码（fixture 生成、烧字幕转码、"复制回退软件编码"），还断言 `libx265`，
+    缺了会一片 `Unknown encoder`。两个变体装的是同一个 `.so`，所以 `ffmpeg` 二进制不用换，只是多了编码器
 - **`test:unit` 不需要先 `pnpm build`**：它把所有被测模块从 `src/` 现场 esbuild 打包（`.test/build-bundles.mjs`），
   所以门禁里没有 electron-vite 构建，`pnpm ci --ignore-scripts` 也就顺带跳过了 Electron 那 ~100 MB 的二进制下载。
   需要 `out/` 的只有 `test:e2e`
