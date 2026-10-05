@@ -103,11 +103,16 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
   非法字节换成 U+FFFD 后不可逆，整条链路静默失效）
 - **挂 `data` 监听前想清楚要不要 pause**：`on('data')` 让流进入 flowing，之后 `pause()` 已经晚了
 - **kill 是异步的**：被杀进程的数据与 exit 事件还会到达，不按身份过滤会污染转发流、把完成事件算到别的段上
-- **esbuild 只能从 pnpm store 找**（`.pnpm/@esbuild+<platform>-<arch>@<ver>/…` 原生二进制，或
-  `.pnpm/esbuild@<ver>/node_modules/esbuild/bin/esbuild` 兜底）：顶层没有 `.bin/esbuild`，`require.resolve` 也
-  `MODULE_NOT_FOUND`。逻辑内联在 `.test/build-bundles.mjs` 与 `.test/harness.mjs`
-- **不要用 `--ignore-scripts` 绕 build script**：esbuild 的 postinstall 正是提供上面那个二进制的步骤，
-  跳过就 `esbuild not found`（踩过两次）
+- **打包被测模块走 esbuild 的 JS API（`require('esbuild').buildSync()`），不要去找它的 CLI**：两次踩坑都出在
+  「文件在哪、是什么格式」上 —— 顶层没有 `.bin/esbuild`，esbuild 只当传递依赖时 `require.resolve` 报
+  `MODULE_NOT_FOUND`；而 `esbuild/bin/esbuild` 的**磁盘格式随平台变**（Linux 是原生 ELF、Windows 是 POSIX
+  `/bin/sh` 脚本，pnpm 还会另写 `.cmd`），猜错就把 ELF 头喂给 node 报 SyntaxError。API 自己解析平台二进制
+- **`esbuild` 必须是直接依赖**（`devDependencies`；`optionalDependencies` 里另钉 `@esbuild/linux-x64`）：只当传递依赖时
+  CI 上 `@esbuild/<platform>` 平台包不会被装上，esbuild 运行时报
+  `The package "@esbuild/linux-x64" could not be found`（踩过）。平台包用 optional 声明是因为 pnpm 只装匹配本机的
+  那一个，`os` 不匹配时**静默跳过而不报错**（Windows 上实测：锁文件记录、不下载、不报错）
+- **不要用 `--ignore-scripts` 绕 build script**：esbuild 的 postinstall 正是让它找到平台二进制的步骤，
+  跳过就在打包阶段直接死（踩过）
 - **测试 ingest 是 `ffmpeg -listen 1`，一次只接一个连接**：跳转会重开会话，必须 `waitForListener()`；
   它对管道写的 FLV 头是坏的，用 `patchFlvHeader()` 就地修（9 字节头 + 4 字节 PreviousTagSize，第一个 tag 在
   偏移 13，字节 5..8 是 DataOffset 必须保持 9）

@@ -27,6 +27,10 @@
     "test": "pnpm run test:unit"
   },
   "dependencies": {},
+  "//esbuild": "Direct, not just transitive (vite and electron-vite each pull one in): the .test entry points bundle the modules under test with this exact package, so it is declared here and not left to resolution. CI proved that matters — with esbuild only transitive, its platform binary (@esbuild/<platform>-<arch>, an optionalDependency) was never installed on Linux and the whole non-Electron suite died at the bundling step.",
+  "optionalDependencies": {
+    "@esbuild/linux-x64": "^0.28.2"
+  },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
@@ -35,6 +39,7 @@
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
+    "esbuild": "^0.28.2",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "typescript": "^5.9.3",

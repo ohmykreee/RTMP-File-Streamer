@@ -12,12 +12,16 @@
  *
  * Usage: node .test/harness.mjs
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { installWatchdog, phase } from './harness-util.mjs'
 import { obsWebSocketChecks } from './obs-websocket.mjs'
+
+const require = createRequire(import.meta.url)
+const esbuild = require('esbuild')
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -29,41 +33,26 @@ const FFPROBE = process.env.FFPROBE_BIN ?? 'ffprobe'
 const disarmWatchdog = installWatchdog(600000, 'test:unit')
 
 /*
- * esbuild is a transitive dependency and this repo uses pnpm's isolated linker, so it
- * is not reachable from the root `node_modules` — the same lookup build-bundles.mjs
- * does, kept next to its one use here rather than in a file of its own. The fallback
- * runs esbuild's JS shim under node so that no `shell: true` is ever needed.
- */
-const esbuildPlatform = `${process.platform}-${process.arch}`
-const esbuildBinary = process.platform === 'win32' ? 'esbuild.exe' : 'esbuild'
-const esbuildStore = path.join(root, 'node_modules', '.pnpm')
-const esbuildExe = fs
-  .readdirSync(esbuildStore)
-  .filter((entry) => entry.startsWith(`@esbuild+${esbuildPlatform}@`))
-  .sort()
-  .map((entry) => path.join(esbuildStore, entry, 'node_modules', '@esbuild', esbuildPlatform, esbuildBinary))
-  .find((candidate) => fs.existsSync(candidate))
-const esbuildShim = esbuildExe
-  ? null
-  : fs
-      .readdirSync(esbuildStore)
-      .filter((entry) => entry.startsWith('esbuild@'))
-      .sort()
-      .map((entry) => path.join(esbuildStore, entry, 'node_modules', 'esbuild', 'bin', 'esbuild'))
-      .find((candidate) => fs.existsSync(candidate))
-
-/*
- * `src/main/obs/websocket.ts` is TypeScript with the repo's `@shared` aliases,
- * so it is bundled here the same way build-bundles.mjs bundles the builder.
+ * `src/main/obs/websocket.ts` is TypeScript with the repo's `@shared` aliases, so it is
+ * bundled here the same way build-bundles.mjs bundles the builder — through esbuild's
+ * JavaScript API, which resolves its own platform binary. See that file for why the CLI
+ * is not used (its on-disk format differs per platform, and CI died on exactly that).
  */
 function bundle(entry, outfile) {
-  const cliArgs = [entry, '--bundle', '--platform=node', '--format=esm', `--outfile=${outfile}`, '--alias:@shared=./src/shared', '--alias:@main=./src/main', '--log-level=warning']
-  if (!esbuildExe && !esbuildShim) throw new Error('esbuild not found; run `pnpm install` first')
-  const res = spawnSync(esbuildExe ?? process.execPath, esbuildExe ? cliArgs : [esbuildShim, ...cliArgs], {
-    cwd: root,
-    encoding: 'utf8'
-  })
-  if (res.status !== 0) throw new Error(`bundle failed for ${entry}:\n${res.stderr || res.stdout}`)
+  try {
+    esbuild.buildSync({
+      entryPoints: [entry],
+      outfile,
+      bundle: true,
+      platform: 'node',
+      format: 'esm',
+      alias: { '@shared': './src/shared', '@main': './src/main' },
+      logLevel: 'warning'
+    })
+  } catch {
+    // esbuild already printed the offending line and its source position.
+    throw new Error(`bundle failed for ${entry}`)
+  }
   return outfile
 }
 
