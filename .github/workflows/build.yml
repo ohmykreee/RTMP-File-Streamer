@@ -61,11 +61,18 @@ jobs:
         with:
           version: 12.8.1
 
-      # `--ignore-scripts`: nothing here needs a postinstall step. electron-builder
-      # fetches the Electron binary for each target itself, so skipping `electron`'s
-      # own download is not just safe, it avoids fetching the same payload twice.
+      # Build scripts RUN here, and `pnpm-workspace.yaml` decides which: its
+      # `allowBuilds` allowlist covers electron, esbuild and electron-winstaller, and
+      # everything else stays blocked.
+      #
+      # `--ignore-scripts` used to be here on the theory that electron-builder fetches
+      # the Electron binary itself, so skipping `electron`'s own download avoided
+      # fetching it twice. That theory is wrong: electron-builder packages the runtime
+      # that `electron`'s postinstall already put in node_modules, so with the flag the
+      # binary is simply absent. It also does not fetch per-target runtimes — the
+      # packaging targets are directories, not installers.
       - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
+        run: pnpm ci
 
       - name: Report the toolchain
         run: |
@@ -151,8 +158,10 @@ jobs:
         with:
           version: 12.8.1
 
+      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
+      # which build scripts run. See the Windows/Linux job above.
       - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
+        run: pnpm ci
 
       - name: Build the app bundles
         run: pnpm run build

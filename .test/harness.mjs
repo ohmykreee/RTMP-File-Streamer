@@ -17,7 +17,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { installWatchdog, phase } from './harness-util.mjs'
-import { esbuildCommand } from './find-esbuild.mjs'
 import { obsWebSocketChecks } from './obs-websocket.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -30,17 +29,40 @@ const FFPROBE = process.env.FFPROBE_BIN ?? 'ffprobe'
 const disarmWatchdog = installWatchdog(600000, 'test:unit')
 
 /*
+ * esbuild is a transitive dependency and this repo uses pnpm's isolated linker, so it
+ * is not reachable from the root `node_modules` — the same lookup build-bundles.mjs
+ * does, kept next to its one use here rather than in a file of its own. The fallback
+ * runs esbuild's JS shim under node so that no `shell: true` is ever needed.
+ */
+const esbuildPlatform = `${process.platform}-${process.arch}`
+const esbuildBinary = process.platform === 'win32' ? 'esbuild.exe' : 'esbuild'
+const esbuildStore = path.join(root, 'node_modules', '.pnpm')
+const esbuildExe = fs
+  .readdirSync(esbuildStore)
+  .filter((entry) => entry.startsWith(`@esbuild+${esbuildPlatform}@`))
+  .sort()
+  .map((entry) => path.join(esbuildStore, entry, 'node_modules', '@esbuild', esbuildPlatform, esbuildBinary))
+  .find((candidate) => fs.existsSync(candidate))
+const esbuildShim = esbuildExe
+  ? null
+  : fs
+      .readdirSync(esbuildStore)
+      .filter((entry) => entry.startsWith('esbuild@'))
+      .sort()
+      .map((entry) => path.join(esbuildStore, entry, 'node_modules', 'esbuild', 'bin', 'esbuild'))
+      .find((candidate) => fs.existsSync(candidate))
+
+/*
  * `src/main/obs/websocket.ts` is TypeScript with the repo's `@shared` aliases,
  * so it is bundled here the same way build-bundles.mjs bundles the builder.
  */
 function bundle(entry, outfile) {
-  const esbuild = esbuildCommand()
-  if (!esbuild) throw new Error('esbuild not found; run `pnpm install` first')
-  const res = spawnSync(
-    esbuild.command,
-    esbuild.args([entry, '--bundle', '--platform=node', '--format=esm', `--outfile=${outfile}`, '--alias:@shared=./src/shared', '--alias:@main=./src/main', '--log-level=warning']),
-    { cwd: root, encoding: 'utf8' }
-  )
+  const cliArgs = [entry, '--bundle', '--platform=node', '--format=esm', `--outfile=${outfile}`, '--alias:@shared=./src/shared', '--alias:@main=./src/main', '--log-level=warning']
+  if (!esbuildExe && !esbuildShim) throw new Error('esbuild not found; run `pnpm install` first')
+  const res = spawnSync(esbuildExe ?? process.execPath, esbuildExe ? cliArgs : [esbuildShim, ...cliArgs], {
+    cwd: root,
+    encoding: 'utf8'
+  })
   if (res.status !== 0) throw new Error(`bundle failed for ${entry}:\n${res.stderr || res.stdout}`)
   return outfile
 }

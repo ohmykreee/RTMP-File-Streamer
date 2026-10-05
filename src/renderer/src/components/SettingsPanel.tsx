@@ -584,13 +584,10 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 )}
 
                 <p className="hint small">
-                  {/* Split around the inline <code> and the conditional <strong>, so
-                      each language can order the pieces its own way. */}
+                  {/* Split around the conditional <strong> so each language can order
+                      the two pieces its own way. */}
                   {t('settings.subtitle.burnHint1')}
-                  <code>subtitles</code>
-                  {t('settings.subtitle.burnHint2')}
                   {caps && !caps.hasSubtitleFilter && <strong className="warn">{t('settings.subtitle.burnHint3')}</strong>}
-                  {t('settings.subtitle.burnHint4')}
                 </p>
               </>
             )}
@@ -780,12 +777,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
                 <p className="hint small">
                   {t('settings.obs.compatHint1')}
-                  <code> SetStreamServiceSettings</code>
                   {t('settings.obs.compatHint2')}
-                  <code>StartStream</code>
-                  {t('settings.obs.compatHint3')}
-                  <code>StopStream</code>
-                  {t('settings.obs.compatHint4')}
                 </p>
               </>
             )}

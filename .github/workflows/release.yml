@@ -48,8 +48,11 @@ jobs:
         with:
           version: 12.8.1
 
+      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
+      # which build scripts run, and `electron`'s is required — electron-builder
+      # packages the runtime that postinstall puts in node_modules.
       - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
+        run: pnpm ci
 
       - name: Build the app bundles
         run: pnpm run build
@@ -118,8 +121,13 @@ jobs:
         with:
           version: 12.8.1
 
+      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
+      # which build scripts run. macOS needs `electron`'s, and pays for
+      # `electron-winstaller`'s 30 MB 7z download, which only serves the Squirrel/NSIS
+      # installers this project does not build — dropping that entry from the allowlist
+      # is the way to get rid of it.
       - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
+        run: pnpm ci
 
       - name: Build the app bundles
         run: pnpm run build

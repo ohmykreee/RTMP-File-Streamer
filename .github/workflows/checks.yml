@@ -50,10 +50,18 @@ jobs:
         with:
           version: 12.8.1
 
-      # `--ignore-scripts`: nothing here needs a postinstall. In particular this
-      # skips Electron's ~100 MB binary download, which the gate never launches.
+      # Build scripts RUN here, and `pnpm-workspace.yaml` decides which: its
+      # `allowBuilds` allowlist covers electron, esbuild and electron-winstaller, and
+      # everything else stays blocked. That allowlist is the reason this is a plain
+      # install — `--ignore-scripts` was tried and it broke the gate, because esbuild's
+      # postinstall is what puts the native binary in place, and `test:unit` bundles
+      # its modules with esbuild.
+      #
+      # The cost is Electron's ~368 MB binary, which this job never launches. Paying it
+      # is the deliberate trade: one dependency-resolution rule for all three workflows
+      # instead of a flag that silently changes what "install" means.
       - name: Prepare workspace
-        run: pnpm ci --ignore-scripts
+        run: pnpm ci
 
       - name: Typecheck
         run: pnpm run typecheck
