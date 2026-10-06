@@ -1010,6 +1010,25 @@ code {
   cursor: not-allowed;
 }
 
+/* Push address + protocol dropdown on one row: the input takes the room,
+   the select stays a fixed narrow column, mirroring the unit-input pattern. */
+.addr-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.addr-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+}
+
+.addr-row select {
+  width: 150px;
+  flex-shrink: 0;
+}
+
 /* Stream key: masked input with a reveal toggle. */
 .secret-row {
   display: flex;

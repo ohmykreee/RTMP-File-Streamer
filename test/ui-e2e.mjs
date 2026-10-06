@@ -4,12 +4,13 @@
  * (click 开始串流, then 下一个文件), and verifies that a listening RTMP endpoint
  * receives the stream.
  *
- * Usage: node .test/ui-e2e.mjs
+ * Usage: node test/ui-e2e.mjs
  */
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { electronEnv } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -149,6 +150,9 @@ fs.writeFileSync(
   JSON.stringify(
     {
       ...savedSettings,
+      // Debug output is off by default now; the log-panel checks below count
+      // entry levels across both writers, which needs debug entries present.
+      debugLogging: true,
       session: { ...(savedSettings.session ?? {}), output },
       /*
        * The saved language is reset alongside the output block, for the same reason:
@@ -174,7 +178,7 @@ note('app settings retargeted', output.server)
  */
 const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
+  env: electronEnv()
 })
 let appLog = ''
 appProc.stdout?.on('data', (d) => (appLog += d.toString()))

@@ -7,6 +7,7 @@ import type {
   MediaStreamInfo,
   PlaylistItem,
   SessionSettings,
+  StreamProtocol,
   SubtitleRenderSettings,
   SubtitleTrackRef,
   VideoCodecName,
@@ -14,8 +15,14 @@ import type {
 } from '@shared/types'
 import type { Translate, TranslationKey } from '@shared/i18n'
 import { translatorFor } from '@shared/i18n'
-import { CONTAINER_MUXER } from '@shared/defaults'
-import { buildRtmpTarget } from '@shared/rtmp'
+import {
+  buildPushTarget,
+  containerForProtocol,
+  DEFAULT_STREAM_PROTOCOL,
+  muxerForProtocol,
+  networkForProtocol,
+  protocolKeyArgs
+} from '@shared/protocol'
 import { encoderArgFor, getAvailableEncoderNames } from './capabilities'
 
 /**
@@ -298,7 +305,7 @@ function applyVideoEncoderArgs(
   v: VideoSettings,
   spec: EncoderSpec,
   fps: number,
-  container: ContainerName
+  container: ContainerName | null
 ): void {
   const gopFrames = v.keyframeIntervalSec > 0 ? Math.max(1, Math.round(fps * v.keyframeIntervalSec)) : 0
   const bf = Math.max(0, Math.min(4, v.bFrames))
@@ -445,10 +452,30 @@ function applyAudioArgs(args: string[], a: AudioSettings, filters: string[], sou
  * the video track is dropped or left undecodable, so the user must be told
  * rather than left guessing why the picture is black.
  */
-function flvCodecWarning(codec: VideoCodecName, container: ContainerName, t: Translate<TranslationKey>): string | null {
+function flvCodecWarning(codec: VideoCodecName, container: ContainerName | null, t: Translate<TranslationKey>): string | null {
   if (container !== 'flv') return null
   if (codec === 'hevc') return t('main.cmd.hevcEnhancedRtmp')
   if (codec === 'av1') return t('main.cmd.av1EnhancedRtmp')
+  return null
+}
+
+/**
+ * Codec warning for WHIP targets.
+ *
+ * WebRTC ingest only accepts the codecs the WebRTC stack can carry, and ffmpeg's
+ * WHIP muxer does not transcode: H.264 video and Opus audio. Anything else fails
+ * at the server (or produces a stream no player can render), which is far less
+ * clear than saying so up front.
+ */
+function whipCodecWarning(
+  protocol: StreamProtocol | undefined,
+  v: VideoSettings,
+  a: AudioSettings,
+  t: Translate<TranslationKey>
+): string | null {
+  if ((protocol ?? DEFAULT_STREAM_PROTOCOL) !== 'whip') return null
+  if (v.codec !== 'h264') return t('main.cmd.whipNeedsH264')
+  if (a.codec !== 'libopus' && a.codec !== 'none') return t('main.cmd.whipNeedsOpus')
   return null
 }
 
@@ -478,6 +505,11 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   const sub = settings.subtitles
   const out = settings.output
   const t = translatorFor(req.language ?? DEFAULT_COMMAND_LANGUAGE)
+  // The protocol decides the muxer and the container-specific behaviour; the
+  // container itself is no longer a free choice (see `protocol.ts`). `?? rtmp`
+  // covers settings objects from older schemas.
+  const protocol: StreamProtocol = out.protocol ?? DEFAULT_STREAM_PROTOCOL
+  const effContainer = containerForProtocol(protocol)
 
   const warnings: string[] = []
   const summary: string[] = []
@@ -618,8 +650,10 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   /* ---------------- video encoder ---------------- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
   let vencName = 'copy'
-  const flvWarn = flvCodecWarning(v.codec, out.container, t)
+  const flvWarn = flvCodecWarning(v.codec, effContainer, t)
   if (flvWarn) warnings.push(flvWarn)
+  const whipWarn = whipCodecWarning(protocol, v, a, t)
+  if (whipWarn) warnings.push(whipWarn)
 
   if (copyVideo) {
     args.push('-c:v', 'copy')
@@ -630,8 +664,8 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     vencName = spec.name
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
     const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
-    applyVideoEncoderArgs(args, v, spec, fpsForGop, out.container)
-    if (v.repeatHeaders && out.container === 'flv') args.push('-flags', '+cgop')
+    applyVideoEncoderArgs(args, v, spec, fpsForGop, effContainer)
+    if (v.repeatHeaders && effContainer === 'flv') args.push('-flags', '+cgop')
     const hw = spec.kind === 'software' ? '' : t('main.cmd.hardwareTag')
     summary.unshift(videoSummary(t, spec.name, hw, v))
     if (spec.kind === 'software' && v.bitrateKbps > 12000) {
@@ -670,10 +704,10 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
-  if (out.container === 'flv' && aencName === 'libopus') {
+  if (effContainer === 'flv' && aencName === 'libopus') {
     warnings.push(t('main.cmd.opusInFlv'))
   }
-  if (out.container === 'mpegts' && aencName === 'aac') args.push('-bsf:a', 'aac_adtstoasc')
+  if (effContainer === 'mpegts' && aencName === 'aac') args.push('-bsf:a', 'aac_adtstoasc')
 
   /* ---------------- subtitle handling result ---------------- */
   let subtitleApplied: SubtitleApplication = 'none'
@@ -687,7 +721,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
       args.push('-map', `0:${track.streamIndex}`, '-c:s', 'copy')
       subtitleApplied = 'copy'
       summary.push(t('main.cmd.summarySubCopy'))
-      if (out.container === 'flv') warnings.push(t('main.cmd.flvNoSubtitleTrack'))
+      if (effContainer === 'flv') warnings.push(t('main.cmd.flvNoSubtitleTrack'))
     } else {
       warnings.push(t('main.cmd.externalSubNoTrack'))
     }
@@ -696,17 +730,23 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   /* ---------------- muxing / output ---------------- */
   if (out.dropLateFrames) args.push('-fflags', '+genpts+igndts', '-max_delay', '0')
   args.push('-max_interleave_delta', '0')
-  if (out.container === 'flv') args.push('-flvflags', 'no_duration_filesize')
+  if (effContainer === 'flv') args.push('-flvflags', 'no_duration_filesize')
   if (out.extraOutputArgs.trim()) args.push(...out.extraOutputArgs.trim().split(/\s+/))
   args.push('-progress', 'pipe:1', '-nostats')
 
-  const format = CONTAINER_MUXER[out.container]
-  const target = req.outputOverride ?? buildRtmpTarget(out.server, out.streamKey)
+  const target = req.outputOverride ?? buildPushTarget(out.server, out.streamKey, protocol)
   if (!req.outputOverride) {
-    // Let ffmpeg retry the socket instead of tearing the whole pipeline down.
-    args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', String(Math.max(1, out.reconnectDelaySec)))
+    // Per-protocol connection behaviour: RTMP lets ffmpeg retry the socket instead
+    // of tearing the whole pipeline down; RTSP picks the transport it pushes over;
+    // the key protocols that do not carry the key in the address get it here.
+    if (protocol === 'rtmp') {
+      args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', String(Math.max(1, out.reconnectDelaySec)))
+    } else if (protocol === 'rtsp') {
+      args.push('-rtsp_transport', networkForProtocol(protocol, out.network))
+    }
+    args.push(...protocolKeyArgs(protocol, out.streamKey))
   }
-  args.push('-f', format, target)
+  args.push('-f', muxerForProtocol(protocol), target)
 
   return {
     args,
@@ -807,8 +847,11 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
 
   /* ---- video encoder ---- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
-  const flvWarn = flvCodecWarning(v.codec, out.container, t)
+  const effContainer = containerForProtocol(out.protocol)
+  const flvWarn = flvCodecWarning(v.codec, effContainer, t)
   if (flvWarn) warnings.push(flvWarn)
+  const whipWarn = whipCodecWarning(out.protocol, v, a, t)
+  if (whipWarn) warnings.push(whipWarn)
   if (copyVideo) {
     args.push('-c:v', 'copy')
     summary.unshift(t('main.cmd.summaryVideoCopy'))
@@ -817,7 +860,7 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   } else {
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
     const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
-    applyVideoEncoderArgs(args, v, spec, fpsForGop, out.container)
+    applyVideoEncoderArgs(args, v, spec, fpsForGop, effContainer)
     if (v.repeatHeaders) args.push('-flags', '+cgop')
     const hw = spec.kind === 'software' ? '' : t('main.cmd.hardwareTag')
     summary.unshift(videoSummary(t, spec.name, hw, v))
@@ -940,7 +983,9 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
   const t = translatorFor(language)
   const summary: string[] = []
   const notes: string[] = []
-  const target = buildRtmpTarget(url, streamKey)
+  const protocol: StreamProtocol = out.protocol ?? DEFAULT_STREAM_PROTOCOL
+  const effContainer = containerForProtocol(protocol)
+  const target = buildPushTarget(url, streamKey, protocol)
   const pattern = testPatternSize(v)
   const fps = v.fps > 0 ? v.fps : TEST_DEFAULT_FPS
 
@@ -965,7 +1010,7 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
   if (a.codec !== 'none') args.push('-map', '1:a:0')
 
   /* ---------------- video encoder ---------------- */
-  const flv = out.container === 'flv'
+  const flv = effContainer === 'flv'
   const wantsCopy = v.codec === 'copy'
   const spec: EncoderSpec = wantsCopy
     ? encoderArgFor('x264', 'h264', available)
@@ -1019,8 +1064,10 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
    * non-zero) — and "连接失败" would send the user hunting for a network problem that
    * does not exist. Emitted only when the test really encodes that codec.
    */
-  const codecWarning = flvCodecWarning(wantsCopy ? 'h264' : v.codec, out.container, t)
+  const codecWarning = flvCodecWarning(wantsCopy ? 'h264' : v.codec, effContainer, t)
   if (codecWarning) notes.push(codecWarning)
+  const whipWarn = whipCodecWarning(protocol, { ...v, codec: wantsCopy ? 'h264' : v.codec }, a, t)
+  if (whipWarn) notes.push(whipWarn)
   if (flv && a.codec === 'libopus') notes.push(t('main.cmd.opusInFlv'))
 
   /* ---------------- muxing / destination ---------------- */
@@ -1037,7 +1084,11 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
   if (flv && !mentions('-flvflags')) args.push('-flvflags', 'no_duration_filesize')
   if (out.dropLateFrames && !mentions('-fflags')) args.push('-fflags', '+genpts+igndts', '-max_delay', '0')
   args.push(...extra)
-  args.push('-f', CONTAINER_MUXER[out.container], target)
+  // Per-protocol destination behaviour, mirroring the real stream: RTSP picks its
+  // transport, and protocols whose key does not ride in the address get it here.
+  if (protocol === 'rtsp') args.push('-rtsp_transport', networkForProtocol(protocol, out.network))
+  args.push(...protocolKeyArgs(protocol, streamKey))
+  args.push('-f', muxerForProtocol(protocol), target)
 
   return { args, summary, notes }
 }

@@ -1,15 +1,15 @@
 /**
  * Builds the artefacts the verification harnesses need:
- *   .test/builder.bundle.mjs  - command builder for the plain-node harness
- *   .test/probe.bundle.mjs    - ffprobe wrapper for the plain-node harness
- *   .test/i18n.bundle.mjs     - message tables + locale rules for the same harness
- *   .test/rtmp.bundle.mjs     - RTMP target composition for the same harness
+ *   test/builder.bundle.mjs  - command builder for the plain-node harness
+ *   test/probe.bundle.mjs    - ffprobe wrapper for the plain-node harness
+ *   test/i18n.bundle.mjs     - message tables + locale rules for the same harness
+ *   test/rtmp.bundle.mjs     - RTMP target composition for the same harness
  *   out/main/test-entry.cjs   - engine + builder for the Electron integration run
  *
- * (`.test/obs.bundle.mjs` is bundled by harness.mjs itself, next to the checks
+ * (`test/obs.bundle.mjs` is bundled by harness.mjs itself, next to the checks
  * that use it.)
  *
- * Usage: node .test/build-bundles.mjs
+ * Usage: node test/build-bundles.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -41,24 +41,30 @@ const targets = [
   {
     // Shared RTMP target composition, exercised directly by the harness.
     entry: 'src/shared/rtmp.ts',
-    out: '.test/rtmp.bundle.mjs',
+    out: 'test/rtmp.bundle.mjs',
+    format: 'esm'
+  },
+  {
+    // Stream protocol detection / target composition, exercised directly by the harness.
+    entry: 'src/shared/protocol.ts',
+    out: 'test/protocol.bundle.mjs',
     format: 'esm'
   },
   {
     entry: 'src/main/ffmpeg/command.ts',
-    out: '.test/builder.bundle.mjs',
+    out: 'test/builder.bundle.mjs',
     format: 'esm'
   },
   {
     entry: 'src/main/ffmpeg/probe.ts',
-    out: '.test/probe.bundle.mjs',
+    out: 'test/probe.bundle.mjs',
     format: 'esm'
   },
   {
     // Message tables + locale rules, so the harness can assert that every language
     // defines every key and that the detection rules match the documented ones.
     entry: 'src/shared/i18n/index.ts',
-    out: '.test/i18n.bundle.mjs',
+    out: 'test/i18n.bundle.mjs',
     format: 'esm'
   },
   {

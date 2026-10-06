@@ -7,9 +7,10 @@
  *   - deleting removes it again
  *   - the resolution controls and bitrate unit selector behave
  *
- * Usage: node .test/preset-e2e.mjs
+ * Usage: node test/preset-e2e.mjs
  */
 import { spawn } from 'node:child_process'
+import { electronEnv } from './harness-util.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -49,7 +50,7 @@ try {
    not depend on the machine's system locale. */
 const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
+  env: electronEnv()
 })
 
 /** Restores settings.json so later suites start from the state they expect. */
@@ -239,10 +240,10 @@ await setSelectByValue('默认字幕处理方式', 'off')
 await delay(200)
 
 // output tab: stream key + address
-const outputTabReady = await openTab('输出', '串流密钥')
+const outputTabReady = await openTab('推流', '串流密钥')
 record('output tab renders its fields', outputTabReady)
 await setFieldValue('串流密钥', 'preset-key-test')
-await setFieldValue('RTMP 推流地址', 'rtmp://preset.example.com/live/')
+await setFieldValue('推流地址', 'rtmp://preset.example.com/live/')
 await delay(700)
 
 const sessionBefore = JSON.parse(
@@ -291,8 +292,8 @@ const readSettingsDom = () =>
 
 const obsBefore = JSON.parse(await readSettingsDom())
 record(
-  'obs-websocket switch renders in the RTMP tab',
-  obsBefore.activeTab?.includes('输出') === true && obsBefore.toggles.some((t) => t.includes('obs-websocket')),
+  'obs-websocket switch renders in the push tab',
+  obsBefore.activeTab?.includes('推流') === true && obsBefore.toggles.some((t) => t.includes('obs-websocket')),
   JSON.stringify({ tab: obsBefore.activeTab, toggles: obsBefore.toggles })
 )
 

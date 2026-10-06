@@ -12,10 +12,18 @@ import type {
 } from '@shared/types'
 import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand, type BuiltEncoderArgs } from '../ffmpeg/command'
 import type { Language } from '@shared/types'
+import type { StreamProtocol } from '@shared/types'
 import { mainT } from '../i18n'
 import { Playout } from './playout'
-import { buildRtmpTarget } from '@shared/rtmp'
-import { BUFFER_SEC_MIN, CONTAINER_MUXER } from '@shared/defaults'
+import {
+  buildPushTarget,
+  containerForProtocol,
+  DEFAULT_STREAM_PROTOCOL,
+  muxerForProtocol,
+  networkForProtocol,
+  protocolKeyArgs
+} from '@shared/protocol'
+import { BUFFER_SEC_MIN } from '@shared/defaults'
 
 export interface EngineDeps {
   getFfmpegPath: () => string
@@ -419,7 +427,7 @@ export class StreamEngine {
     this.emitPlaylist()
 
     const settings = this.deps.getSettings()
-    const target = buildRtmpTarget(settings.output.server, settings.output.streamKey)
+    const target = buildPushTarget(settings.output.server, settings.output.streamKey, settings.output.protocol)
     // The full target (which contains the stream key) is only shown in the debug
     // log, not in the UI and not in the info log.
     this.log('info', mainT('main.engine.sessionStarting'))
@@ -1007,17 +1015,21 @@ export class StreamEngine {
     this.emitStatus()
   }
 
-  /** The pusher's arguments: the muxer, extra flags and the RTMP destination. */
+  /**
+   * The pusher's arguments: the muxer, per-protocol connection options and the
+   * push destination. The protocol decides all three (see `protocol.ts`); only the
+   * FLV muxer accepts the FLV flag set, and only RTSP can choose its transport.
+   */
   private buildPusherArgs(settings: SessionSettings): string[] {
     const out = settings.output
-    return [
-      '-flvflags',
-      'no_duration_filesize',
-      ...(out.extraOutputArgs.trim() ? out.extraOutputArgs.trim().split(/\s+/) : []),
-      '-f',
-      CONTAINER_MUXER[out.container],
-      buildRtmpTarget(out.server, out.streamKey)
-    ]
+    const protocol: StreamProtocol = out.protocol ?? DEFAULT_STREAM_PROTOCOL
+    const args: string[] = []
+    if (containerForProtocol(protocol) === 'flv') args.push('-flvflags', 'no_duration_filesize')
+    if (protocol === 'rtsp') args.push('-rtsp_transport', networkForProtocol(protocol, out.network))
+    args.push(...protocolKeyArgs(protocol, out.streamKey))
+    if (out.extraOutputArgs.trim()) args.push(...out.extraOutputArgs.trim().split(/\s+/))
+    args.push('-f', muxerForProtocol(protocol), buildPushTarget(out.server, out.streamKey, protocol))
+    return args
   }
 
   /**

@@ -89,6 +89,10 @@ export const DEFAULT_SESSION: SessionSettings = {
     // the stream key is appended directly to it, with no extra separator.
     server: 'rtmp://127.0.0.1/live/',
     streamKey: '',
+    // RTMP is the default protocol and the detection fallback; the transport is
+    // what RTMP runs over (only RTSP offers a real TCP/UDP choice).
+    protocol: 'rtmp',
+    network: 'tcp',
     container: 'flv',
     extraOutputArgs: '',
     realtimePacing: true,
@@ -207,10 +211,11 @@ export const BUILTIN_PRESETS: Preset[] = [
 export const DEFAULT_SETTINGS: AppSettings = {
   ffmpegPath: '',
   ffprobePath: '',
-  // On by default: off would silently drop the relay/buffer accounting that makes a
-  // stream failure diagnosable after the fact. The switch exists to keep a long
-  // unattended run's log small, not to hide the default detail level.
-  debugLogging: true,
+  // Off by default: debug is the bulk of the log volume (relay/buffer accounting,
+  // per-pass details) and both sinks are capped, so a long unattended run does not
+  // pay for it. `info` and above are always recorded, so turning it on is visible
+  // in the log itself.
+  debugLogging: false,
   /*
    * English is the built-in fallback, but it is *not* what a new installation
    * normally starts in: the settings store resolves the language from the system

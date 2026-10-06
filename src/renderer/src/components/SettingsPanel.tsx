@@ -5,7 +5,6 @@ import type {
   AudioCodecName,
   AudioRateControl,
   AudioSettings,
-  ContainerName,
   FfmpegCapabilities,
   ObsWebSocketSettings,
   ObsWebSocketStatus,
@@ -14,6 +13,8 @@ import type {
   Preset,
   PresetsPayload,
   RtmpTestResult,
+  StreamNetwork,
+  StreamProtocol,
   SubtitleRenderSettings,
   SubtitleMode,
   TranslationKey,
@@ -23,6 +24,7 @@ import type {
   VideoSettings
 } from '@shared/types'
 import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, OBS_PORT_MAX, OBS_PORT_MIN, SCALE_PRESETS } from '@shared/defaults'
+import { detectStreamProtocol, networkForProtocol, PROTOCOL_NETWORKS, STREAM_PROTOCOLS } from '@shared/protocol'
 import { useT } from '../i18n'
 
 interface SettingsPanelProps {
@@ -90,10 +92,19 @@ const AUDIO_CODEC_KEY: Record<AudioCodecName, TranslationKey> = {
   none: 'settings.audio.codec.none'
 }
 
-const CONTAINER_KEY: Record<ContainerName, TranslationKey> = {
-  flv: 'settings.output.container.flv',
-  mpegts: 'settings.output.container.mpegts',
-  mkv: 'settings.output.container.mkv'
+const PROTOCOL_KEY: Record<StreamProtocol, TranslationKey> = {
+  rtmp: 'settings.output.protocol.rtmp',
+  srt: 'settings.output.protocol.srt',
+  rtsp: 'settings.output.protocol.rtsp',
+  whip: 'settings.output.protocol.whip'
+}
+
+/** Per-protocol meaning of the stream key field; see `@shared/protocol`. */
+const STREAM_KEY_HINT: Record<StreamProtocol, TranslationKey> = {
+  rtmp: 'settings.output.streamKeyHint',
+  srt: 'settings.output.streamKeyHintSrt',
+  rtsp: 'settings.output.streamKeyHintRtsp',
+  whip: 'settings.output.streamKeyHintWhip'
 }
 
 /** Libass alignment values, in the order the select lists them. */
@@ -600,15 +611,51 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
         {tab === 'output' && (
           <>
             <Field label={t('settings.output.server')}>
-              <input
-                value={o.server}
-                placeholder="rtmp://127.0.0.1/live/"
-                onChange={(e) => props.onUpdateOutput({ server: e.target.value })}
-                spellCheck={false}
-              />
+              <div className="addr-row">
+                <input
+                  value={o.server}
+                  placeholder="rtmp://127.0.0.1/live/"
+                  onChange={(e) => props.onUpdateOutput({ server: e.target.value })}
+                  onBlur={(e) => {
+                    /*
+                     * Protocol detection runs on LEAVE, not per keystroke: while
+                     * typing, half-finished addresses would flap the dropdown
+                     * (r-t-m-p already looks like RTMP). Leaving the field means
+                     * the address is finished, so the dropdown jumps to the
+                     * detected protocol — the user can still override it after.
+                     */
+                    const trimmed = e.target.value.trim()
+                    const detected = detectStreamProtocol(trimmed)
+                    const patch: Partial<OutputSettings> = {}
+                    if (trimmed !== o.server) patch.server = trimmed
+                    if (detected !== o.protocol) {
+                      patch.protocol = detected
+                      patch.network = networkForProtocol(detected, o.network)
+                    }
+                    if (Object.keys(patch).length > 0) props.onUpdateOutput(patch)
+                  }}
+                  spellCheck={false}
+                />
+                <select
+                  value={o.protocol}
+                  aria-label={t('settings.output.protocol')}
+                  onChange={(e) => {
+                    const protocol = e.target.value as StreamProtocol
+                    // The transport travels with the protocol: switching to one that
+                    // cannot run over the current network clamps the choice.
+                    props.onUpdateOutput({ protocol, network: networkForProtocol(protocol, o.network) })
+                  }}
+                >
+                  {STREAM_PROTOCOLS.map((p) => (
+                    <option key={p} value={p}>
+                      {t(PROTOCOL_KEY[p])}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </Field>
 
-            <Field label={t('settings.output.streamKey')} hint={t('settings.output.streamKeyHint')}>
+            <Field label={t('settings.output.streamKey')} hint={t(STREAM_KEY_HINT[o.protocol])}>
               <div className="secret-row">
                 <input
                   type={showKey ? 'text' : 'password'}
@@ -622,6 +669,35 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                   {showKey ? t('settings.output.hide') : t('settings.output.show')}
                 </button>
               </div>
+            </Field>
+
+            {(() => {
+              const choices = PROTOCOL_NETWORKS[o.protocol] ?? PROTOCOL_NETWORKS.rtmp
+              const locked = choices.length < 2
+              return (
+                <Field
+                  label={t('settings.output.network')}
+                  hint={locked ? t('settings.output.networkHintFixed', { net: o.network.toUpperCase() }) : t('settings.output.networkHint')}
+                >
+                  <select
+                    value={o.network}
+                    disabled={locked}
+                    onChange={(e) => props.onUpdateOutput({ network: e.target.value as StreamNetwork })}
+                  >
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                  </select>
+                </Field>
+              )
+            })()}
+
+            <Field label={t('settings.output.extraArgs')} hint={t('settings.output.extraArgsHint')}>
+              <input
+                value={o.extraOutputArgs}
+                placeholder=""
+                onChange={(e) => props.onUpdateOutput({ extraOutputArgs: e.target.value })}
+                spellCheck={false}
+              />
             </Field>
 
             <div className="row-actions">
@@ -676,29 +752,6 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               </div>
             )}
 
-            <Field label={t('settings.output.container')}>
-              <select value={o.container} onChange={(e) => props.onUpdateOutput({ container: e.target.value as ContainerName })}>
-                {(Object.keys(CONTAINER_KEY) as ContainerName[]).map((c) => {
-                  const supported = caps?.containerFormats.find((x) => x.value === c)
-                  return (
-                    <option key={c} value={c} disabled={supported ? !supported.available : false}>
-                      {t(CONTAINER_KEY[c])}
-                      {supported && !supported.available ? t('settings.audio.codecUnsupported') : ''}
-                    </option>
-                  )
-                })}
-              </select>
-            </Field>
-
-            <Field label={t('settings.output.extraArgs')} hint={t('settings.output.extraArgsHint')}>
-              <input
-                value={o.extraOutputArgs}
-                placeholder=""
-                onChange={(e) => props.onUpdateOutput({ extraOutputArgs: e.target.value })}
-                spellCheck={false}
-              />
-            </Field>
-
             {/* ------------------------------------- OBS WebSocket ---------- */}
             <h3 className="section-title">{t('settings.obs.title')}</h3>
             <Toggle
@@ -717,40 +770,40 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               <>
                 <div className="field-grid">
                   <Field label={t('settings.obs.host')}>
-                    <input
+                    <DraftInput
                       value={o.obsWebSocket.host}
                       placeholder="127.0.0.1"
-                      onChange={(e) => {
-                        updateObs({ host: e.target.value })
+                      spellCheck={false}
+                      onCommit={(host) => {
+                        updateObs({ host: host.trim() })
                         applyObs()
                       }}
-                      spellCheck={false}
                     />
                   </Field>
                   <Field label={t('settings.obs.port')}>
-                    <input
+                    <DraftInput
                       type="number"
                       min={OBS_PORT_MIN}
                       max={OBS_PORT_MAX}
-                      value={o.obsWebSocket.port}
-                      onChange={(e) => {
-                        updateObs({ port: clampNumber(Number(e.target.value), OBS_PORT_MIN, OBS_PORT_MAX, 4455) })
+                      value={String(o.obsWebSocket.port)}
+                      onCommit={(raw) => {
+                        updateObs({ port: clampNumber(Number(raw), OBS_PORT_MIN, OBS_PORT_MAX, 4455) })
                         applyObs()
                       }}
                     />
                   </Field>
                   <Field label={t('settings.obs.password')} hint={t('settings.obs.passwordHint')}>
                     <div className="secret-row">
-                      <input
+                      <DraftInput
                         type={showKey ? 'text' : 'password'}
                         value={o.obsWebSocket.password}
                         placeholder={t('settings.output.nonePlaceholder')}
-                        onChange={(e) => {
-                          updateObs({ password: e.target.value })
-                          applyObs()
-                        }}
                         spellCheck={false}
                         autoComplete="off"
+                        onCommit={(password) => {
+                          updateObs({ password })
+                          applyObs()
+                        }}
                       />
                       <button type="button" className="btn tiny ghost secret-toggle" onClick={() => setShowKey((v) => !v)}>
                         {showKey ? t('settings.output.hide') : t('settings.output.show')}
@@ -920,7 +973,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             <div className="kv-list">
               <div className="kv">
                 <span>{t('settings.about.version')}</span>
-                <code>{props.info?.version ?? '—'}</code>
+                <code>{formatAppVersion(props.info)}</code>
               </div>
               <div className="kv">
                 <span>Electron / Chromium</span>
@@ -1180,6 +1233,70 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint && <em className="field-hint">{hint}</em>}
     </label>
+  )
+}
+
+/**
+ * The version line in the About panel.
+ *
+ * The version always shows; the prefix tells release from nightly (the built
+ * commit carries no tag): `v1.0.1 (dda0f8d24d)` vs `nightly v1.0.1 (dda0f8d24d)`.
+ * Without build info (a dev run without a prior build) the plain package.json
+ * version shows.
+ */
+function formatAppVersion(info: AppInfo | null): string {
+  if (!info) return '—'
+  if (!info.commit) return info.version
+  return info.nightly ? `nightly v${info.version} (${info.commit})` : `v${info.version} (${info.commit})`
+}
+
+/**
+ * Text input that commits on blur (or Enter) instead of per keystroke.
+ *
+ * For fields whose committed value has side effects — the control endpoint
+ * rebinds its port, the port itself is clamped into a range that would fight the
+ * intermediate states of a number being typed — every keystroke must not fire
+ * them. The draft follows the external value while not being edited, so a
+ * settings change from elsewhere still shows up.
+ */
+function DraftInput({
+  value,
+  onCommit,
+  ...rest
+}: {
+  value: string
+  onCommit: (value: string) => void
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'onBlur'>): React.JSX.Element {
+  const [draft, setDraft] = useState(value)
+  const [editing, setEditing] = useState(false)
+  useEffect(() => {
+    if (!editing) setDraft(value)
+  }, [value, editing])
+
+  const commit = (): void => {
+    setEditing(false)
+    if (draft !== value) onCommit(draft)
+  }
+
+  return (
+    <input
+      {...rest}
+      value={draft}
+      onChange={(e) => {
+        setEditing(true)
+        setDraft(e.target.value)
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        // Escape abandons the edit rather than committing a half-typed value.
+        if (e.key === 'Escape') {
+          setEditing(false)
+          setDraft(value)
+          e.currentTarget.blur()
+        }
+      }}
+    />
   )
 }
 

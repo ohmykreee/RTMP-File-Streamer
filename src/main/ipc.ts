@@ -17,14 +17,20 @@ import type {
   SessionSettings
 } from '@shared/types'
 import { IPC, SUPPORTED_SUBTITLE_EXT, SUPPORTED_VIDEO_EXT } from '@shared/types'
-import type { Language } from '@shared/types'
-import { buildRtmpTarget } from '@shared/rtmp'
+import type { Language, StreamProtocol } from '@shared/types'
+import {
+  addressMatchesProtocol,
+  buildPushTarget,
+  DEFAULT_STREAM_PROTOCOL,
+  PROTOCOL_SCHEMES
+} from '@shared/protocol'
 import { buildCommandLine, buildTestCommand } from '@main/ffmpeg/command'
 import { ENCODER_CATALOGUE, getCapabilities, resolveBinaries, runProcess, setAvailableEncoderNames } from '@main/ffmpeg/capabilities'
 import { embeddedSubtitleRefs } from '@main/ffmpeg/probe'
 import { probeCached } from '@main/store/playlist'
 import { deletePreset, getPresetLocation, listPresets, renamePreset, savePreset } from '@main/store/presets'
 import { getPersistedLogInfo } from '@main/store/logger'
+import { readBuildInfo } from './buildInfo'
 import { mainT } from './i18n'
 import { BUILTIN_PRESETS } from '@shared/defaults'
 
@@ -61,15 +67,22 @@ export function registerIpc(services: AppServices): void {
 
   /* ---------------- app / settings ---------------- */
 
-  ipcMain.handle(IPC.getAppInfo, (): AppInfo => ({
-    version: app.getVersion(),
-    electron: process.versions.electron,
-    chrome: process.versions.chrome,
-    node: process.versions.node,
-    platform: process.platform,
-    arch: process.arch,
-    userDataPath: app.getPath('userData')
-  }))
+  ipcMain.handle(IPC.getAppInfo, (): AppInfo => {
+    // Build identity comes from build-info.json when it exists (written by the
+    // build script); a dev run without one falls back to package.json.
+    const build = readBuildInfo()
+    return {
+      version: build?.version ?? app.getVersion(),
+      ...(build?.commit ? { commit: build.commit } : {}),
+      ...(build ? { nightly: build.nightly, builtAt: build.builtAt } : {}),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+      userDataPath: app.getPath('userData')
+    }
+  })
 
   ipcMain.handle(IPC.getSettings, (): AppSettings => services.getSettings())
   ipcMain.handle(IPC.saveSettings, (_e, patch: Partial<AppSettings>): AppSettings => services.mergeSettings(patch ?? {}))
@@ -271,14 +284,17 @@ export function registerIpc(services: AppServices): void {
 
     const url = String(req?.url ?? '').trim()
     const key = String(req?.streamKey ?? '').trim()
-    if (!/^rtmps?:\/\//i.test(url)) {
-      return { ok: false, message: mainT('main.dialog.badUrl'), detail: '', elapsedMs: 0 }
-    }
     // Test the session the caller sent (the settings on screen); fall back to the
     // persisted ones so a caller that predates the field still gets a test.
     const session = req?.session ?? settings.session
+    // The protocol decides the address scheme the test accepts and how the key
+    // travels (see `protocol.ts`).
+    const protocol: StreamProtocol = session.output.protocol ?? DEFAULT_STREAM_PROTOCOL
+    if (!addressMatchesProtocol(url, protocol)) {
+      return { ok: false, message: mainT('main.dialog.badUrlProtocol', { schemes: PROTOCOL_SCHEMES[protocol] }), detail: '', elapsedMs: 0 }
+    }
     // The stream key is optional: some servers take the whole path in the address.
-    const target = buildRtmpTarget(url, key)
+    const target = buildPushTarget(url, key, protocol)
     // The summary and notes are shown in the UI, so the test is built in the
     // language the interface is running in.
     const test = buildTestCommand(session, url, key, settings.language)

@@ -1,8 +1,8 @@
 /**
  * The whole Electron end-to-end run, behind one command: `pnpm test:e2e`.
  *
- *   node .test/e2e.mjs                 run every suite, in order
- *   node .test/e2e.mjs ui preset       run only the named suites
+ *   node test/e2e.mjs                 run every suite, in order
+ *   node test/e2e.mjs ui preset       run only the named suites
  *
  * The suites are the existing `*-e2e.mjs` / `engine-run.cjs` drivers; this file
  * is only the dispatcher that used to be copy-pasted once per suite
@@ -17,7 +17,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { killStrays } from './harness-util.mjs'
+import { electronEnv, killStrays } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -52,7 +52,7 @@ const ORDER = ['ui', 'features', 'presets', 'layout', 'datadir', 'engine', 'engi
 
 const requested = process.argv.slice(2).filter((a) => !a.startsWith('-'))
 if (process.argv.includes('--help') || process.argv.includes('-h')) {
-  console.log('usage: node .test/e2e.mjs [suite ...]')
+  console.log('usage: node test/e2e.mjs [suite ...]')
   console.log(`suites: ${ORDER.join(', ')}`)
   process.exit(0)
 }
@@ -81,9 +81,8 @@ if (FIXTURES.some((f) => !fs.existsSync(path.join(here, f)))) {
   if (gen.status !== 0) process.exit(gen.status ?? 1)
 }
 
-/** Electron must NOT run as plain node, or `app` is missing and no window opens. */
-const env = { ...process.env }
-delete env.ELECTRON_RUN_AS_NODE
+/** Every suite inherits the sanitised Electron environment (see `electronEnv`). */
+const env = electronEnv()
 
 const runSuite = (name) =>
   new Promise((resolve) => {

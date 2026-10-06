@@ -1,7 +1,7 @@
 {
   "name": "rtmp-file-streamer",
   "productName": "RTMP File Streamer",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Local file to RTMP live streaming desktop app powered by FFmpeg",
   "main": "./out/main/index.js",
   "author": "TurboKre",
@@ -14,20 +14,20 @@
     "pnpm": "12.8.1"
   },
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/build-info.mjs && electron-vite dev",
     "start": "electron-vite preview",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "build": "electron-vite build",
-    "dist": "electron-vite build && electron-builder --win --x64 --dir --config electron-builder.config.cjs",
-    "test:unit": "node .test/unit.mjs",
-    "test:e2e": "node .test/e2e.mjs",
+    "build": "node scripts/build-info.mjs && electron-vite build",
+    "dist": "node scripts/build-info.mjs && electron-vite build && electron-builder --win --x64 --dir --config electron-builder.config.cjs",
+    "test:unit": "node test/unit.mjs",
+    "test:e2e": "node test/e2e.mjs",
     "test:ci": "pnpm run typecheck && pnpm run build && pnpm run test:unit && pnpm run test:e2e",
     "test": "pnpm run test:unit"
   },
   "dependencies": {},
-  "//esbuild": "Direct, not just transitive (vite and electron-vite each pull one in): the .test entry points bundle the modules under test with this exact package, so it is declared here and not left to resolution. CI proved that matters — with esbuild only transitive, its platform binary (@esbuild/<platform>-<arch>, an optionalDependency) was never installed on Linux and the whole non-Electron suite died at the bundling step.",
+  "//esbuild": "Direct, not just transitive (vite and electron-vite each pull one in): the test entry points bundle the modules under test with this exact package, so it is declared here and not left to resolution. CI proved that matters — with esbuild only transitive, its platform binary (@esbuild/<platform>-<arch>, an optionalDependency) was never installed on Linux and the whole non-Electron suite died at the bundling step.",
   "optionalDependencies": {
     "@esbuild/linux-x64": "^0.28.2"
   },

@@ -7,7 +7,7 @@
   Cache/          Chromium/Electron 的缓存与日志
 
 因为状态就在程序目录内，整个程序文件夹可以直接复制或移动到 U 盘使用。
-删除本文件夹等同于恢复出厂设置。
+删除本文件夹内的内容等同于恢复出厂设置。
 
 ---------------------------------------------------------------------------
 
@@ -22,7 +22,7 @@ update does not overwrite it:
 
 Because the state lives inside the application folder, the whole folder can be
 copied or moved to a USB stick and used as it is.
-Deleting this folder is the same as resetting the application to its defaults.
+Deleting the contents of this folder is the same as resetting the application to its defaults.
 
 ---------------------------------------------------------------------------
 
@@ -37,4 +37,4 @@ Deleting this folder is the same as resetting the application to its defaults.
 
 状態がアプリのフォルダー内にあるため、フォルダーごと USB メモリにコピー
 または移動して、そのまま使えます。
-このフォルダーを削除することは、アプリを初期状態に戻すことと同じです。
+このフォルダーの中身を削除することは、アプリを初期状態に戻すことと同じです。

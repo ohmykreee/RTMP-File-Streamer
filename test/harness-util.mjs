@@ -23,6 +23,31 @@ export function killStrays(names = ['electron', 'RTMPFileStreamer', 'ffmpeg']) {
 }
 
 /**
+ * Environment for launching Electron, with the variables that hijack it removed.
+ *
+ * `ELECTRON_RUN_AS_NODE=1` makes an Electron binary start as plain Node: no
+ * `BrowserWindow`, no DevTools endpoint, and any command-line switch is answered
+ * with `bad option: --…` and an immediate exit — so a suite fails as "app never
+ * started" and looks exactly like the OS refusing to launch it. That variable is
+ * set by whatever host starts the terminal (a desktop shell built on Electron
+ * exports it to every command it runs), so it is inherited by the suites unless
+ * they strip it themselves. Every spawn of an Electron binary goes through here,
+ * including the packaged app, and no entry point relies on a caller having
+ * cleaned the environment first.
+ *
+ * `ELECTRON_NO_ATTACH_CONSOLE` and `NODE_OPTIONS` are the same class of failure
+ * (the second is parsed as Chromium switches on some Electron versions), so they
+ * are dropped for the same reason.
+ */
+export function electronEnv(extra = {}) {
+  const env = { ...process.env, ...extra }
+  for (const name of ['ELECTRON_RUN_AS_NODE', 'ELECTRON_NO_ATTACH_CONSOLE', 'NODE_OPTIONS']) delete env[name]
+  // E2E runs move the window off-screen and make it click-through.
+  env.STREAMER_E2E = '1'
+  return env
+}
+
+/**
  * Installs the watchdog.
  *
  * @param {number} budgetMs  total wall-clock budget for the whole script

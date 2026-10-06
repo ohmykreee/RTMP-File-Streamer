@@ -10,7 +10,7 @@
  *   Hello (no/with auth) -> Identify -> Identified -> requests -> responses
  *
  * `unit.mjs` bundles the server module before the harness runs; this file is
- * imported by `.test/harness.mjs`.
+ * imported by `test/harness.mjs`.
  */
 import crypto from 'node:crypto'
 import net from 'node:net'

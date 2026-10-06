@@ -18,6 +18,9 @@ module.exports = {
   files: [
     'out/**/*',
     'package.json',
+    // Build identity written by scripts/build-info.mjs (version/commit/nightly);
+    // read back at runtime by src/main/buildInfo.ts for the About panel.
+    'build-info.json',
     '!**/*.map',
     '!node_modules/**/*'
   ],

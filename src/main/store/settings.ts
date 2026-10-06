@@ -3,6 +3,7 @@ import path from 'node:path'
 import { app } from 'electron'
 import type { AppSettings, Language, OutputSettings } from '@shared/types'
 import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, DEFAULT_SETTINGS } from '@shared/defaults'
+import { containerForProtocol, networkForProtocol, STREAM_PROTOCOLS } from '@shared/protocol'
 import { isLanguage, resolveLanguage } from '@shared/i18n'
 import { dataDir, ensureDir } from './paths'
 
@@ -64,6 +65,11 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
  * The buffered playout is selected by `buffered` alone; `bufferSec` is only how far
  * the encoder may lead, and it is clamped into the range the engine accepts rather
  * than being allowed to express the switch as well.
+ *
+ * The protocol decides two more fields: the transport is clamped to what the
+ * protocol can actually run over, and the container is derived from it outright
+ * (a settings file or preset written before the protocol existed carries a
+ * `container` choice that is no longer free — it is overwritten, not merged).
  */
 export function normaliseOutput(raw: Partial<OutputSettings>): OutputSettings {
   const fallback = DEFAULT_SETTINGS.session.output
@@ -71,11 +77,17 @@ export function normaliseOutput(raw: Partial<OutputSettings>): OutputSettings {
   const obs = { ...fallback.obsWebSocket, ...(raw.obsWebSocket ?? {}) }
   const buffered = typeof raw.buffered === 'boolean' ? raw.buffered : fallback.buffered
   const delay = clampNumber(raw.bufferSec, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT)
+  const protocol = STREAM_PROTOCOLS.includes(raw.protocol as OutputSettings['protocol'])
+    ? (raw.protocol as OutputSettings['protocol'])
+    : fallback.protocol
   return {
     ...fallback,
     ...raw,
     server,
     streamKey: typeof raw.streamKey === 'string' ? raw.streamKey : fallback.streamKey,
+    protocol,
+    network: networkForProtocol(protocol, raw.network),
+    container: containerForProtocol(protocol) ?? fallback.container,
     buffered,
     bufferSec: buffered ? delay : clampNumber(raw.bufferSec, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT),
     obsWebSocket: {

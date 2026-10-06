@@ -4,22 +4,26 @@ release/
 dist/
 *.tsbuildinfo
 
+# ------------------------------------------------------- build identity (generated)
+# Written by scripts/build-info.mjs before every compile; read back by src/main/buildInfo.ts.
+build-info.json
+
 # ---------------------------------------------------------------- dependencies
 node_modules/
 
 # ------------------------------------------------- test fixtures and artefacts
-# Regenerated on demand by `node .test/make-fixtures.mjs`.
-.test/*.mp4
-.test/*.flv
-.test/*.mkv
-.test/*.h264
-.test/*.png
-.test/*.srt
-.test/*.json
-.test/*.log
-.test/*.txt
-.test/*.bundle.mjs
-.test/*.ps1
+# Regenerated on demand by `node test/make-fixtures.mjs`.
+test/*.mp4
+test/*.flv
+test/*.mkv
+test/*.h264
+test/*.png
+test/*.srt
+test/*.json
+test/*.log
+test/*.txt
+test/*.bundle.mjs
+test/*.ps1
 
 # --------------------------------------------------- optional bundled ffmpeg
 # See README: drop ffmpeg.exe/ffprobe.exe into bin/ to ship them with the app.

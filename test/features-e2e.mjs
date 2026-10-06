@@ -13,13 +13,13 @@
  * Every wait is bounded and the whole run sits under a watchdog, so a stall is
  * reported as a failure instead of hanging the suite.
  *
- * Usage: node .test/features-e2e.mjs
+ * Usage: node test/features-e2e.mjs
  */
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installWatchdog, phase } from './harness-util.mjs'
+import { electronEnv, installWatchdog, phase } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -47,7 +47,7 @@ const clipA = path.join(here, 'clip_a.mp4')
 const srtA = path.join(here, 'clip_a.srt')
 
 if (!fs.existsSync(clipA) || !fs.existsSync(srtA)) {
-  console.error('fixtures missing; run `node .test/make-fixtures.mjs` first')
+  console.error('fixtures missing; run `node test/make-fixtures.mjs` first')
   process.exit(1)
 }
 
@@ -86,6 +86,10 @@ fs.writeFileSync(
     {
       ffmpegPath: '',
       ffprobePath: '',
+      // Debug output is off by default now; this suite asserts debug-level log
+      // lines (the composed push target, the stream inventory), so it turns the
+      // switch on for the run.
+      debugLogging: true,
       session: {
         output: {
           server: `rtmp://127.0.0.1:${STREAM_PORT}/live/`,
@@ -108,7 +112,7 @@ fs.writeFileSync(
 /* ---------------- launch the app + CDP scaffolding ---------------- */
 // STREAMER_E2E moves the window off-screen and makes it click-through, so the
 // physical mouse cannot interfere; CDP keeps working normally.
-const appEnv = { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
+const appEnv = electronEnv()
 /*
  * `--lang=zh-CN` pins the interface language.
  *
@@ -278,7 +282,7 @@ function bail(message) {
 {
   const end = phase('stream key masking')
   await ev(`(() => {
-    const tab = [...document.querySelectorAll('.tab')].find(t => t.textContent.includes('输出'))
+    const tab = [...document.querySelectorAll('.tab')].find(t => t.textContent.includes('推流'))
     tab?.click()
     return 'ok'
   })()`)
@@ -365,7 +369,7 @@ function bail(message) {
 /* ================= 3. field alignment ================= */
 {
   const end = phase('field alignment')
-  const TABS = ['视频编码', '音频编码', '字幕', '输出', '高级']
+  const TABS = ['视频编码', '音频编码', '字幕', '推流', '高级']
   const problems = []
   const details = []
   for (const tab of TABS) {
@@ -648,7 +652,7 @@ const RECEIVED = path.join(here, 'features_received.flv')
   )
   await delay(1200)
   await ev(`(() => {
-    const tab = [...document.querySelectorAll('.tabs .tab')].find(b => b.textContent.includes('输出'))
+    const tab = [...document.querySelectorAll('.tabs .tab')].find(b => b.textContent.includes('推流'))
     tab.click()
     return 'ok'
   })()`)

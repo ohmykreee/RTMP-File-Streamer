@@ -15,6 +15,14 @@ export type VideoCodecName = 'h264' | 'hevc' | 'av1' | 'copy'
 export type AudioCodecName = 'aac' | 'libmp3lame' | 'libopus' | 'copy' | 'none'
 export type ContainerName = 'flv' | 'mpegts' | 'mkv'
 
+/**
+ * Push protocol, detected from the address scheme and overridable from the UI.
+ * See `protocol.ts` for the muxer and stream-key handling each one implies.
+ */
+export type StreamProtocol = 'rtmp' | 'srt' | 'rtsp' | 'whip'
+/** Network transport; only RTSP offers a real choice (see `PROTOCOL_NETWORKS`). */
+export type StreamNetwork = 'tcp' | 'udp'
+
 export type SubtitleCodecFamily = 'text' | 'bitmap' | 'unknown'
 
 export interface MediaStreamInfo {
@@ -226,11 +234,29 @@ export interface ObsWebSocketStatus {
 
 export interface OutputSettings {
   /**
-   * RTMP application address including its trailing `/` (OBS calls this the
-   * "server"). The stream key is appended to it directly.
+   * Push address. The protocol dropdown sits next to this field; its value is
+   * re-detected from the address scheme whenever the field loses focus, and the
+   * user can override it afterwards.
    */
   server: string
+  /**
+   * Credential field; its meaning follows {@link protocol} — RTMP/RTSP stream key
+   * (appended to the address), SRT passphrase, WHIP Bearer token (JWT).
+   */
   streamKey: string
+  /** Push protocol (`rtmp` default). */
+  protocol: StreamProtocol
+  /**
+   * Network transport. Only RTSP can actually choose: the other protocols are
+   * locked to the transport they are defined over (see `PROTOCOL_NETWORKS`), and
+   * normalisation clamps this field accordingly.
+   */
+  network: StreamNetwork
+  /**
+   * Container the stream is muxed into. No longer a user choice: the protocol
+   * determines it (`PROTOCOL_CONTAINER`), and this field is derived on load for
+   * compatibility with settings and presets written before that change.
+   */
   container: ContainerName
   /** Extra ffmpeg output options, e.g. `-flvflags no_duration_filesize`. */
   extraOutputArgs: string
@@ -513,6 +539,16 @@ export interface RtmpTestResult {
 
 export interface AppInfo {
   version: string
+  /**
+   * Build identity from `build-info.json` (written by `scripts/build-info.mjs`
+   * at build time). Absent when that file is missing — e.g. `electron-vite dev`
+   * without a prior build — in which case the UI falls back to {@link version}.
+   */
+  commit?: string
+  /** True when the built commit carries no git tag (a nightly build). */
+  nightly?: boolean
+  /** ISO timestamp of the build. */
+  builtAt?: string
   electron: string
   chrome: string
   node: string

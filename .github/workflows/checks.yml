@@ -103,7 +103,7 @@ jobs:
       # Verified rather than assumed, because everything below is real transcoding:
       # a build without the encoders, or without a font for libass to draw with, would
       # otherwise fail deep inside a black-box encode where the cause is invisible.
-      # The subtitle sample is generated here rather than read from `.test/` — those
+      # The subtitle sample is generated here rather than read from `test/` — those
       # fixtures do not exist yet, they are made by `test:unit` further down.
       - name: Report the toolchain the tests will use
         run: |

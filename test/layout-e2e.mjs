@@ -6,13 +6,13 @@
  * tab and asserts they are identical, then also checks that no tab makes the
  * workspace overflow into the player bar.
  *
- * Usage: node .test/layout-e2e.mjs
+ * Usage: node test/layout-e2e.mjs
  */
 import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { installWatchdog } from './harness-util.mjs'
+import { electronEnv, installWatchdog } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
@@ -31,7 +31,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms))
    wording on every machine instead of depending on the developer's system locale. */
 const appProc = spawn(electron, ['.', '--lang=zh-CN', `--remote-debugging-port=${CDP_PORT}`, '--remote-allow-origins=*'], {
   cwd: root,
-  env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined, STREAMER_E2E: '1' }
+  env: electronEnv()
 })
 
 async function waitForTarget(timeoutMs = 30000) {
@@ -138,7 +138,7 @@ for (let i = 0; i < 10; i += 1) {
 }
 note('baseline (视频编码)', `player=${baseline.player.height}px timeline.top=${baseline.timeline.top}`)
 
-const TABS = ['视频编码', '音频编码', '字幕', '输出', '高级']
+const TABS = ['视频编码', '音频编码', '字幕', '推流', '高级']
 
 let allStable = true
 const perTab = []

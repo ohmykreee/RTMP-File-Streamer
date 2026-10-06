@@ -9,7 +9,7 @@
  *              burn-in checks cover an internal (`0:v 1:a 2:s`) track as well as a
  *              sidecar — the two need different addressing
  *
- * Usage: node .test/make-fixtures.mjs
+ * Usage: node test/make-fixtures.mjs
  */
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -59,7 +59,7 @@ const clip = (file, { size, fps, seconds, freq, color, videoOnly }) => {
   )
 }
 
-console.log('generating fixtures in .test/')
+console.log('generating fixtures in test/')
 clip('clip_a.mp4', { size: '1280x720', fps: 30, seconds: 20, freq: 440 })
 clip('clip_b.mp4', { size: '854x480', fps: 25, seconds: 15, freq: 660 })
 clip('clip_c.mp4', { size: '1280x720', fps: 30, seconds: 12, freq: 880, color: 'navy' })
@@ -73,7 +73,7 @@ clip('clip_d.mp4', { size: '640x360', fps: 60, seconds: 45, freq: 550, videoOnly
 
 /*
  * clip_a.srt is the sidecar the burn-in checks sample: the first cue runs 2s→8s and
- * the second 9s→16s. Written here because `.test/*.srt` is ignored, so a fresh
+ * the second 9s→16s. Written here because `test/*.srt` is ignored, so a fresh
  * checkout has to be able to rebuild it with the same cue windows.
  */
 const srtPath = path.join(here, 'clip_a.srt')

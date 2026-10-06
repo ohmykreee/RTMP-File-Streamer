@@ -5,7 +5,7 @@
  * processes and real progress parsing.
  *
  * Run with:
- *   node_modules/electron/dist/electron.exe .test/engine-run.cjs
+ *   node_modules/electron/dist/electron.exe test/engine-run.cjs
  */
 const path = require('node:path')
 const fs = require('node:fs')
@@ -45,7 +45,7 @@ async function main() {
   // regression in that wiring cannot silently pass this test.
   const bundlePath = path.join(projectRoot, 'out', 'main', 'test-entry.cjs')
   if (!fs.existsSync(bundlePath)) {
-    note('FAIL', `missing ${bundlePath} — run \`node .test/build-bundles.mjs\` first`)
+    note('FAIL', `missing ${bundlePath} — run \`node test/build-bundles.mjs\` first`)
     app.exit(1)
     return
   }
@@ -62,7 +62,7 @@ async function main() {
 
   /* ---- probe the test media through the real probe path ---- */
   const probeModule = await import(
-    `file://${path.join(projectRoot, '.test', 'probe.bundle.mjs').replace(/\\/g, '/')}`
+    `file://${path.join(projectRoot, 'test', 'probe.bundle.mjs').replace(/\\/g, '/')}`
   )
   const clipA = path.join(testDir, 'clip_a.mp4')
   const clipB = path.join(testDir, 'clip_b.mp4')
