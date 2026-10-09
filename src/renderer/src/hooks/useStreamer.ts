@@ -41,6 +41,8 @@ const EMPTY_STATUS: EngineStatus = {
   speed: 0,
   fps: 0,
   bitrateKbps: 0,
+  networkKbps: 0,
+  networkState: 'ok',
   droppedFrames: 0,
   frame: 0,
   order: [],

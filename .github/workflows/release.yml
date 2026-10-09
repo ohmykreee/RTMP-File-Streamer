@@ -132,7 +132,7 @@ jobs:
       - name: Build the app bundles
         run: pnpm run build
 
-      - name: Package macOS (x86_64)
+      - name: Package macOS
         run: pnpm exec electron-builder --mac --x64 --dir --config electron-builder.config.cjs
 
       - name: Ad-hoc sign the bundle

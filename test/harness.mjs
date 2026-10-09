@@ -61,6 +61,7 @@ const { buildStreamCommand, buildTestCommand, buildEncoderArgs } = await import(
 const { buildRtmpTarget } = await import(pathToFileURL(path.join(here, 'rtmp.bundle.mjs')).href)
 
 const { probeMedia, embeddedSubtitleRefs, probeSubtitleFile } = await import(pathToFileURL(path.join(here, 'probe.bundle.mjs')).href)
+const { ByteRateMeter } = await import(pathToFileURL(path.join(here, 'byte-rate.bundle.mjs')).href)
 
 const results = []
 function record(name, ok, detail) {
@@ -603,6 +604,66 @@ const builtHw = buildStreamCommand({
 record('hardware encoder requested is honoured when available', builtHw.vencName === 'h264_amf' || builtHw.vencName !== 'h264_amf', `resolved to ${builtHw.vencName}`)
 record('AMF pixel format switched to nv12', builtHw.vencName !== 'h264_amf' || builtHw.args[builtHw.args.indexOf('-pix_fmt') + 1] === 'nv12', builtHw.args[builtHw.args.indexOf('-pix_fmt') + 1])
 
+console.log('\n=== 3b. network send-rate metering ===')
+{
+  /*
+   * The status line's network figure. It is derived from a byte counter that a replaced
+   * encoder pass — and a reconnected publisher — restarts from zero, so the arithmetic
+   * is checked here rather than trusted: a counter reset that slipped through as a large
+   * negative delta would be visible to the user as a nonsense rate, and the startup
+   * burst would show a rate several times the real one.
+   */
+  const T0 = 1_000_000
+
+  // 1 Mbit/s: 125000 bytes per second, reported every 500 ms as ffmpeg does.
+  const steady = new ByteRateMeter()
+  let bytes = 0
+  for (let i = 0; i <= 20; i += 1) {
+    steady.add(bytes, T0 + i * 500)
+    bytes += 62_500
+  }
+  const steadyKbps = steady.kbps(T0 + 10_000)
+  record('a steady 1 Mbit/s counter reads back as 1000 kbit/s', Math.abs(steadyKbps - 1000) < 20, `${steadyKbps.toFixed(0)} kbit/s`)
+
+  const freshMeter = new ByteRateMeter()
+  freshMeter.add(125_000, T0 + 500)
+  record('one sample is not a rate', freshMeter.kbps(T0 + 500) === 0, `${freshMeter.kbps(T0 + 500)}`)
+
+  // The first progress block of a session counts the container header plus the opening
+  // burst; over 0.3 s that is many times the real rate, so it must not be published.
+  const bursting = new ByteRateMeter()
+  bursting.add(400_000, T0 + 300)
+  bursting.add(600_000, T0 + 800)
+  record('the startup burst is not published as a rate', bursting.kbps(T0 + 800) === 0, `${bursting.kbps(T0 + 800)} kbit/s at 0.8 s`)
+
+  // A replaced pass restarts the counter: the step down must be ignored, not averaged in.
+  bursting.add(2_000, T0 + 1300)
+  const afterReset = bursting.kbps(T0 + 1300)
+  record('a counter reset does not produce a negative rate', afterReset >= 0 && afterReset < 4000, `${afterReset.toFixed(0)} kbit/s after a reset (window still holds the pre-reset samples)`)
+
+  const idle = new ByteRateMeter()
+  idle.add(50_000, T0)
+  idle.add(50_000, T0 + 5000)
+  record('a stalled counter reads zero rather than a stale rate', idle.kbps(T0 + 5000) === 0, `${idle.kbps(T0 + 5000)} kbit/s while nothing moves`)
+
+  // A window, not a session average: throughput that doubles mid-run has to show up.
+  const changing = new ByteRateMeter()
+  let moving = 0
+  for (let i = 0; i <= 8; i += 1) {
+    changing.add(moving, T0 + i * 500)
+    moving += i < 4 ? 62_500 : 250_000
+  }
+  const fast = changing.kbps(T0 + 4000)
+  record('the figure follows the recent window, not the session average', fast > 1500, `${fast.toFixed(0)} kbit/s after the rate quadrupled (session average would be ~1000)`)
+
+  const cleared = new ByteRateMeter()
+  cleared.add(100_000, T0)
+  cleared.add(200_000, T0 + 2000)
+  cleared.reset()
+  cleared.add(100_000, T0 + 3000)
+  record('a reset meter reports nothing until it has history again', cleared.kbps(T0 + 5000) === 0, `${cleared.kbps(T0 + 5000)} kbit/s`)
+}
+
 console.log('\n=== 4. executing generated commands ===')
 
 async function execute(name, args, expectFile) {
@@ -721,7 +782,50 @@ const builtRtmpPush = buildStreamCommand({
 const push = spawn(FFMPEG, builtRtmpPush.args, { windowsHide: true })
 let pushOut = ''
 let pushErr = ''
-push.stdout.on('data', (d) => (pushOut += d.toString()))
+/*
+ * Progress blocks are parsed AS THEY ARRIVE, exactly like the engine's `onStdout`.
+ *
+ * Reading `push.stdout` after the process exits (which is what this did) gives every
+ * block the same wall-clock time: the pipe is only drained at the end, so the byte
+ * counter arrives as one burst and any rate derived from it is meaningless — the
+ * samples spanned 0 ms. The app sees them live, so the harness has to as well.
+ */
+const pushSamples = []
+{
+  let buf = ''
+  let current = null
+  const feed = (chunk) => {
+    buf += chunk
+    const lines = buf.split(/\r?\n/)
+    buf = lines.pop() ?? ''
+    for (const line of lines) {
+      const eq = line.indexOf('=')
+      if (eq <= 0) continue
+      const key = line.slice(0, eq).trim()
+      const value = line.slice(eq + 1).trim()
+      if (key === 'frame') {
+        if (!current) current = { frame: null, t: null, bytes: null, at: null }
+        current.frame = Number(value)
+      } else if (key === 'out_time_us') {
+        if (!current) current = { frame: null, t: null, bytes: null, at: null }
+        current.t = Number(value) / 1e6
+      } else if (key === 'total_size') {
+        // Bytes written towards the server, and when the block carrying them arrived.
+        if (!current) current = { frame: null, t: null, bytes: null, at: null }
+        current.bytes = Number(value)
+        current.at = Date.now()
+      } else if (key === 'progress') {
+        if (current && Number.isFinite(current.t)) pushSamples.push(current)
+        current = null
+      }
+    }
+  }
+  push.stdout.on('data', (d) => {
+    const text = d.toString()
+    pushOut += text
+    feed(text)
+  })
+}
 push.stderr.on('data', (d) => (pushErr += d.toString()))
 
 const startedAt = Date.now()
@@ -737,27 +841,9 @@ const pushWallSec = (Date.now() - startedAt) / 1000
 listener.kill('SIGKILL')
 await new Promise((r) => setTimeout(r, 800))
 
-/* Parse every progress block the same way the engine's onStdout does.
- * ffmpeg emits a block as a set of `key=value` lines terminated by
- * `progress=continue|end`, so a sample is only complete once all fields seen. */
-const progressSamples = []
-let current = null
-for (const line of pushOut.split(/\r?\n/)) {
-  const eq = line.indexOf('=')
-  if (eq <= 0) continue
-  const key = line.slice(0, eq).trim()
-  const value = line.slice(eq + 1).trim()
-  if (key === 'frame') {
-    if (!current) current = { frame: null, t: null }
-    current.frame = Number(value)
-  } else if (key === 'out_time_us') {
-    if (!current) current = { frame: null, t: null }
-    current.t = Number(value) / 1e6
-  } else if (key === 'progress') {
-    if (current && Number.isFinite(current.t)) progressSamples.push({ t: current.t, frame: current.frame ?? 0 })
-    current = null
-  }
-}
+/* One entry per progress block, collected live by the reader above:
+ * `t` is ffmpeg's output timeline, `bytes` its counters, `at` when it arrived. */
+const progressSamples = pushSamples
 
 const received = path.join(here, 'received.flv')
 const receivedSize = fs.existsSync(received) ? fs.statSync(received).size : 0
@@ -777,6 +863,47 @@ record(
   (times.at(-1) ?? 0) > infoB.durationSec - 2,
   `final out_time=${times.at(-1)?.toFixed(2)}s of ${infoB.durationSec}s`
 )
+
+/*
+ * The status line's network figure depends entirely on `total_size` being reported
+ * for a real publish session and on it counting bytes that reach the server. Neither
+ * is obvious from the ffmpeg documentation — it is `N/A` for outputs that do not
+ * count — so it is measured here against an ingest that really received the stream
+ * rather than assumed from the counter alone.
+ */
+const byteSamples = progressSamples.filter((s) => Number.isFinite(s.bytes) && s.bytes > 0)
+const byteCounts = byteSamples.map((s) => s.bytes)
+const byteCountsRise = byteCounts.every((b, i) => i === 0 || b >= byteCounts[i - 1])
+record(
+  'the push reports bytes written to the server',
+  byteSamples.length >= 3 && byteCountsRise && byteCounts.at(-1) > 0,
+  `${byteSamples.length}/${progressSamples.length} progress blocks carried total_size, final ${((byteCounts.at(-1) ?? 0) / 1048576).toFixed(2)} MB`
+)
+record(
+  'the byte count matches what the ingest received',
+  receivedSize > 0 && (byteCounts.at(-1) ?? 0) > receivedSize * 0.75 && (byteCounts.at(-1) ?? 0) < receivedSize * 1.35,
+  `ffmpeg counted ${((byteCounts.at(-1) ?? 0) / 1048576).toFixed(2)} MB, the listener wrote ${(receivedSize / 1048576).toFixed(2)} MB`
+)
+{
+  const meter = new ByteRateMeter()
+  for (const s of byteSamples) meter.add(s.bytes, s.at)
+  const derived = meter.kbps(Date.now())
+  // The window the meter keeps is the last couple of seconds, so the average it is
+  // compared against is the one over the SAME span: a whole-push average is a
+  // different quantity (it is dominated by the ramp-up) and the two legitimately
+  // differ by a few percent.
+  const windowStart = Math.max(0, byteSamples.findIndex((s) => s.at >= byteSamples.at(-1).at - 2000))
+  const windowSamples = byteSamples.slice(windowStart)
+  const average =
+    windowSamples.length >= 2
+      ? ((windowSamples.at(-1).bytes - windowSamples[0].bytes) / ((windowSamples.at(-1).at - windowSamples[0].at) / 1000)) * 0.008
+      : 0
+  record(
+    'the meter derives a rate from the reported counter',
+    derived > 0 && average > 0 && Math.abs(derived - average) / average < 0.2,
+    `meter ${derived.toFixed(0)} kbit/s vs ${average.toFixed(0)} kbit/s over the meter's own ${windowSamples.length}-sample window (whole push: ${((byteCounts.at(-1) - byteCounts[0]) / ((byteSamples.at(-1).at - byteSamples[0].at) / 1000) * 0.008).toFixed(0)} kbit/s)`
+  )
+}
 
 if (receivedSize > 0) {
   const check = await run(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', received])

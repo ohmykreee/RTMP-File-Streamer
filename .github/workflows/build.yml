@@ -166,7 +166,7 @@ jobs:
       - name: Build the app bundles
         run: pnpm run build
 
-      - name: Package macOS (x86_64)
+      - name: Package macOS
         run: pnpm exec electron-builder --mac --x64 --dir --config electron-builder.config.cjs
 
       # There is no signing identity for this app on a runner, and an unsigned

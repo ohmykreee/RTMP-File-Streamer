@@ -436,6 +436,15 @@ export interface LogEntry {
   message: string
 }
 
+/**
+ * How the measured send rate compares with what the session is trying to push.
+ *
+ * `ok` is a link that is keeping up (or one with no figure yet), `warn` is a link
+ * running at the edge — the occasional hitch — and `bad` is one taking well under
+ * what is being produced, which viewers see as continuous stalling.
+ */
+export type NetworkState = 'ok' | 'warn' | 'bad'
+
 export interface EngineStatus {
   state: EngineState
   /** Index into the playlist, or -1 when nothing is loaded. */
@@ -450,6 +459,17 @@ export interface EngineStatus {
   speed: number
   fps: number
   bitrateKbps: number
+  /**
+   * What is actually going out to the server, in kbit/s, measured from ffmpeg's own
+   * byte count over a short trailing window. 0 = no figure yet.
+   *
+   * Deliberately separate from `bitrateKbps`: that one is the rate the encoder was
+   * *asked* for and says nothing about container overhead or whether the link can
+   * carry it. This one is the bytes that left.
+   */
+  networkKbps: number
+  /** The verdict on {@link networkKbps}, decided by the engine (see `NetworkState`). */
+  networkState: NetworkState
   droppedFrames: number
   /**
    * True when the session runs as two processes (encoder + publisher).

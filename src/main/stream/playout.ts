@@ -6,6 +6,7 @@ import type { Readable } from 'node:stream'
 import type { LogLevel } from '@shared/types'
 import type { Translate, TranslationKey } from '@shared/i18n'
 import { EN } from '@shared/i18n'
+import { ByteRateMeter } from './byte-rate'
 
 /**
  * Two-process playout: an encoder writes MPEG-TS segments, a long-lived pusher
@@ -319,6 +320,14 @@ export class Playout {
   /** What the publisher itself reports: its own pace and how much it has sent. */
   private pusherSpeed = 0
   private pusherSentBytes = 0
+  /**
+   * Throughput towards the server, off the publisher's own byte count.
+   *
+   * This is the publisher's job to report because it is the process that owns the
+   * socket: the relay's byte counters stop at the pipe (see `getRelayStats`), and the
+   * encoder's `bitrate` is what it produced, not what the link carried.
+   */
+  private readonly networkRate = new ByteRateMeter()
   private pusherLastReportAt = 0
   /** True once the "publisher has gone quiet" warning was written for this silence. */
   private pusherSilenceReported = false
@@ -444,6 +453,10 @@ export class Playout {
     this.carry = Buffer.alloc(0)
     this.relayedBytes = 0
     this.pumpedBytes = 0
+    // The byte counter restarts with the new publisher, so the old samples describe a
+    // process that no longer exists.
+    this.networkRate.reset()
+    this.pusherSentBytes = 0
     this.passMaterial.clear()
     this.tsPts = { pass: 0, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
     this.stopping = false
@@ -542,6 +555,17 @@ export class Playout {
   /** Where the pusher has published up to (seconds on the session timeline). */
   getPublishedSec(): number {
     return this.publishedSec
+  }
+
+  /**
+   * What the publish session is putting on the wire, in kbit/s (0 = no figure yet).
+   *
+   * Measured, not configured: it is the publisher's byte count over a trailing
+   * window, so it reflects the link and the container overhead rather than the
+   * encoder's target rate.
+   */
+  getNetworkKbps(): number {
+    return this.networkRate.kbps(Date.now())
   }
 
   /** The timeline value the next pass will start at. */
@@ -1022,9 +1046,13 @@ export class Playout {
         }
       } else if (key === 'total_size') {
         // Bytes the publisher has actually handed to the muxer, i.e. what left the
-        // process towards the server.
+        // process towards the server. Fed straight into the rate meter, which is what
+        // the status line reports as the network figure.
         const bytes = Number(value)
-        if (Number.isFinite(bytes) && bytes > 0) this.pusherSentBytes = bytes
+        if (Number.isFinite(bytes) && bytes > 0) {
+          this.pusherSentBytes = bytes
+          this.networkRate.add(bytes, Date.now())
+        }
       } else if (key === 'speed') {
         // The publisher's own pace. `-re` should hold it at ~1x; anything below that
         // is the stream running slow, whatever the buffer looks like.

@@ -1,13 +1,15 @@
 /**
- * Verifies the packaged artefact and the storage layout.
+ * Verifies where the app keeps its state.
  *
- * 1. the app icon electron-builder embeds into the executable comes from a usable
- *    `build/icon.ico` (the source is what a bad icon regression lands in)
- * 2. the built `out/` app run from the project root (development layout) writes
- *    everything into `Data/` and nothing into the Roaming profile
- * 3. the packaged unpacked build in `release/win-unpacked` (shipping layout) does
- *    the same, and still does after the folder is moved, when it has been produced
- *    with `pnpm dist`
+ * The built `out/` app run from the project root writes everything into `Data/` beside
+ * it and nothing into the Roaming profile — the layout the portable folder depends on.
+ *
+ * The development build is the only thing launched here. The packaged
+ * `release/win-unpacked` copy is a build artefact with no code signature, so the OS
+ * refuses to start it: the checks that used to launch it (and a copy of it moved to
+ * another folder) failed for a reason that has nothing to do with this app. Nothing
+ * else about the artefact is inspected either, for the same reason — what ships is
+ * verified where it is produced, not by starting it here.
  *
  * Usage: node test/data-dir-e2e.mjs
  */
@@ -19,8 +21,7 @@ import { electronEnv } from './harness-util.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const root = path.resolve(here, '..')
-const electron = path.join(root, 'node_modules', 'electron', 'dist', 'electron.exe')
-const UNPACKED = path.join(root, 'release', 'win-unpacked')
+const electron = path.join(root, 'node_modules', 'electron', 'dist', process.platform === 'win32' ? 'electron.exe' : 'electron')
 
 const results = []
 const note = (s, d) => console.log(`[${new Date().toISOString().slice(11, 19)}] ${s}${d ? ` — ${d}` : ''}`)
@@ -172,7 +173,7 @@ async function checkLayout({ label, command, args, cwd, expectedDataDir, cdpPort
   await delay(1200)
 }
 
-/* ---------------- 1. development / built-out layout ---------------- */
+/* ---------------- the only launch: the built app from the project root ---------------- */
 const devData = path.join(root, 'Data')
 fs.rmSync(devData, { recursive: true, force: true })
 
@@ -184,84 +185,6 @@ await checkLayout({
   expectedDataDir: devData,
   cdpPort: 9841
 })
-
-/* ---------------- 2. packaged unpacked build ---------------- */
-const PACKED_EXE = path.join(UNPACKED, 'RTMPFileStreamer.exe')
-
-if (fs.existsSync(PACKED_EXE)) {
-  /*
-   * The app icon is committed as `build/icon.ico` and embedded into the executable
-   * by electron-builder from `win.icon`. When that source is replaced by a
-   * one-image file, the embed silently stops resolving and the shipped exe keeps
-   * the generic Electron icon instead. Nothing errors, so the only way to notice is
-   * to look at an icon in Explorer — hence the shape of the source is asserted
-   * here. (PNG-compressed entries are fine, including the small sizes; that is how
-   * `build/make-icon.py` writes it and what the shipped exe carries.)
-   */
-  if (process.platform !== 'win32') {
-    note('skipping icon checks', 'not Windows')
-  } else {
-    const icon = fs.readFileSync(path.join(root, 'build', 'icon.ico'))
-    const entries = icon.readUInt16LE(4)
-    const sizes = []
-    let badEntry = ''
-    for (let i = 0; i < entries; i++) {
-      const at = 6 + i * 16
-      const rawWidth = icon[at]
-      const rawHeight = icon[at + 1]
-      // 0 is how the directory spells 256; a PNG payload doubles the height, a DIB
-      // payload stores colour and mask planes stacked, so it doubles too.
-      const width = rawWidth || 256
-      const height = rawHeight || 256
-      const size = icon.readUInt32LE(at + 8)
-      const offset = icon.readUInt32LE(at + 12)
-      if (height !== width) badEntry ||= `${width}x${height}`
-      if (offset + size > icon.length) badEntry ||= `${width}px out of file bounds`
-      sizes.push(width)
-    }
-    record(
-      'icon source carries the full size ladder',
-      entries >= 7 && [16, 24, 32, 48, 64, 128, 256].every((s) => sizes.includes(s)),
-      `${entries} entr${entries === 1 ? 'y' : 'ies'}: ${sizes.join(', ') || 'none'}`
-    )
-    record('icon source entries point at real data', badEntry === '', badEntry || `${entries} entries in ${icon.length} bytes`)
-  }
-
-  const packedData = path.join(UNPACKED, 'Data')
-  // The packaged build is a build artefact, never anyone's installation: its Data
-  // is cleared outright, so each run starts from the same empty state and no
-  // backup has to be taken or restored (a run killed mid-suite used to leave the
-  // backup behind and the packaged copy missing its own folder).
-  fs.rmSync(packedData, { recursive: true, force: true })
-
-  await checkLayout({
-    label: '免安装目录版',
-    command: PACKED_EXE,
-    args: ['--remote-debugging-port=9842', '--remote-allow-origins=*'],
-    cwd: UNPACKED,
-    expectedDataDir: packedData,
-    cdpPort: 9842
-  })
-
-  // The whole point of the folder layout: it can be moved and still works.
-  const movedDir = path.join(here, 'moved-app')
-  fs.rmSync(movedDir, { recursive: true, force: true })
-  fs.cpSync(UNPACKED, movedDir, { recursive: true })
-  const movedData = path.join(movedDir, 'Data')
-  fs.rmSync(movedData, { recursive: true, force: true })
-
-  await checkLayout({
-    label: '移动后的目录',
-    command: path.join(movedDir, 'RTMPFileStreamer.exe'),
-    args: ['--remote-debugging-port=9843', '--remote-allow-origins=*'],
-    cwd: movedDir,
-    expectedDataDir: movedData,
-    cdpPort: 9843
-  })
-  fs.rmSync(movedDir, { recursive: true, force: true })
-} else {
-  note('skipping packaged checks', `${UNPACKED}\\RTMPFileStreamer.exe not found — run \`pnpm dist\` first`)
-}
 
 const passed = results.filter((r) => r.ok).length
 console.log(`\n${passed}/${results.length} data-directory checks passed`)

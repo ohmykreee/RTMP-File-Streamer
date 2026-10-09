@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { EngineState, Language, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
+import type { EngineState, Language, NetworkState, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
 import type { TranslationKey } from '@shared/i18n'
 import { translatorFor } from '@shared/i18n'
 import { useStreamer } from './hooks/useStreamer'
@@ -32,6 +32,19 @@ const STATE_KEY: Record<EngineState, TranslationKey> = {
 
 /** Shown until the settings (and with them the saved language) arrive. */
 const BOOT_LANGUAGE: Language = 'en'
+
+/**
+ * CSS class per link verdict, so the measured send rate is the one figure on the
+ * status line that carries a judgement: white while the link keeps up, amber when it
+ * is running at the edge, red when it is well short of what is being produced. The
+ * verdict itself is the engine's (see `EngineStatus.networkState`), not a comparison
+ * made here — the renderer has no idea what the session is trying to push.
+ */
+const NETWORK_CLASS: Record<NetworkState, string> = {
+  ok: '',
+  warn: 'warn',
+  bad: 'bad'
+}
 
 export default function App(): React.JSX.Element {
   const st = useStreamer()
@@ -375,18 +388,24 @@ export default function App(): React.JSX.Element {
                 {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
               </span>
               {/* Buffered mode runs two processes: the figures above describe what has
-                  been PUBLISHED, the marked ones describe the ENCODER, which is free
-                  to run ahead of real time. */}
+                  been PUBLISHED, the rest describe the ENCODER, which is free to run
+                  ahead of real time.
+                  The last figure is the measured egress, i.e. what the link is
+                  actually carrying, which nothing else on this line can say: the
+                  encoder's bitrate is the rate it was asked for, not the bytes that
+                  left. It is also the only figure that changes colour, because it is
+                  the only one that can report a problem: the engine compares it with
+                  what the session is pushing and says so (see `NetworkState`). */}
               {status.encoder ? (
                 <>
-                  <span className="warn">
-                    {t('app.encoderSpeed', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })}
+                  <span title={t('app.statEncoderTitle')}>{t('app.encoderProcess', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })}</span>
+                  <span title={t('app.statEncoderTitle')}>fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
+                  <span title={t('app.statEncoderBitrateTitle')}>
+                    {t('app.encoderBitrate', { rate: formatBitrate(status.encoder.bitrateKbps) })}
                   </span>
-                  <span className="warn">fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
-                  <span className="warn">{formatBitrate(status.encoder.bitrateKbps)}</span>
                   <span title={t('app.statLeadTitle')}>{t('app.bufferLead', { sec: status.encoder.leadSec.toFixed(1) })}</span>
-                  <span title={t('app.statSpeedTitle')}>
-                    {t('app.publisherSpeed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
+                  <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
+                    {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
                   </span>
                 </>
               ) : (
@@ -394,8 +413,11 @@ export default function App(): React.JSX.Element {
                   <span title={t('app.statEncodeSpeedTitle')}>
                     {t('app.speed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
                   </span>
-                  <span title={t('app.statBitrateTitle')}>{formatBitrate(status.bitrateKbps)}</span>
+                  <span title={t('app.statBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.bitrateKbps) })}</span>
                   <span title={t('app.statFpsTitle')}>fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
+                  <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
+                    {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
+                  </span>
                 </>
               )}
               {status.droppedFrames > 0 && <span className="warn">{t('app.droppedFrames', { n: status.droppedFrames })}</span>}

@@ -6,6 +6,7 @@ import type {
   LogEntry,
   LogLevel,
   MediaInfo,
+  NetworkState,
   PlaylistItem,
   PlaylistItemStatus,
   SessionSettings
@@ -15,6 +16,7 @@ import type { Language } from '@shared/types'
 import type { StreamProtocol } from '@shared/types'
 import { mainT } from '../i18n'
 import { Playout } from './playout'
+import { ByteRateMeter } from './byte-rate'
 import {
   buildPushTarget,
   containerForProtocol,
@@ -95,6 +97,32 @@ const NEXT_PASS_DELAY_MS = 150
 const REPUBLISH_DELAY_MS = 1000
 
 /**
+ * Where the send-rate readout stops being reassuring, as a share of what the session
+ * is expected to put on the wire.
+ *
+ * Fixed on purpose (see `classifyNetwork`): the two failure modes are far apart, so a
+ * line between them is decidable, while a threshold that adapted to recent history
+ * would drift towards whatever the link happens to be doing and stop warning at all.
+ *
+ * - `WARN` is the edge: the link is no longer taking the whole rate. Measured on a
+ *   healthy local push the figure reads at or just above the reference — the container
+ *   overhead the reference omits is worth a few percent — so a stretch below this line
+ *   is a link that is genuinely short, not jitter.
+ * - `BAD` is past a hitch: under 60% of what is being produced is the point where the
+ *   publisher backs up and viewers see continuous stalling.
+ *
+ * The `_ESTIMATED` pair is the same judgement with a guessed reference (quality-
+ * targeted encoding, where no bitrate was ever configured): looser, because the
+ * denominator is an estimate rather than a number the user chose.
+ */
+const NETWORK_WARN_RATIO = 0.85
+const NETWORK_BAD_RATIO = 0.6
+const NETWORK_WARN_RATIO_ESTIMATED = 0.5
+const NETWORK_BAD_RATIO_ESTIMATED = 0.3
+/** How long a link must hold a better reading before the colour clears. */
+const NETWORK_RECOVER_MS = 3000
+
+/**
  * Whether this session runs the buffered two-process playout.
  *
  * The switch is the authority; the delay only decides how deep the buffer is. A
@@ -144,6 +172,19 @@ export class StreamEngine {
   private speed = 0
   private fps = 0
   private bitrateKbps = 0
+  /**
+   * Throughput towards the server, off ffmpeg's own byte count (`-progress`'s
+   * `total_size`).
+   *
+   * Used by the single-process pipeline, which is itself the publisher. The buffered
+   * pipeline has a separate publisher process and takes the figure from it instead, so
+   * this meter stays empty there.
+   */
+  private readonly networkRate = new ByteRateMeter()
+  /** Link verdict behind the network readout's colour (see `classifyNetwork`). */
+  private networkState: NetworkState = 'ok'
+  /** When the link last read as healthy, for the recovery delay. */
+  private networkOkSince = 0
   private droppedFrames = 0
   private frame = 0
   private connected = false
@@ -256,6 +297,7 @@ export class StreamEngine {
   getStatus(): EngineStatus {
     const total = this.items.reduce((sum, i) => sum + (i.durationSec || 0), 0)
     const encoded = this.encodedSec()
+    const networkKbps = this.networkKbps()
     const itemStatus: Record<string, PlaylistItemStatus> = {}
     const itemError: Record<string, string> = {}
     for (const i of this.items) {
@@ -272,6 +314,8 @@ export class StreamEngine {
       speed: this.speed,
       fps: this.fps,
       bitrateKbps: this.bitrateKbps,
+      networkKbps,
+      networkState: this.classifyNetwork(networkKbps),
       droppedFrames: this.droppedFrames,
       frame: this.frame,
       order: this.items.map((i) => i.id),
@@ -300,6 +344,120 @@ export class StreamEngine {
   private encodedSec(): number | null {
     if (!this.playout || !this.encoderStats) return null
     return Math.max(this.completedSec, this.playout.getEncodedSec())
+  }
+
+  /**
+   * What the session is putting on the wire, in kbit/s (0 = no figure yet).
+   *
+   * There is only one publishing process in either pipeline, so the answer is the
+   * same question in both: in buffered mode the publisher owns the socket and reports
+   * it, in single-process mode the one ffmpeg does.
+   */
+  private networkKbps(): number {
+    return this.playout ? this.playout.getNetworkKbps() : this.networkRate.kbps(Date.now())
+  }
+
+  /**
+   * The bitrate the session is expected to put on the wire, in kbit/s — the reference
+   * the measured rate is judged against.
+   *
+   * The configured video bitrate plus the audio one, with a margin for what the
+   * container adds (a few percent of muxing and protocol framing). That is the number
+   * the user chose, so a shortfall against it is unambiguous, and nothing is allowed to
+   * overrule it: an earlier revision capped it with an estimate derived from the output
+   * resolution, which quietly replaced the configured rate with a guess whenever the
+   * guess was lower — and reported a healthy session as a broken one.
+   *
+   * The TARGET is read, never the ceiling that sits next to it: `maxBitrateKbps` is a
+   * different field with a different job (it is what a variable-bitrate encoder may
+   * spend on a hard scene), it is only written by the rate-control modes that use it,
+   * and it keeps whatever it was last set to after the user switches back to CBR. The
+   * settings file that produced this rule had `bitrateKbps: 4500` next to a stale
+   * `maxBitrateKbps: 6000`, so judging against the ceiling reported a healthy 4.3 Mbps
+   * as falling short of a rate the encoder was never asked to produce.
+   *
+   * Quality-targeted encoding configures no bitrate at all, and there is nothing to
+   * invent in its place: the rate the encoder is producing is used, which is available
+   * (it is the same figure the status line shows as the encode rate) and is what the
+   * link has to carry. It does read low on a link that is already saturated — a
+   * throttle drags the encoder down with it — but the verdict is reached while the link
+   * is still being pushed, before that happens.
+   */
+  private networkReferenceKbps(): number {
+    const settings = this.deps.getSettings()
+    const target = settings.video.rateControl === 'crf' ? 0 : Math.max(0, settings.video.bitrateKbps)
+    if (target > 0) return Math.round((target + Math.max(0, settings.audio.bitrateKbps)) * 1.05)
+    return Math.round(this.playout ? (this.encoderStats?.bitrateKbps ?? 0) : this.bitrateKbps)
+  }
+
+  /**
+   * Turns the measured egress into the verdict behind the readout's colour.
+   *
+   * Fixed ratios compared against {@link networkReferenceKbps}, because the two failure
+   * modes are far apart and a line between them is decidable, while a threshold that
+   * adapted to recent history would drift towards whatever the link happens to be doing
+   * and stop warning at all. A healthy session reads at or above the reference, since
+   * the measured bytes include the container overhead the reference does not.
+   *
+   * - `WARN` is the edge: the link is no longer taking the whole rate, which is where
+   *   the occasional hitch appears.
+   * - `BAD` is past a hitch: well under half of what is being produced, so the
+   *   publisher backs up and viewers see continuous stalling.
+   *
+   * Where no bitrate was configured the reference is a live measurement rather than a
+   * setting, so the lines are correspondingly looser.
+   *
+   * Judged from the first reading the meter can produce — there is no settling period.
+   * That figure arrives about a second in, and in the buffered pipeline it covers the
+   * moment the publisher's backlog is still being filled, so a session can open on a
+   * short amber or red stretch and recover on its own once the buffer is full. That is
+   * the honest reading of "how fast are the bytes leaving right now"; the alternative,
+   * holding the verdict back until the number becomes representative, hides a link that
+   * is genuinely short for as long as the buffer lasts.
+   *
+   * A recovered link has to hold before the colour clears, so one good sample cannot
+   * hide a link that is still short.
+   */
+  private classifyNetwork(measuredKbps: number): NetworkState {
+    /*
+     * A session that is not running has nothing to judge, and this is not just tidiness:
+     * the byte counter keeps whatever it last reported with it, so a `getStatus()` after
+     * the session ended would re-derive the last verdict and paint the idle status line
+     * with it. Nothing to judge means nothing to warn about.
+     */
+    if (this.state === 'idle' || this.stopping) return 'ok'
+    const reference = this.networkReferenceKbps()
+    const configured = this.deps.getSettings().video.rateControl !== 'crf'
+    if (reference < 200 || measuredKbps <= 0) return this.decayNetworkState('ok')
+    const ratio = measuredKbps / reference
+    const warn = configured ? NETWORK_WARN_RATIO : NETWORK_WARN_RATIO_ESTIMATED
+    const bad = configured ? NETWORK_BAD_RATIO : NETWORK_BAD_RATIO_ESTIMATED
+    if (ratio < bad) return this.decayNetworkState('bad')
+    if (ratio < warn) return this.decayNetworkState('warn')
+    return this.decayNetworkState('ok')
+  }
+
+  /** Applies the recovery delay to a state that reads better than the current one. */
+  private decayNetworkState(next: NetworkState): NetworkState {
+    const now = Date.now()
+    if (next === this.networkState) {
+      if (next === 'ok') this.networkOkSince = now
+      return next
+    }
+    // Getting worse is immediate: a link that just dropped below the line is exactly
+    // what the warning is for.
+    if (next === 'bad' || (next === 'warn' && this.networkState === 'ok')) {
+      this.networkState = next
+      this.networkOkSince = 0
+      return next
+    }
+    // Getting better waits: `ok -> warn` above is the only upgrade that is instant.
+    if (this.networkOkSince === 0) this.networkOkSince = now
+    if (now - this.networkOkSince >= NETWORK_RECOVER_MS) {
+      this.networkState = next
+      if (next === 'ok') this.networkOkSince = now
+    }
+    return this.networkState
   }
 
   private emitStatus(): void {
@@ -366,6 +524,12 @@ export class StreamEngine {
     this.frame = 0
     this.droppedFrames = 0
     this.encoderStats = null
+    this.networkRate.reset()
+    // Stamped here as well as on the transitions below: with no timestamp the first
+    // reading that looks healthy would clear a colour it has not earned, which is
+    // exactly the reading the opening moments of a buffered session produce.
+    this.networkState = 'ok'
+    this.networkOkSince = Date.now()
   }
 
   private emitPlaylist(): void {
@@ -466,9 +630,10 @@ export class StreamEngine {
     this.startPositionSec = 0
     this.completedSec = 0
     this.itemDuration = 0
-    this.speed = 0
-    this.bitrateKbps = 0
     this.startedAt = null
+    // The figures this session produced die with it, so a status line read after the
+    // stop shows the idle state rather than the last second of the run.
+    this.resetSessionStats()
     for (const item of this.items) {
       if (item.status === 'live' || item.status === 'preparing') item.status = 'pending'
     }
@@ -646,6 +811,10 @@ export class StreamEngine {
     this.positionSec = 0
     this.currentIndex = -1
     this.startedAt = null
+    // Same reason as in `stop()`: the run is over, so nothing about it may stay on the
+    // status line — including the link verdict, which would otherwise keep the colour
+    // the session ended on.
+    this.resetSessionStats()
     this.emitStatus()
   }
 
@@ -1329,6 +1498,14 @@ export class StreamEngine {
               this.log('info', mainT('main.engine.rtmpAccepted'))
             }
           }
+          break
+        }
+        case 'total_size': {
+          // Bytes this process has written to the server, i.e. the network figure.
+          // Absent for outputs that do not count bytes, in which case the readout
+          // stays blank rather than showing a made-up number.
+          const bytes = Number(value)
+          if (Number.isFinite(bytes) && bytes > 0) this.networkRate.add(bytes, Date.now())
           break
         }
         case 'frame': {

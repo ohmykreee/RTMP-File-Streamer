@@ -58,6 +58,12 @@ body {
   color: var(--warn);
 }
 
+/* A measured figure that is short of what it should be, i.e. worse than a warning:
+   the send rate when the link is taking well under what is being produced. */
+.bad {
+  color: var(--danger);
+}
+
 .pad {
   padding: 10px 14px;
 }

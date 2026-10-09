@@ -4,6 +4,7 @@
  *   test/probe.bundle.mjs    - ffprobe wrapper for the plain-node harness
  *   test/i18n.bundle.mjs     - message tables + locale rules for the same harness
  *   test/rtmp.bundle.mjs     - RTMP target composition for the same harness
+ *   test/byte-rate.bundle.mjs - the network send-rate meter for the same harness
  *   out/main/test-entry.cjs   - engine + builder for the Electron integration run
  *
  * (`test/obs.bundle.mjs` is bundled by harness.mjs itself, next to the checks
@@ -65,6 +66,13 @@ const targets = [
     // defines every key and that the detection rules match the documented ones.
     entry: 'src/shared/i18n/index.ts',
     out: 'test/i18n.bundle.mjs',
+    format: 'esm'
+  },
+  {
+    // The send-rate meter behind the status line's network figure. Pure arithmetic
+    // over (bytes, timestamp) samples, so the harness can drive it without waiting.
+    entry: 'src/main/stream/byte-rate.ts',
+    out: 'test/byte-rate.bundle.mjs',
     format: 'esm'
   },
   {
