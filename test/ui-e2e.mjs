@@ -736,7 +736,7 @@ const backToZh = JSON.parse(
 )
 record(
   'switching back restores the Chinese interface',
-  backToZh.title === 'RTMP 文件串流器' && backToZh.lang === 'zh',
+  backToZh.title === 'RTMP 文件串流' && backToZh.lang === 'zh',
   `${backToZh.title} / lang=${backToZh.lang}`
 )
 

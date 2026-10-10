@@ -330,7 +330,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
         {/* ------------------------------------------------------------ VIDEO */}
         <TabPane value="video" locked={props.locked}>
-          <Field label={t('settings.video.codec')} hint={t('settings.video.codecHint')}>
+          <Field label={t('settings.video.codec')}>
             <NativeSelect
               wrapperClassName="w-full"
               value={v.codec}
@@ -517,7 +517,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
 
         {/* ------------------------------------------------------------ AUDIO */}
         <TabPane value="audio" locked={props.locked}>
-          <Field label={t('settings.audio.codec')} hint={t('settings.audio.codecHint')}>
+          <Field label={t('settings.audio.codec')}>
             <NativeSelect
               wrapperClassName="w-full"
               value={a.codec}
@@ -1397,7 +1397,6 @@ function PresetBar({
           const preset = all.find((p) => p.id === e.target.value)
           if (preset) onSelectPreset(preset)
         }}
-        title={t('settings.preset.selectTitle')}
       >
         <NativeSelectOption value="">{t('settings.preset.custom')}</NativeSelectOption>
         {presetOptions}
@@ -1450,7 +1449,7 @@ function PresetBar({
       {menu !== 'none' && (
         <div className="preset-menu" data-mode={menu}>
           <div className="preset-menu-title">
-            {menu === 'save' ? t('settings.preset.menuTitle') : t('settings.preset.renameMenuTitle')}
+            {menu === 'save' ? t('settings.preset.menuTitle') : t('settings.preset.renameTitle', { name: active?.name ?? '' })}
           </div>
           <div className="preset-menu-row">
             <Input

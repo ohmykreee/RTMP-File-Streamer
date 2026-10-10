@@ -490,11 +490,11 @@ await ev(`(() => {
 })()`)
 await delay(600)
 
-const renameBtn = await ev(`[...document.querySelectorAll('.preset-bar button')].some(b => b.textContent.trim() === '改名')`)
+const renameBtn = await ev(`[...document.querySelectorAll('.preset-bar button')].some(b => b.textContent.trim() === '重命名')`)
 record('a rename button appears for the selected user preset', renameBtn)
 
 await ev(`(() => {
-  const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '改名')
+  const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '重命名')
   btn?.click()
   return 'ok'
 })()`)
@@ -518,7 +518,7 @@ await ev(`(() => {
 })()`)
 await delay(250)
 await ev(`(() => {
-  const btn = [...document.querySelectorAll('.preset-menu[data-mode="rename"] button')].find(b => b.textContent.trim() === '改名')
+  const btn = [...document.querySelectorAll('.preset-menu[data-mode="rename"] button')].find(b => b.textContent.trim() === '重命名')
   btn?.click()
   return 'ok'
 })()`)
@@ -555,7 +555,7 @@ record(
 
 /* Rename again to check the store keeps one entry (no duplicate row appears). */
 await ev(`(() => {
-  const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '改名')
+  const btn = [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.trim() === '重命名')
   btn?.click()
   return 'ok'
 })()`)
@@ -570,7 +570,7 @@ await ev(`(() => {
 })()`)
 await delay(250)
 await ev(`(() => {
-  const btn = [...document.querySelectorAll('.preset-menu[data-mode="rename"] button')].find(b => b.textContent.trim() === '改名')
+  const btn = [...document.querySelectorAll('.preset-menu[data-mode="rename"] button')].find(b => b.textContent.trim() === '重命名')
   btn?.click()
   return 'ok'
 })()`)
