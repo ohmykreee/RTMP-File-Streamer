@@ -327,11 +327,17 @@ function bail(message) {
   // inputs hide their native spinner (selects keep the dropdown arrow), and
   // tune defaults to "unset" (AMF + zerolatency is incompatible with some
   // streaming servers, so it must be opt-in).
-  const pwdBg = await ev(`(() => {
-    const keyField = [...document.querySelectorAll('.settings-body .field')].find(f => (f.querySelector('.field-label')?.textContent ?? '').trim().startsWith('串流密钥'))
-    return getComputedStyle(keyField.querySelector('input')).backgroundColor
+  const pwdBg = JSON.parse(
+    await ev(`(() => {
+    const fields = [...document.querySelectorAll('.settings-body .field')]
+    const keyField = fields.find(f => (f.querySelector('.field-label')?.textContent ?? '').trim().startsWith('串流密钥'))
+    const other = fields.find(f => (f.querySelector('.field-label')?.textContent ?? '').trim().startsWith('推流地址'))
+    const bg = (field) => (field ? getComputedStyle(field.querySelector('input')).backgroundColor : null)
+    const key = bg(keyField)
+    return JSON.stringify({ background: key, sibling: bg(other), sameAsSibling: key !== null && key === bg(other) })
   })()`)
-  record('the password input uses the dark input background', pwdBg === 'rgb(11, 16, 23)', pwdBg)
+  )
+  record('the password input uses the dark input background', pwdBg.sameAsSibling && pwdBg.background !== 'rgba(0, 0, 0, 0)', JSON.stringify(pwdBg))
 
   await ev(`[...document.querySelectorAll('.tab')].find(t => t.textContent.includes('视频编码'))?.click()`)
   await delay(350)
@@ -459,16 +465,18 @@ const RECEIVED = path.join(here, 'features_received.flv')
   await delay(1500)
 
   record('a lock notice is shown', await ev(`!!document.querySelector('.lock-note')`))
-  record('the settings body is inert', await ev(`document.querySelector('.settings-body').hasAttribute('inert')`))
+  /* The lock sits on the fields wrapper inside the scroll container, so the pane can
+     still be scrolled while a session runs. */
+  record('the settings controls are inert', await ev(`!!document.querySelector('.settings-body [inert]')`))
   const lockedControls = await ev(`(() => {
     const presetSelect = document.querySelector('.preset-select')
-    const clearBtn = [...document.querySelectorAll('.panel-head-actions button')].find(b => b.textContent.trim() === '清空')
+    const clearBtn = document.querySelector('.panel-head-actions button[data-action="clear"]')
     const itemBtns = [...document.querySelectorAll('.pi-actions button')]
     return JSON.stringify({
       presetDisabled: presetSelect?.disabled,
       savePresetDisabled: [...document.querySelectorAll('.preset-bar button')].find(b => b.textContent.includes('保存为预设'))?.disabled,
       clearDisabled: clearBtn?.disabled,
-      allItemActionsDisabled: itemBtns.length > 0 && itemBtns.filter(b => b.textContent.trim() !== '▶ 从此开始').every(b => b.disabled)
+      allItemActionsDisabled: itemBtns.length > 0 && itemBtns.filter(b => b.dataset.action !== 'jump').every(b => b.disabled)
     })
   })()`)
   const lock = JSON.parse(lockedControls)
@@ -505,7 +513,7 @@ const RECEIVED = path.join(here, 'features_received.flv')
 
   await delay(2500) // let some data flow
   record('stop button clickable', (await ev(`(() => {
-    const b = [...document.querySelectorAll('.player-controls button')].find(x => x.textContent.trim() === '⏹ 停止')
+    const b = [...document.querySelectorAll('.player-controls button')].find(x => x.textContent.trim() === '停止')
     b?.click()
     return b ? 'clicked' : 'missing'
   })()`)) === 'clicked')
@@ -520,8 +528,8 @@ const RECEIVED = path.join(here, 'features_received.flv')
 
   const unlocked = await ev(`(() => {
     const presetSelect = document.querySelector('.preset-select')
-    const clearBtn = [...document.querySelectorAll('.panel-head-actions button')].find(b => b.textContent.trim() === '清空')
-    return JSON.stringify({ inert: document.querySelector('.settings-body').hasAttribute('inert'), presetDisabled: presetSelect?.disabled, clearDisabled: clearBtn?.disabled })
+    const clearBtn = document.querySelector('.panel-head-actions button[data-action="clear"]')
+    return JSON.stringify({ inert: !!document.querySelector('.settings-body [inert]'), presetDisabled: presetSelect?.disabled, clearDisabled: clearBtn?.disabled })
   })()`)
   const un = JSON.parse(unlocked)
   record('settings unlock after the session ends', un.inert === false && un.presetDisabled === false && un.clearDisabled === false, unlocked)
@@ -659,9 +667,19 @@ const RECEIVED = path.join(here, 'features_received.flv')
   await delay(400)
   await ev(`(() => {
     const el = document.querySelector('input[placeholder="rtmp://127.0.0.1/live/"]')
+    /*
+     * The address commits when the field is left, and leaving it has to be simulated
+     * with an explicit focusout event: this window is moved off-screen by the e2e env
+     * and does not always hold OS focus, in which case focus()/blur() do nothing at all
+     * and the write would sit in the field's draft instead of reaching the model.
+     * React maps onBlur onto focusout, so dispatching it is the same path a real click
+     * elsewhere takes.
+     */
+    el.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
     setter.call(el, 'rtmp://127.0.0.1:${TEST_PORT}/live/')
     el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
     return 'ok'
   })()`)
   await delay(500)

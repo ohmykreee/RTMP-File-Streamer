@@ -1,4 +1,12 @@
 {
+  "//": "Solution file: compilation is driven by the referenced projects (tsconfig.node.json for main/preload/tests, tsconfig.web.json for the renderer). The paths below are repeated here because the shadcn CLI resolves the aliases in components.json from this file; the renderer's own copy lives in tsconfig.web.json.",
   "files": [],
-  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.web.json" }]
+  "references": [{ "path": "./tsconfig.node.json" }, { "path": "./tsconfig.web.json" }],
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@renderer/*": ["src/renderer/src/*"]
+    }
+  }
 }

@@ -1,7 +1,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import type { AppSettings, Language, OutputSettings } from '@shared/types'
+import type { AppSettings, Language, OutputSettings, ThemePreference } from '@shared/types'
+import { THEME_PREFERENCES } from '@shared/types'
 import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, DEFAULT_SETTINGS } from '@shared/defaults'
 import { containerForProtocol, networkForProtocol, STREAM_PROTOCOLS } from '@shared/protocol'
 import { isLanguage, resolveLanguage } from '@shared/i18n'
@@ -50,6 +51,12 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
     // has neither key) is treated as "never chosen" and follows the OS.
     language: resolveLanguage(s.language, getSystemLocale()),
     languageSet: isLanguage(s.language),
+    // An unknown value (an old file, a hand edit) follows the system, like a fresh
+    // install does.
+    theme: THEME_PREFERENCES.includes(s.theme as ThemePreference) ? (s.theme as ThemePreference) : DEFAULT_SETTINGS.theme,
+    // Clamped rather than trusted: the panel cannot be dragged outside this range, and
+    // a hand-edited file should not be able to leave the queue invisible.
+    playlistWidthPercent: clampNumber(s.playlistWidthPercent, 12, 55, DEFAULT_SETTINGS.playlistWidthPercent),
     session: {
       video: { ...DEFAULT_SETTINGS.session.video, ...(session.video ?? {}) },
       audio: { ...DEFAULT_SETTINGS.session.audio, ...(session.audio ?? {}) },
@@ -73,7 +80,15 @@ function mergeSettings(stored: Partial<AppSettings> | undefined): AppSettings {
  */
 export function normaliseOutput(raw: Partial<OutputSettings>): OutputSettings {
   const fallback = DEFAULT_SETTINGS.session.output
-  const server = typeof raw.server === 'string' && raw.server.trim() ? raw.server : fallback.server
+  /*
+   * An address the user emptied stays empty. The field is theirs to clear while
+   * they retype it, and answering back with a stored default in the middle of an
+   * edit is how a target nobody chose ends up in a settings file. A *missing*
+   * value (a fresh install, an old settings file) still falls back, so the field
+   * starts from the same example it always did — the UI reports the empty state
+   * itself, and the engine refuses to start without one.
+   */
+  const server = typeof raw.server === 'string' ? raw.server : fallback.server
   const obs = { ...fallback.obsWebSocket, ...(raw.obsWebSocket ?? {}) }
   const buffered = typeof raw.buffered === 'boolean' ? raw.buffered : fallback.buffered
   const delay = clampNumber(raw.bufferSec, BUFFER_SEC_MIN, BUFFER_SEC_MAX, BUFFER_SEC_DEFAULT)

@@ -153,6 +153,9 @@ fs.writeFileSync(
       // Debug output is off by default now; the log-panel checks below count
       // entry levels across both writers, which needs debug entries present.
       debugLogging: true,
+      // Pinned like the language: the suite's screenshots and its colour readouts
+      // must not depend on how the machine running them is themed.
+      theme: 'dark',
       session: { ...(savedSettings.session ?? {}), output },
       /*
        * The saved language is reset alongside the output block, for the same reason:
@@ -331,22 +334,21 @@ let sawLivePill = false
 let maxPercent = 0
 let sawBufferedSpan = false
 let maxBufferedFraction = 0
-let bufferNote = ''
 const observeDeadline = Date.now() + 30000
 let firstSessionBytes = 0
 
 while (Date.now() < observeDeadline) {
   const snap = await evaluate(`(() => {
     const pill = document.querySelector('.topbar-right .pill[class*="state-"]')
-    // The readout lives under the progress bar, next to the bar it describes.
-    const pct = parseFloat(document.querySelector('.timeline-pct')?.textContent ?? '0')
+    /* The bar carries no caption of its own any more: the published position is the
+     * width of its blue fill, which is the same figure the user reads off the bar. */
+    const pct = parseFloat(document.querySelector('.timeline-fill')?.style.width ?? '0')
     const stats = document.querySelector('.np-stats')?.innerText ?? ''
     /* The encoder's position is a green strip along the bottom edge of the main bar,
      * so its width is measured against that bar. Selectors are built from strings so
      * no backslash escaping has to survive the eval. */
     const STRIP = 'timeline-' + 'encoded'
     const FILL = 'timeline-encoded-' + 'fill'
-    const NOTE = 'buffer-' + 'note'
     const bar = document.querySelector('.timeline-bar')
     const strip = document.querySelector('.' + STRIP)
     const fill = document.querySelector('.' + FILL)
@@ -358,21 +360,18 @@ while (Date.now() < observeDeadline) {
       const w = getComputedStyle(fill).width
       fillWidth = w.endsWith('px') ? parseFloat(w) : 0
     }
-    const note = document.querySelector('.' + NOTE)
     return JSON.stringify({
       state: pill ? pill.innerText : '',
       pct: Number.isFinite(pct) ? pct : 0,
       stats,
       hasStrip: strip !== null,
       fillWidth,
-      barWidth,
-      bufferNote: note ? note.innerText : ''
+      barWidth
     })
   })()`).catch(() => '{}')
   const s = JSON.parse(snap)
   if (/推流中|已连接/.test(s.state)) sawLivePill = true
   if (s.pct > maxPercent) maxPercent = s.pct
-  if (s.bufferNote) bufferNote = s.bufferNote
   if (s.hasStrip && s.barWidth > 0) {
     sawBufferedSpan = true
     maxBufferedFraction = Math.max(maxBufferedFraction, s.fillWidth / s.barWidth)
@@ -410,7 +409,7 @@ try {
 record(
   'the strip on the bar shows how far the encoder has run ahead',
   sawBufferedSpan && maxBufferedFraction > 0.01,
-  `${(maxBufferedFraction * 100).toFixed(1)}% of the bar's width at the widest${bufferNote ? ` · ${bufferNote}` : ''}`
+  `${(maxBufferedFraction * 100).toFixed(1)}% of the bar's width at the widest`
 )
 record(
   'ingest server receives data while the session is live',
@@ -605,7 +604,7 @@ const onlyErrors = JSON.parse(
 )
 record(
   'a single level filter shows only that level, across the whole list',
-  onlyErrors.foreign === 0 && onlyErrors.rows === 0 && /^▸运行日志\(0\/\d+\)$/.test(onlyErrors.header),
+  onlyErrors.foreign === 0 && onlyErrors.rows === 0 && /^运行日志\(0\/\d+\)$/.test(onlyErrors.header),
   `history had ${errorFilter.held} entries, rows=${onlyErrors.rows}, foreign=${onlyErrors.foreign}, header=${onlyErrors.header}`
 )
 

@@ -177,6 +177,11 @@ const fieldExpr = (labelStartsWith) => `[...document.querySelectorAll('.settings
  * whose re-render is still in flight and be dropped. Measured on the video bitrate
  * field: it stayed at its default while the rest of the same batch of edits went
  * through, which looked like a preset bug and was a race in this helper.
+ *
+ * The edit is bracketed with `focusin`/`focusout` rather than `focus()`/`blur()`:
+ * fields commit when they are left, and this window is moved off-screen by the e2e
+ * env, where it does not always hold OS focus — `focus()` then does nothing and the
+ * write would never reach the model. React maps `onBlur` onto `focusout`.
  */
 const setFieldValue = async (labelStartsWith, value) => {
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -185,12 +190,12 @@ const setFieldValue = async (labelStartsWith, value) => {
       if (!field) return 'no-field'
       const input = field.querySelector('input[type="number"], input[type="text"], input[type="password"], input:not([type])')
       if (!input) return 'no-input'
-      input.focus()
+      input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
       setter.call(input, String(${JSON.stringify(String(value))}))
       input.dispatchEvent(new Event('input', { bubbles: true }))
       input.dispatchEvent(new Event('change', { bubbles: true }))
-      input.blur()
+      input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
       return 'ok'
     })()`)
     await delay(200)
@@ -228,7 +233,9 @@ await ev(`(() => {
   return 'ok'
 })()`)
 await delay(250)
-await setFieldValue('分辨率', 1600)
+// The resolution block has no "Resolution" label of its own any more: the enable
+// switch ("Scale output") is its heading, and it is the first label in `.res-field`.
+await setFieldValue('缩放输出', 1600)
 
 // audio tab: 96 kbps
 await openTab('音频编码', '码率')
@@ -301,9 +308,9 @@ record(
 // the feature is on, and switching it on must bind the endpoint.
 await ev(`(() => {
   const row = [...document.querySelectorAll('.settings-body .toggle')].find(t => t.textContent.includes('obs-websocket'))
-  const box = row?.querySelector('input[type="checkbox"]')
-  if (!box) return 'no-toggle'
-  if (!box.checked) box.click()
+  const sw = row?.querySelector('[role="switch"]')
+  if (!sw) return 'no-toggle'
+  if (sw.getAttribute('aria-checked') !== 'true') sw.click()
   return 'ok'
 })()`)
 const enabledStatus = await waitForObs((s) => s.running)
@@ -334,8 +341,8 @@ record('changing the port rebinds the endpoint', rebound?.running === true && re
 // ...and switching the feature off must release it again.
 await ev(`(() => {
   const row = [...document.querySelectorAll('.settings-body .toggle')].find(t => t.textContent.includes('obs-websocket'))
-  const box = row?.querySelector('input[type="checkbox"]')
-  if (box?.checked) box.click()
+  const sw = row?.querySelector('[role="switch"]')
+  if (sw?.getAttribute('aria-checked') === 'true') sw.click()
   return 'ok'
 })()`)
 const stopped = await waitForObs((s) => !s.running)
@@ -345,8 +352,8 @@ record('disabling the switch stops the endpoint', stopped?.running === false, JS
 // part of the session, so a saved+applied preset must carry them.
 await ev(`(() => {
   const row = [...document.querySelectorAll('.settings-body .toggle')].find(t => t.textContent.includes('obs-websocket'))
-  const box = row?.querySelector('input[type="checkbox"]')
-  if (box && !box.checked) box.click()
+  const sw = row?.querySelector('[role="switch"]')
+  if (sw && sw.getAttribute('aria-checked') !== 'true') sw.click()
   return 'ok'
 })()`)
 await waitForObs((s) => s.running)
@@ -650,14 +657,18 @@ const unitAfter = await ev(`(() => {
 })()`)
 record('switching to Mbps keeps the same bitrate', JSON.parse(unitAfter).unit === 'mbps', `${unitConversion} → ${unitAfter}`)
 
-// Enter 6 Mbps and confirm 6000 kbps is what the engine receives.
+// Enter 6 Mbps and confirm 6000 kbps is what the engine receives. The field commits
+// when it is left (typing alone must not reach the model), so the write is bracketed
+// with focusin/focusout — see `setFieldValue` for why not focus()/blur().
 await ev(`(() => {
   const fields = [...document.querySelectorAll('.settings-body .field')]
   const f = fields.find(x => (x.querySelector('.field-label')?.textContent ?? '').trim().startsWith('视频码率'))
   const input = f.querySelector('.unit-input input')
+  input.dispatchEvent(new FocusEvent('focusin', { bubbles: true }))
   const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
   setter.call(input, '6')
   input.dispatchEvent(new Event('input', { bubbles: true }))
+  input.dispatchEvent(new FocusEvent('focusout', { bubbles: true }))
   return 'ok'
 })()`)
 await delay(500)

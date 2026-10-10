@@ -43,3 +43,9 @@ Thumbs.db
 Desktop.ini
 *.local
 TODO.md
+
+# ------------------------------------------------------------- Agent Skills
+skills-lock.json
+.agents
+.claude
+agent

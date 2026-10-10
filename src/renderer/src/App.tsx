@@ -1,7 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EngineState, Language, NetworkState, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
 import type { TranslationKey } from '@shared/i18n'
 import { translatorFor } from '@shared/i18n'
+import { CircleAlert, Play, SkipForward, Square, X } from 'lucide-react'
+import { cn } from 'cn'
+import { Alert, AlertAction, AlertDescription } from '@renderer/components/ui/alert'
+import { Badge } from '@renderer/components/ui/badge'
+import { Button } from '@renderer/components/ui/button'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@renderer/components/ui/resizable'
+import { Spinner } from '@renderer/components/ui/spinner'
+import BrandMark from './components/BrandMark'
 import { useStreamer } from './hooks/useStreamer'
 import PlaylistPanel from './components/PlaylistPanel'
 import SettingsPanel from './components/SettingsPanel'
@@ -46,6 +54,43 @@ const NETWORK_CLASS: Record<NetworkState, string> = {
   bad: 'bad'
 }
 
+/**
+ * Colour of the engine-state chip, per state.
+ *
+ * Utilities rather than stylesheet rules because the badge component carries its own
+ * `text-foreground` / `border-border`: a class in `styles.css` would lose to those,
+ * so the state has to speak the same language the component does.
+ *
+ * A running session is GREEN, not red: this app is the thing that is on air, and
+ * the question the chip answers is "is it working", not "is something wrong". Red
+ * is kept for errors, amber for the states in between, and idle stays as quiet as
+ * the metadata chips beside it.
+ */
+const STATE_CHIP: Record<EngineState, string> = {
+  idle: 'border-border bg-card/60 text-muted-foreground',
+  preparing: 'border-warn/45 bg-warn/10 text-warn',
+  connecting: 'border-warn/45 bg-warn/10 text-warn',
+  reconnecting: 'border-warn/45 bg-warn/10 text-warn',
+  draining: 'border-warn/45 bg-warn/10 text-warn',
+  stopping: 'border-warn/45 bg-warn/10 text-warn',
+  live: 'border-ok/50 bg-ok/12 text-ok',
+  error: 'border-destructive/50 bg-destructive/12 text-destructive'
+}
+
+/**
+ * Width of the queue panel, as a percentage of the workspace, when nothing has been
+ * dragged yet — and the range the panel is allowed to be dragged within.
+ *
+ * The value is handed to the panel as a *string*: the library reads a bare number as
+ * pixels, so `27` would open the queue at 27 px (and, being under the minimum, pin it
+ * there). The constraints below are pixel numbers on purpose — what the queue must not
+ * lose is room for a file name, not a fraction of the window.
+ */
+const DEFAULT_PLAYLIST_PERCENT = '27'
+const PLAYLIST_MIN_PX = 210
+const PLAYLIST_MAX_PERCENT = '55'
+const PLAYLIST_PANEL_ID = 'playlist'
+
 export default function App(): React.JSX.Element {
   const st = useStreamer()
   const [logsOpen, setLogsOpen] = useState(false)
@@ -77,15 +122,69 @@ export default function App(): React.JSX.Element {
     document.title = t('app.title')
   }, [language, t])
 
+  /*
+   * Palette. `settings.theme` is `light`, `dark` or `system`, and `.dark` on <html>
+   * is what the tokens and the vendored components' `dark:` variants key on.
+   * `main.tsx` has already set the class from the OS so the first frame is right;
+   * this is the part that knows about the saved preference, and it keeps following
+   * the OS live while the preference is `system`.
+   */
+  const theme = settings?.theme ?? 'system'
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const apply = (): void => {
+      document.documentElement.classList.toggle('dark', theme === 'dark' || (theme === 'system' && media.matches))
+    }
+    apply()
+    if (theme !== 'system') return
+    media.addEventListener('change', apply)
+    return () => media.removeEventListener('change', apply)
+  }, [theme])
+
+  /*
+   * Queue width: read out of the settings once, when they first arrive.
+   *
+   * The value is captured rather than passed straight through, because the panel
+   * treats its own `defaultSize` as an input: re-feeding the saved number while the
+   * user is dragging (which is exactly what saving it does) would let the stored
+   * value pull the divider back. The stored value is only ever the one the panel
+   * itself reported.
+   */
+  const initialQueueWidthRef = useRef<string | null>(null)
+  if (initialQueueWidthRef.current === null && settings) {
+    initialQueueWidthRef.current = String(settings.playlistWidthPercent)
+  }
+  const initialQueueWidth = initialQueueWidthRef.current ?? DEFAULT_PLAYLIST_PERCENT
+  /** The last width this session sent, so a re-layout with the same size is not a write. */
+  const lastSavedQueueWidth = useRef<number | null>(null)
+
+  /** Remembers a dragged split. The panel reports once per pointer release. */
+  const rememberQueueWidth = useCallback(
+    (layout: Record<string, number>, meta: { isUserInteraction: boolean }): void => {
+      if (!meta.isUserInteraction) return
+      const percent = Math.round((layout[PLAYLIST_PANEL_ID] ?? Number(DEFAULT_PLAYLIST_PERCENT)) * 10) / 10
+      if (percent === lastSavedQueueWidth.current) return
+      lastSavedQueueWidth.current = percent
+      void st.saveSettings({ playlistWidthPercent: percent })
+    },
+    [st]
+  )
+
   const currentItem: PlaylistItem | null = status.currentIndex >= 0 ? (playlist[status.currentIndex] ?? null) : null
   const isActive = status.state !== 'idle' && status.state !== 'error'
+  /**
+   * A session needs somewhere to go: the address field can be left empty (the store
+   * keeps it that way), and starting without one would only reach ffmpeg as an empty
+   * target. The output tab says so in place of the field's hint.
+   */
+  const hasTarget = (settings?.session.output.server ?? '').trim() !== ''
   /**
    * While a session runs, every setting is frozen: the encoder command was built
    * from them, and silently ignoring edits mid-stream is worse than locking the
    * controls outright.
    */
   const locked = isActive
-  const canStart = playlist.length > 0 && Boolean(capabilities?.ffmpegPath) && !isActive
+  const canStart = playlist.length > 0 && Boolean(capabilities?.ffmpegPath) && hasTarget && !isActive
 
   /* Persisted log usage, refreshed periodically for the log panel.
      Depends on the stable callback (not the whole hook object): `st` gets a new
@@ -246,17 +345,20 @@ export default function App(): React.JSX.Element {
     if (st.bridgeMissing) {
       return (
         <div className="boot">
-          <div className="boot-error">
-            <h2>{t('app.bootErrorTitle')}</h2>
-            <p>{t('app.bootErrorBody')}</p>
-            <p className="muted small">
-              {t('app.bootErrorRebuild1')}
-              <code>pnpm build</code>
-              {t('app.bootErrorRebuild2')}
-              <code>pnpm start</code>
-              {t('app.bootErrorRebuild3')}
-            </p>
-          </div>
+          <Alert variant="destructive" className="max-w-lg">
+            <CircleAlert />
+            <AlertDescription className="flex flex-col gap-2">
+              <span className="text-foreground">{t('app.bootErrorTitle')}</span>
+              <span>{t('app.bootErrorBody')}</span>
+              <span className="text-xs">
+                {t('app.bootErrorRebuild1')}
+                <code className="mono bg-muted/60 rounded px-1 py-0.5">pnpm build</code>
+                {t('app.bootErrorRebuild2')}
+                <code className="mono bg-muted/60 rounded px-1 py-0.5">pnpm start</code>
+                {t('app.bootErrorRebuild3')}
+              </span>
+            </AlertDescription>
+          </Alert>
         </div>
       )
     }
@@ -264,8 +366,8 @@ export default function App(): React.JSX.Element {
     if (!st.ready || !settings || !session) {
       return (
         <div className="boot">
-          <div className="boot-spinner" />
-          <p>{t('app.initializing')}</p>
+          <Spinner className="size-6 text-primary" />
+          <p className="text-sm">{t('app.initializing')}</p>
         </div>
       )
     }
@@ -274,25 +376,42 @@ export default function App(): React.JSX.Element {
       <div className="app">
         <header className="topbar">
           <div className="brand">
-            <span className="brand-mark">▶</span>
-            <div>
+            <BrandMark size={30} className="brand-mark" />
+            <div className="brand-text">
               <h1>{t('app.title')}</h1>
-              <p className="muted small">{t('app.tagline')}</p>
+              <p className="muted small truncate">{t('app.tagline')}</p>
             </div>
           </div>
 
           <div className="topbar-right">
-            {capabilities && !capabilities.ffmpegPath && <span className="pill danger">{t('app.ffmpegMissing')}</span>}
-            {capabilities?.ffmpegPath && (
-              <span className="pill subtle mono" title={capabilities.ffmpegVersion}>
-                FFmpeg {capabilities.ffmpegVersion.replace(/^ffmpeg version\s*/, '').split(/\s+/)[0]}
-              </span>
+            {capabilities && !capabilities.ffmpegPath && (
+              <Badge variant="destructive" className="pill danger">
+                <CircleAlert data-icon="inline-start" />
+                {t('app.ffmpegMissing')}
+              </Badge>
             )}
-            <span className={`pill state-${status.state}`}>
-              <span className={`state-dot state-${status.state}`} />
+            {capabilities?.ffmpegPath && (
+              <Badge variant="outline" className="pill subtle mono text-muted-foreground" title={capabilities.ffmpegVersion}>
+                FFmpeg {capabilities.ffmpegVersion.replace(/^ffmpeg version\s*/, '').split(/\s+/)[0]}
+              </Badge>
+            )}
+            <Badge variant="outline" className={cn('pill', `state-${status.state}`, STATE_CHIP[status.state])}>
+              <span className={cn('state-dot', `state-${status.state}`)} aria-hidden />
               {t(STATE_KEY[status.state])}
               {status.connected && status.state === 'live' ? t('app.state.connectedSuffix') : ''}
-            </span>
+              {/* The level meter is the one animated flourish in the chrome, and it
+                  only exists while something is actually going out: it is a state
+                  indicator, not decoration. */}
+              {isActive && (
+                <span className="meter" aria-hidden>
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              )}
+            </Badge>
             {/* Last in the row: the language control is always in the same place,
                 whatever the state pills to its left are saying. */}
             <LanguageSwitcher language={language} locked={locked} onSelect={changeLanguage} />
@@ -300,152 +419,195 @@ export default function App(): React.JSX.Element {
         </header>
 
         {actionError && (
-          <div className="banner error">
-            <span>{actionError}</span>
-            <button className="btn tiny ghost" onClick={() => setActionError(null)}>
-              {t('app.close')}
-            </button>
-          </div>
+          <Alert variant="destructive" className="banner error rounded-none border-x-0">
+            <CircleAlert />
+            <AlertDescription className="text-destructive">{actionError}</AlertDescription>
+            <AlertAction>
+              <Button variant="ghost" size="xs" onClick={() => setActionError(null)} aria-label={t('app.close')}>
+                <X />
+              </Button>
+            </AlertAction>
+          </Alert>
         )}
 
         {capabilities && !capabilities.ffmpegPath && (
-          <div className="banner warn">
-            <span>{t('app.ffmpegMissingHint')}</span>
-            <button className="btn tiny" onClick={() => void run(st.chooseFfmpeg)}>
-              {t('app.chooseFfmpeg')}
-            </button>
-          </div>
+          <Alert className="banner warn rounded-none border-x-0">
+            <CircleAlert />
+            <AlertDescription className="text-warn">{t('app.ffmpegMissingHint')}</AlertDescription>
+            <AlertAction>
+              <Button size="xs" variant="outline" onClick={() => void run(st.chooseFfmpeg)}>
+                {t('app.chooseFfmpeg')}
+              </Button>
+            </AlertAction>
+          </Alert>
         )}
 
-        <main className="workspace">
-          <PlaylistPanel
-            items={playlist}
-            currentIndex={status.currentIndex}
-            active={isActive}
-            busy={st.busy}
-            locked={locked}
-            onAddVideos={() => void run(st.addVideoFiles)}
-            onAddPaths={(paths) => void run(() => st.addPaths(paths))}
-            onRemove={(id) => void run(() => st.removeItem(id))}
-            onClear={() => void run(st.clearPlaylist)}
-            onReorder={(ids) => void run(() => st.reorderPlaylist(ids))}
-            onJump={(id) => void run(() => st.jumpToItem(id))}
-            onAttachSubtitle={(id) => void run(() => st.attachSubtitle(id))}
-            onUpdateItem={(id, patch) => void run(() => st.updateItem(id, patch))}
-            onReveal={(p) => void st.showItemInFolder(p)}
-            onResolveDroppedPaths={st.resolveDroppedPaths}
-            onFilesDropped={(paths) => void run(() => st.addPaths(paths))}
-          />
+        {/*
+          The workspace split is the user's: the queue panel is dragged to whatever
+          width the current job needs (the handle is a hairline that grows a grip on
+          hover, so it is discoverable without being drawn over the content).
+          Percentages are the default; the constraints are pixels, because what the
+          queue must not lose is room for a file name, not a fraction of the window.
+        */}
+        <ResizablePanelGroup className="workspace" orientation="horizontal" onLayoutChanged={rememberQueueWidth}>
+          <ResizablePanel
+            id={PLAYLIST_PANEL_ID}
+            defaultSize={initialQueueWidth}
+            minSize={PLAYLIST_MIN_PX}
+            maxSize={PLAYLIST_MAX_PERCENT}
+            className="min-w-0"
+          >
+            <PlaylistPanel
+              items={playlist}
+              currentIndex={status.currentIndex}
+              active={isActive}
+              busy={st.busy}
+              locked={locked}
+              onAddVideos={() => void run(st.addVideoFiles)}
+              onAddPaths={(paths) => void run(() => st.addPaths(paths))}
+              onRemove={(id) => void run(() => st.removeItem(id))}
+              onClear={() => void run(st.clearPlaylist)}
+              onReorder={(ids) => void run(() => st.reorderPlaylist(ids))}
+              onJump={(id) => void run(() => st.jumpToItem(id))}
+              onAttachSubtitle={(id) => void run(() => st.attachSubtitle(id))}
+              onUpdateItem={(id, patch) => void run(() => st.updateItem(id, patch))}
+              onReveal={(p) => void st.showItemInFolder(p)}
+              onResolveDroppedPaths={st.resolveDroppedPaths}
+              onFilesDropped={(paths) => void run(() => st.addPaths(paths))}
+            />
+          </ResizablePanel>
 
-          <SettingsPanel
-            settings={settings}
-            capabilities={capabilities}
-            capsLoading={st.capsLoading}
-            info={st.info}
-            busy={st.busy}
-            locked={locked}
-            presets={st.presets}
-            logInfo={logInfo}
-            activePresetId={activePresetId}
-            onSelectPreset={selectPreset}
-            onSavePreset={(name) => void run(() => st.savePreset(name))}
-            onDeletePreset={(id) => {
-              setActivePresetId('')
-              void run(() => st.deletePreset(id))
-            }}
-            onRenamePreset={(id, name) => void run(() => st.renamePreset(id, name))}
-            onOpenDataDir={() => void run(st.openDataDir)}
-            onOpenLogsDir={() => void run(st.openLogsDir)}
-            onUpdateVideo={editVideo}
-            onUpdateAudio={editAudio}
-            onUpdateSubtitles={editSubtitles}
-            onUpdateOutput={editOutput}
-            onSaveSettings={st.saveSettings}
-            onChooseFfmpeg={() => void run(st.chooseFfmpeg)}
-            onRefreshCapabilities={(force) => void st.refreshCapabilities(force)}
-            onTestRtmp={testRtmp}
-            onPreviewCommand={() => st.previewCommand()}
-            obsStatus={st.obsStatus}
-            onApplyObsWebSocket={st.applyObsWebSocket}
-          />
-        </main>
+          {/* The divider is the plain one: the registry handle draws a 1 px line with
+              its own wider grab area, and only tints on hover/drag — no grip of its
+              own to mistake for a control. */}
+          <ResizableHandle className="workspace-handle hover:bg-primary/60 active:bg-primary" />
 
+          <ResizablePanel id="settings" minSize={420} className="min-w-0">
+            <SettingsPanel
+              settings={settings}
+              capabilities={capabilities}
+              capsLoading={st.capsLoading}
+              info={st.info}
+              busy={st.busy}
+              locked={locked}
+              presets={st.presets}
+              logInfo={logInfo}
+              activePresetId={activePresetId}
+              onChangeLanguage={changeLanguage}
+              onSelectPreset={selectPreset}
+              onSavePreset={(name) => void run(() => st.savePreset(name))}
+              onDeletePreset={(id) => {
+                setActivePresetId('')
+                void run(() => st.deletePreset(id))
+              }}
+              onRenamePreset={(id, name) => void run(() => st.renamePreset(id, name))}
+              onOpenDataDir={() => void run(st.openDataDir)}
+              onOpenLogsDir={() => void run(st.openLogsDir)}
+              onUpdateVideo={editVideo}
+              onUpdateAudio={editAudio}
+              onUpdateSubtitles={editSubtitles}
+              onUpdateOutput={editOutput}
+              onSaveSettings={st.saveSettings}
+              onChooseFfmpeg={() => void run(st.chooseFfmpeg)}
+              onRefreshCapabilities={(force) => void st.refreshCapabilities(force)}
+              onTestRtmp={testRtmp}
+              onPreviewCommand={() => st.previewCommand()}
+              obsStatus={st.obsStatus}
+              onApplyObsWebSocket={st.applyObsWebSocket}
+            />
+          </ResizablePanel>
+        </ResizablePanelGroup>
+
+        {/*
+          The transport: the timeline leads — nothing sits in front of it — with the
+          buttons to its right and one line of small figures underneath. The figures
+          are the published state (position, what the encoder is doing, what the wire
+          is carrying); the buffer strip inside the bar shows the same gap the lead
+          figure names, so the bar carries no caption of its own.
+        */}
         <footer className="player">
-          <div className="player-info">
-            <div className="now-playing">
-              <span className="np-label muted small">
-                {t('app.currentIndex', {
-                  index: status.currentIndex >= 0 ? status.currentIndex + 1 : '—',
-                  total: playlist.length || 0
-                })}
-              </span>
-              <span className="np-name" title={currentItem?.path}>
-                {currentItem ? currentItem.name : t('app.nonePlaying')}
-              </span>
-            </div>
-            <div className="np-stats mono small">
-              <span title={t('app.statDurationTitle')}>
-                {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
-              </span>
-              {/* Buffered mode runs two processes: the figures above describe what has
-                  been PUBLISHED, the rest describe the ENCODER, which is free to run
-                  ahead of real time.
-                  The last figure is the measured egress, i.e. what the link is
-                  actually carrying, which nothing else on this line can say: the
-                  encoder's bitrate is the rate it was asked for, not the bytes that
-                  left. It is also the only figure that changes colour, because it is
-                  the only one that can report a problem: the engine compares it with
-                  what the session is pushing and says so (see `NetworkState`). */}
-              {status.encoder ? (
-                <>
-                  <span title={t('app.statEncoderTitle')}>{t('app.encoderProcess', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })}</span>
-                  <span title={t('app.statEncoderTitle')}>fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
-                  <span title={t('app.statEncoderBitrateTitle')}>
-                    {t('app.encoderBitrate', { rate: formatBitrate(status.encoder.bitrateKbps) })}
-                  </span>
-                  <span title={t('app.statLeadTitle')}>{t('app.bufferLead', { sec: status.encoder.leadSec.toFixed(1) })}</span>
-                  <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
-                    {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
-                  </span>
-                </>
-              ) : (
-                <>
-                  <span title={t('app.statEncodeSpeedTitle')}>
-                    {t('app.speed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
-                  </span>
-                  <span title={t('app.statBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.bitrateKbps) })}</span>
-                  <span title={t('app.statFpsTitle')}>fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
-                  <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
-                    {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
-                  </span>
-                </>
-              )}
-              {status.droppedFrames > 0 && <span className="warn">{t('app.droppedFrames', { n: status.droppedFrames })}</span>}
-              {status.reconnectCount > 0 && <span className="warn">{t('app.reconnectCount', { n: status.reconnectCount })}</span>}
-              <span title={t('app.statElapsedTitle')}>{t('app.elapsed', { duration: formatDuration(status.elapsedSec) })}</span>
-            </div>
-          </div>
-
-          <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
-
           <div className="player-controls">
-            {/* The transport buttons only: the progress percentage belongs to the bar
-                and is rendered under it (see `Timeline`), not among the buttons. */}
+            <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
+
             <div className="controls">
               {!isActive ? (
-                <button className="btn primary lg" onClick={() => void run(() => st.start())} disabled={!canStart || actionPending}>
+                <Button className="btn" size="lg" onClick={() => void run(() => st.start())} disabled={!canStart || actionPending}>
+                  <Play data-icon="inline-start" />
                   {t('app.start')}
-                </button>
+                </Button>
               ) : (
                 <>
-                  <button className="btn" onClick={() => void run(() => st.skipNext())} disabled={actionPending} title="Ctrl+→">
+                  <Button
+                    className="btn"
+                    variant="outline"
+                    onClick={() => void run(() => st.skipNext())}
+                    disabled={actionPending}
+                    title="Ctrl+→"
+                  >
+                    <SkipForward data-icon="inline-start" />
                     {t('app.skipNext')}
-                  </button>
-                  <button className="btn danger" onClick={() => void run(() => st.stop())} disabled={actionPending}>
+                  </Button>
+                  <Button className="btn" variant="destructive" onClick={() => void run(() => st.stop())} disabled={actionPending}>
+                    <Square data-icon="inline-start" />
                     {t('app.stop')}
-                  </button>
+                  </Button>
                 </>
               )}
+            </div>
+
+            <div className="player-info">
+              <div className="now-playing">
+                <span className="np-label">
+                  {t('app.currentIndex', {
+                    index: status.currentIndex >= 0 ? status.currentIndex + 1 : '—',
+                    total: playlist.length || 0
+                  })}
+                </span>
+                <span className="np-name" title={currentItem?.path}>
+                  {currentItem ? currentItem.name : t('app.nonePlaying')}
+                </span>
+              </div>
+              <div className="np-stats">
+                <span title={t('app.statDurationTitle')}>
+                  {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
+                </span>
+                {/* Buffered mode runs two processes: the figures above describe what has
+                    been PUBLISHED, the rest describe the ENCODER, which is free to run
+                    ahead of real time.
+                    The last figure is the measured egress, i.e. what the link is
+                    actually carrying, which nothing else on this line can say: the
+                    encoder's bitrate is the rate it was asked for, not the bytes that
+                    left. It is also the only figure that changes colour, because it is
+                    the only one that can report a problem: the engine compares it with
+                    what the session is pushing and says so (see `NetworkState`). */}
+                {status.encoder ? (
+                  <>
+                    <span title={t('app.statEncoderTitle')}>
+                      {t('app.encoderProcess', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })}
+                    </span>
+                    <span title={t('app.statEncoderTitle')}>fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
+                    <span title={t('app.statEncoderBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.encoder.bitrateKbps) })}</span>
+                    <span title={t('app.statLeadTitle')}>{t('app.bufferLead', { sec: status.encoder.leadSec.toFixed(1) })}</span>
+                    <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
+                      {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span title={t('app.statEncodeSpeedTitle')}>
+                      {t('app.speed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
+                    </span>
+                    <span title={t('app.statBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.bitrateKbps) })}</span>
+                    <span title={t('app.statFpsTitle')}>fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
+                    <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
+                      {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
+                    </span>
+                  </>
+                )}
+                {status.droppedFrames > 0 && <span className="warn">{t('app.droppedFrames', { n: status.droppedFrames })}</span>}
+                {status.reconnectCount > 0 && <span className="warn">{t('app.reconnectCount', { n: status.reconnectCount })}</span>}
+                <span title={t('app.statElapsedTitle')}>{t('app.elapsed', { duration: formatDuration(status.elapsedSec) })}</span>
+              </div>
             </div>
           </div>
         </footer>

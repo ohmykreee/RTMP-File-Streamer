@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { app, BrowserWindow, Menu, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
 import type { AppSettings, LogEntry, PlaylistItem } from '@shared/types'
 import { IPC } from '@shared/types'
 import { resolveBinaries } from './ffmpeg/capabilities'
@@ -121,6 +121,8 @@ const services: AppServices = {
     if (before.debugLogging !== next.debugLogging) {
       pushLog('info', next.debugLogging ? mainT('main.engine.debugOn') : mainT('main.engine.debugOff'))
     }
+    // The window itself is painted in the palette this setting asks for.
+    if (before.theme !== next.theme) syncWindowTheme()
     return next
   },
   setLanguage: (language) => persistLanguage(language),
@@ -248,6 +250,26 @@ const obs = new ObsWebSocketServer({
  * Window
  * ------------------------------------------------------------------ */
 
+/**
+ * Window background for the appearance in force.
+ *
+ * The renderer paints its own palette, but the window is created (and resized, and
+ * shown before the first frame) with this colour, so it has to match or the app
+ * flashes the other theme on startup. `system` asks Electron, which is the same
+ * signal the renderer's `prefers-color-scheme` resolves to.
+ */
+function windowBackground(): string {
+  const theme = loadSettings().theme
+  const dark = theme === 'dark' || (theme === 'system' && nativeTheme.shouldUseDarkColors)
+  return dark ? '#09090b' : '#ffffff'
+}
+
+/** Keeps the window's own colour in step with the appearance setting. */
+function syncWindowTheme(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.setBackgroundColor(windowBackground())
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -255,7 +277,9 @@ function createWindow(): void {
     minWidth: 1080,
     minHeight: 720,
     show: false,
-    backgroundColor: '#0d1117',
+    // Follows the appearance setting (see `windowBackground`): the window must not
+    // flash the other palette while the first paint is on its way.
+    backgroundColor: windowBackground(),
     autoHideMenuBar: true,
     // The window title, like the interface, follows the language resolved at
     // startup (a saved choice, or the system locale on first launch).
@@ -353,6 +377,10 @@ if (!app.requestSingleInstanceLock()) {
 
     createWindow()
     registerIpc(services)
+
+    // While the appearance follows the system, the window keeps up with it too — the
+    // renderer watches `prefers-color-scheme` for the same reason.
+    nativeTheme.on('updated', syncWindowTheme)
 
     // Bring the control endpoint up if it was left enabled; errors are reported
     // through the log and surfaced in the RTMP tab.

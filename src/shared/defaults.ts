@@ -225,6 +225,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
    */
   language: 'en',
   languageSet: false,
+  // Follow the operating system until the user says otherwise.
+  theme: 'system',
+  // Matches the panel's own default in the window: about a quarter of the width,
+  // enough for a file name and two lines of facts.
+  playlistWidthPercent: 27,
   session: DEFAULT_SESSION
 }
 

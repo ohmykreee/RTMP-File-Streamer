@@ -24,6 +24,10 @@ interface Segment {
  * moves BETWEEN playlist entries: dragging to another segment jumps to that file.
  * Seeking inside the current file is not offered at all (it would require
  * restarting the encoder mid-file and splicing it into the published stream).
+ *
+ * The bar carries no caption of its own: the progress figure and the lead in
+ * seconds belong to the readout line under the transport, and the encoder's strip
+ * (below) shows the same gap the lead names.
  */
 export default function Timeline({ items, status, onJumpToItem, disabled }: TimelineProps): React.JSX.Element {
   const t = useT()
@@ -71,9 +75,6 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
     const encoded = Math.max(status.encodedSec ?? status.completedSec, status.completedSec)
     return Math.max(0, Math.min(1, encoded / totalDuration))
   }, [status.encodedSec, status.completedSec, totalDuration])
-
-  const bufferSec = Math.max(0, (status.encodedSec ?? status.completedSec) - status.completedSec)
-  const progressPct = totalDuration > 0 ? Math.max(0, Math.min(100, (status.completedSec / totalDuration) * 100)) : 0
 
   const fraction = dragFraction ?? playedFraction
 
@@ -194,27 +195,6 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
           )}
         </div>
         <span className="timeline-time mono">{formatDuration(totalDuration)}</span>
-      </div>
-      {/*
-        Readouts sit under the bar they describe, next to the strip that shows the
-        encoder's position, so the number and the thing it measures are read together.
-      */}
-      <div className="timeline-footer">
-        <div className="timeline-pct mono">
-          <strong>{progressPct.toFixed(1)}%</strong>
-          <span className="timeline-pct-label">{t('timeline.totalProgress')}</span>
-        </div>
-        {status.buffered && (
-          <div className="buffer-note" title={t('timeline.bufferNoteTitle')}>
-            <span className="buffer-swatch" aria-hidden />
-            <span className="buffer-text">
-              {t('app.bufferLead', { sec: bufferSec.toFixed(1) })}
-              {status.encoder
-                ? t('timeline.bufferLeadEncoder', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })
-                : ''}
-            </span>
-          </div>
-        )}
       </div>
     </div>
   )

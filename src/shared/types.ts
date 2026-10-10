@@ -371,8 +371,31 @@ export interface AppSettings {
    * only an explicit choice sets it.
    */
   languageSet: boolean
+  /**
+   * Which palette the interface uses.
+   *
+   * `system` follows the operating system and is the default: a desktop tool should
+   * look like the rest of the desktop until it is told otherwise. Like
+   * {@link language} this is application state, not stream state — it lives here and
+   * never travels inside a preset.
+   */
+  theme: ThemePreference
+  /**
+   * Width of the queue panel, as a percentage of the workspace.
+   *
+   * A window-layout preference of this installation, so it sits with the other
+   * application-level settings rather than inside `session`: a preset describes what
+   * is streamed, and must not resize somebody else's window when it is applied. The
+   * settings pane takes the rest.
+   */
+  playlistWidthPercent: number
   session: SessionSettings
 }
+
+/** Palette choice for the interface; `system` follows the OS setting. */
+export type ThemePreference = 'light' | 'dark' | 'system'
+
+export const THEME_PREFERENCES: ThemePreference[] = ['light', 'dark', 'system']
 
 /* ------------------------------------------------------------------ *
  * Encoder capabilities

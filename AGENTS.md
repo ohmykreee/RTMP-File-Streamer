@@ -83,6 +83,28 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
     不要在模块顶层缓存翻译函数或语言值
   - 文案表的一致性由 `test:unit` 第 1 节逐键校验（三表键集、空值、占位符）＋ `pnpm typecheck`
     （`Catalog<TranslationKey>` 缺键即报错）兜底，**不需要额外的维护脚本**
+- **界面栈**：渲染层是 Tailwind v4 + shadcn/ui（style `nova`、base color `zinc`、theme `blue`、图标 `lucide`）。
+  组件是**源码**，在 `src/renderer/src/components/ui/`，增减用 `pnpm dlx shadcn@latest add <name>`（它会覆盖本地改动）；
+  设计令牌与全局层都在 `src/renderer/src/styles.css`（唯一入口），alias 由 `components.json` + tsconfig 的
+  `@renderer/*` 决定。渲染层依赖装在 devDependencies —— Vite 打包渲染层，`electron-builder` 的 `files` 排除了
+  node_modules。
+- **两套配色，一个开关**：`:root` 是亮色、`.dark` 覆盖成暗色，`settings.theme`（`light`/`dark`/`system`，默认
+  `system`）决定 `<html>` 上有没有 `.dark` —— `main.tsx` 先按系统设置画第一帧，`App.tsx` 拿到设置后纠正并在
+  `system` 下持续跟随系统。主进程用 `windowBackground()`/`syncWindowTheme()` 让窗口底色跟着变（别写死颜色）。
+  新增颜色一律进令牌，别在组件里写死深浅色值。
+- **语言与界面风格是应用状态**：它们是顶层 `AppSettings` 字段（与 `debugLogging` 一样），**不在预设里** ——
+  预设只带 `SessionSettings`。改这两个要显式走 `setLanguage` / `saveSettings`，不要塞进预设结构。
+- **图标只用 lucide，不用 emoji**：文案表里没有 ▶/⏹/📂/🔒 之类前缀，需要图标就在 JSX 里画。
+  `native-select.tsx` 有一处本地补丁：`className` 落在 `<select>` 上、`wrapperClassName` 给定位外壳
+  （e2e 用原生 API 驱动这些下拉）—— `shadcn add` 覆盖后要重新打上。
+- **e2e 依赖的 DOM 契约**：`.playlist` / `.player` / `.settings-body` / `.field` / `.field-label` / `.field-hint` /
+  `.field-grid` / `.unit-input` / `.seg-btn` / `.log-line lv-*` / `.timeline-*` 等类名是测试钩子，改结构要同步
+  `test/*-e2e.mjs`。几个控件**必须保持原生**：`<select>`（`.preset-select`、`.unit-input select`、tune、字幕方式）、
+  分辨率里的两处 `<input type="checkbox">`（`.res-enable` / `.auto-check`）—— 套件用原生 setter 与 `.checked`
+  驱动它们；其余开关是 shadcn `Switch`（`role="switch"`，测试读 `aria-checked`）。
+- **播放列表宽度记在 `settings.json`**（顶层字段 `playlistWidthPercent`，与 `theme`/`language` 一样不进预设）：
+  面板只在挂载时读一次（`initialQueueWidthRef`），拖动结束时写回 —— 把保存值当 `defaultSize` 一直喂回去会把分隔条拉回原位。
+  另外**面板库把裸数字当像素**：`defaultSize={27}` 是 27px，必须写字符串 `"27"` 才是 27%
 
 ## 4. 界面文字要求（改文案前必读）
 
@@ -137,6 +159,12 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
 - **UI 套件要显式把 `buffered`/`bufferSec` 写进 `settings.json`**，否则跑哪条管道取决于默认值 ——
   覆盖的是另一条代码路径且不报错
 - **改 UI 结构要同步测试选择器**（把百分比从 `.progress-pct` 挪到 `.timeline-pct` 曾静默弄坏一条断言）
+- **e2e 里写输入框要用 `focusin`/`focusout`，不要用 `focus()`/`blur()`**：数值框与地址框都在**失焦时**才提交，
+  而被测窗口被移出屏幕、不一定持有系统焦点，`focus()` 会静默无效（`activeElement` 不写、随后也没有 blur）——
+  症状是「字段里文本变了、模型没变」，看起来像提交逻辑坏了。React 把 `onBlur` 映射到 `focusout`，
+  显式 dispatch 它才与真实点击等价（`blur` 事件本身不会触发）
+- **设置面板的锁定用 `inert`，但要挂在滚动容器内层的 `.settings-fields` 上**：`inert` 元素连滚轮都不响应，
+  挂到 `.settings-body` 上会让串流中无法滚动查看设置（e2e 的 `settings-body [inert]` 断言查的是内层）
 - **「测试连接」必须与正式推流共用参数构建**（`applyVideoEncoderArgs`/`applyAudioArgs`/`pixelFormatFor`/
   `encoderArgFor`）：它曾自带硬编码参数，服务器拒绝正式流时仍报成功。新增编码设置时**同时**想清楚测试里怎么体现，
   并把替代行为写进 `RtmpTestResult.notes`

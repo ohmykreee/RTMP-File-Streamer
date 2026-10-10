@@ -4,6 +4,10 @@
   `App.tsx` overwrites both from the resolved language on the first render, and
   the window title itself comes from the main process, so neither of these is a
   second source of truth.
+
+  No palette class is set here: `main.tsx` puts `.dark` on <html> from the OS
+  setting before the first paint, and `App.tsx` corrects it once the saved
+  appearance preference arrives.
 -->
 <html lang="en">
   <head>
@@ -11,7 +15,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: http://localhost:*"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' ws: http://localhost:*"
     />
     <title>RTMP File Streamer</title>
   </head>
