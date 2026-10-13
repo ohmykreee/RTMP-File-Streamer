@@ -586,9 +586,26 @@ end2f()
     outputOverride: path.join(here, 'out_cover_only.mp4')
   })
   record(
-    'a file with only cover art warns and pushes audio only',
-    builtCoverOnly.videoStreamIndex === -1 && builtCoverOnly.warnings.some((w) => w.includes('只推送音频')),
+    'a file with only cover art gets a generated picture instead of the cover',
+    builtCoverOnly.videoStreamIndex === -1 &&
+      builtCoverOnly.blackVideo &&
+      builtCoverOnly.args.some((a) => String(a).startsWith('color=c=black')) &&
+      builtCoverOnly.warnings.includes(TRANSLATIONS.zh['main.cmd.noVideoTrack']),
     builtCoverOnly.warnings.join(' | ')
+  )
+  // With the video set to "copy" there is nothing to copy, so the stream stays audio only.
+  const builtCoverCopy = buildStreamCommand({
+    ffmpegPath: FFMPEG,
+    media: coverOnly,
+    item: { ...itemB, mode: 'off', subtitleTracks: [], selectedSubtitleId: null },
+    settings: { ...baseSession, video: { ...baseSession.video, codec: 'copy' } },
+    startPositionSec: 0,
+    outputOverride: path.join(here, 'out_cover_copy.mp4')
+  })
+  record(
+    'cover art only + video copy warns that the stream is audio only',
+    !builtCoverCopy.blackVideo && builtCoverCopy.warnings.includes(TRANSLATIONS.zh['main.cmd.noVideoTrackCopy']),
+    builtCoverCopy.warnings.join(' | ')
   )
 }
 
@@ -1379,6 +1396,225 @@ console.log('\n=== 10. encoder buffer is enforced ===')
     `PTS ${small.pts.firstSec?.toFixed(2)}–${small.pts.lastSec?.toFixed(2)}s over ${small.pts.videoHeaders} frames, encoder at ${small.encodedSec.toFixed(1)}s`
   )
   if (small.holds[0]) console.log(`  hold: ${small.holds[0]}`)
+}
+
+console.log('\n=== 11. stand-in tracks for files that carry only one stream ===')
+/*
+ * A one-track publish is not the same stream as a two-track one: an ingest that never
+ * sees an audio track can reject the publish outright (measured against a relay: `Error
+ * number -10053` and the session torn down), and a file with no video stream has no
+ * picture to send at all. So a file that lacks one is published with a stand-in —
+ * silence for the missing audio, black frames for the missing video — encoded with the
+ * settings the user configured for that track.
+ *
+ * What has to hold, and is checked below on the real outputs rather than on the command
+ * vector: the stand-in arrives at all, it is really silent/black, and it lasts as long as
+ * the real track. That last one is not free — an uncapped generator is read flat out
+ * while the real stream is still being flushed, which produced 13.6s of black for a 12s
+ * file (measured) and left a stretch of black after the sound had stopped.
+ */
+{
+  const tmp = (name) => path.join(here, name)
+  const clipD = path.join(here, 'clip_d.mp4')
+  const clipE = path.join(here, 'clip_e.mp4')
+  const { info: infoD, item: itemD } = await makeItem(clipD)
+  const { info: infoE, item: itemE } = await makeItem(clipE)
+  // clip_a's sidecar, reused here: an audio-only file with subtitles attached is the case
+  // where a third input (the sidecar) sits between the file and the generated picture.
+  const srtRef = itemA.subtitleTracks.find((t) => t.source === 'external')
+  record(
+    'the audio-only fixture really has no video stream',
+    infoE.audioStreams.length === 1 && infoE.videoStreams.length === 0 && infoE.durationSec > 11,
+    `${infoE.durationSec}s, audio=${infoE.audioStreams.map((s) => `${s.codec} ${s.channels}ch`).join(',')}, video streams=${infoE.videoStreams.length}`
+  )
+
+  /** Streams present in an output, with the last PTS of each and the format duration. */
+  const inspect = async (file) => {
+    const res = await run(FFPROBE, ['-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', file])
+    const parsed = JSON.parse(res.stdout || '{}')
+    const streams = parsed.streams ?? []
+    const lastPts = async (kind) => {
+      const packets = await run(FFPROBE, ['-v', 'error', '-select_streams', kind, '-show_entries', 'packet=pts_time', '-of', 'csv=p=0', file])
+      const rows = packets.stdout.trim().split(/\r?\n/).filter(Boolean)
+      return rows.length ? Number(rows[rows.length - 1]) : NaN
+    }
+    const video = streams.find((s) => s.codec_type === 'video')
+    const audio = streams.find((s) => s.codec_type === 'audio')
+    return {
+      video,
+      audio,
+      videoEndSec: video ? await lastPts('v') : NaN,
+      audioEndSec: audio ? await lastPts('a') : NaN,
+      formatDuration: Number(parsed.format?.duration ?? NaN)
+    }
+  }
+
+  /** Mean volume of the output's audio, in dB (`-inf` for pure digital silence). */
+  const meanVolumeDb = async (file) => {
+    const res = await run(FFMPEG, ['-hide_banner', '-loglevel', 'info', '-i', file, '-vn', '-af', 'volumedetect', '-f', 'null', '-'])
+    const m = /mean_volume:\s*(-?[\d.]+|-inf)\s*dB/i.exec(res.stderr)
+    if (!m) return NaN
+    return m[1] === '-inf' ? -Infinity : Number(m[1])
+  }
+
+  /** Average luma of one frame, for "is this picture actually black". */
+  const frameLuma = async (file, atSec) => {
+    const res = await run(
+      FFMPEG,
+      ['-hide_banner', '-loglevel', 'info', '-ss', String(atSec), '-i', file, '-frames:v', '1', '-vf', 'signalstats,metadata=print:file=-', '-f', 'null', '-'],
+      {}
+    )
+    return Number(/YAVG=([\d.]+)/.exec(res.stdout)?.[1] ?? NaN)
+  }
+
+  const runBuilt = async (built, outFile) => {
+    fs.rmSync(outFile, { force: true })
+    const res = await run(FFMPEG, built.args, { timeoutMs: 180000 })
+    const ok = res.code === 0 && fs.existsSync(outFile)
+    if (!ok) record(`generated-track run (${path.basename(outFile)})`, false, `exit ${res.code}; ${res.stderr.split(/\r?\n/).filter(Boolean).slice(-2).join(' / ')}`)
+    return ok
+  }
+
+  // 11a. Video-only file (clip_d has no audio at all): the publish must gain an audio track.
+  {
+    const out = tmp('out_standin_audio.mp4')
+    const built = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoD, item: { ...itemD, mode: 'off' }, settings: baseSession, startPositionSec: 0, outputOverride: out })
+    record(
+      'a video-only file generates a silent audio track',
+      built.silentAudio && !built.blackVideo && built.aencName === 'aac' && built.audioStreamIndex === -1,
+      `silentAudio=${built.silentAudio} aenc=${built.aencName} sourceAudioIndex=${built.audioStreamIndex} (${built.summary.join(' | ')})`
+    )
+    record(
+      'the silence is generated with the configured codec, rate and layout, and mapped as its own input',
+      built.args.some((a) => /^anullsrc=channel_layout=stereo:sample_rate=44100:d=\d/.test(a)) &&
+        built.args.includes('-shortest') &&
+        built.args.some((a, i) => a === '-map' && built.args[i + 1] === '1:a:0'),
+      built.args.filter((a) => String(a).startsWith('anullsrc')).join('') || 'no lavfi input'
+    )
+    if (await runBuilt(built, out)) {
+      const inv = await inspect(out)
+      const db = await meanVolumeDb(out)
+      record(
+        'the received stream carries both tracks',
+        Boolean(inv.video) && Boolean(inv.audio),
+        `video=${inv.video?.codec_name} ${inv.video?.width}x${inv.video?.height}, audio=${inv.audio?.codec_name} ${inv.audio?.sample_rate}Hz ${inv.audio?.channels}ch`
+      )
+      record(
+        'the generated audio is silent, and as long as the picture',
+        db <= -60 && Math.abs(inv.audioEndSec - infoD.durationSec) < 0.6 && Math.abs(inv.audioEndSec - inv.videoEndSec) < 0.6,
+        `mean volume ${db} dB, audio ends ${inv.audioEndSec?.toFixed(2)}s, video ends ${inv.videoEndSec?.toFixed(2)}s, source ${infoD.durationSec}s`
+      )
+    }
+  }
+
+  // 11b. Audio-only file (clip_e has no video stream): the publish must gain a picture.
+  {
+    const out = tmp('out_standin_video.mp4')
+    const built = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoE, item: { ...itemE, mode: 'off' }, settings: baseSession, startPositionSec: 0, outputOverride: out })
+    record(
+      'an audio-only file generates a black video track',
+      built.blackVideo && !built.silentAudio && built.videoStreamIndex === -1 && built.vencName !== 'copy',
+      `blackVideo=${built.blackVideo} venc=${built.vencName} sourceVideoIndex=${built.videoStreamIndex} (${built.summary.join(' | ')})`
+    )
+    // With scaling off there is no geometry to inherit, so the stand-in is generated at
+    // the documented default rather than at whatever a source might have had.
+    record(
+      'the black picture is generated at the default geometry with the session frame rate',
+      built.args.some((a) => /^color=c=black:s=1280x720:r=30:d=\d/.test(a)) && built.args.includes('-shortest'),
+      built.args.filter((a) => String(a).startsWith('color=')).join('') || 'no lavfi input'
+    )
+    if (await runBuilt(built, out)) {
+      const inv = await inspect(out)
+      const luma = await frameLuma(out, 2)
+      record(
+        'the received stream carries both tracks',
+        Boolean(inv.video) && Boolean(inv.audio) && inv.video?.width === 1280 && inv.video?.height === 720,
+        `video=${inv.video?.codec_name} ${inv.video?.width}x${inv.video?.height}, audio=${inv.audio?.codec_name} ${inv.audio?.sample_rate}Hz`
+      )
+      record(
+        'the generated picture is black, and as long as the sound',
+        luma < 40 && Math.abs(inv.videoEndSec - infoE.durationSec) < 0.6 && Math.abs(inv.videoEndSec - inv.audioEndSec) < 0.6,
+        `YAVG=${luma}, video ends ${inv.videoEndSec?.toFixed(2)}s, audio ends ${inv.audioEndSec?.toFixed(2)}s, source ${infoE.durationSec}s`
+      )
+    }
+  }
+
+  // 11c. The resolution control decides the stand-in's geometry.
+  {
+    const scaled = { ...baseSession, video: { ...baseSession.video, scale: '640:360', scaleWidth: 640, scaleHeight: 360, scaleAuto: false } }
+    const built = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoE, item: { ...itemE, mode: 'off' }, settings: scaled, startPositionSec: 0, outputOverride: tmp('out_standin_scaled.mp4') })
+    record(
+      'a configured resolution is what the black picture is generated at',
+      built.args.some((a) => /^color=c=black:s=640x360:r=30:d=\d/.test(a)),
+      built.args.filter((a) => String(a).startsWith('color=')).join('') || 'no lavfi input'
+    )
+    // Subtitles on a file with no picture: the burn-in now runs over the stand-in, so the
+    // generated input has to be the one the filter is applied to — and its input number
+    // shifts when a sidecar takes input 1.
+    const withSubs = buildStreamCommand({
+      ffmpegPath: FFMPEG,
+      media: infoE,
+      item: { ...itemE, subtitleTracks: [{ id: srtRef.id, source: 'external', path: srtRef.path, codec: srtRef.codec, family: srtRef.family }], selectedSubtitleId: srtRef.id, mode: 'burn' },
+      settings: baseSession,
+      startPositionSec: 0,
+      outputOverride: tmp('out_standin_subs.mp4')
+    })
+    const inputPaths = withSubs.args.reduce((acc, a, i) => (withSubs.args[i - 1] === '-i' ? [...acc, a] : acc), [])
+    const vf = withSubs.args[withSubs.args.indexOf('-vf') + 1] ?? ''
+    record(
+      'a sidecar input does not shift the generated track onto the wrong input number',
+      inputPaths.length === 3 &&
+        inputPaths[1].endsWith('clip_a.srt') &&
+        withSubs.args.some((a, i) => a === '-map' && withSubs.args[i + 1] === '2:v:0') &&
+        vf.includes('subtitles='),
+      `inputs=${JSON.stringify(inputPaths.map((p) => path.basename(p)))}, vf=${vf.slice(0, 120)}`
+    )
+  }
+
+  // 11d. Stand-ins are for encoded tracks only: "copy" has nothing to copy, and "none" is
+  //      the user asking for a one-track stream.
+  {
+    const copyAudio = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoD, item: { ...itemD, mode: 'off' }, settings: { ...baseSession, audio: { ...baseSession.audio, codec: 'copy' } }, startPositionSec: 0, outputOverride: tmp('out_standin_copy.mp4') })
+    const noneAudio = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoD, item: { ...itemD, mode: 'off' }, settings: { ...baseSession, audio: { ...baseSession.audio, codec: 'none' } }, startPositionSec: 0, outputOverride: tmp('out_standin_none.mp4') })
+    record(
+      'audio "copy" on a file with no audio invents nothing and says so',
+      !copyAudio.silentAudio && !copyAudio.args.includes('-shortest') && copyAudio.warnings.includes(TRANSLATIONS.zh['main.cmd.noAudioTrackCopy']),
+      copyAudio.warnings.join(' | ') || 'no warning'
+    )
+    record(
+      'audio "none" leaves the stream video-only without generating anything',
+      !noneAudio.silentAudio && !noneAudio.args.includes('-shortest') && noneAudio.args.filter((a) => a === '-map').length === 1,
+      `maps=${noneAudio.args.filter((a) => a === '-map').length}, warnings=${noneAudio.warnings.length}`
+    )
+    const copyVideo = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoE, item: { ...itemE, mode: 'off' }, settings: { ...baseSession, video: { ...baseSession.video, codec: 'copy' } }, startPositionSec: 0, outputOverride: tmp('out_standin_copyv.mp4') })
+    record(
+      'video "copy" on a file with no video pushes audio only and says so',
+      !copyVideo.blackVideo &&
+        !copyVideo.args.includes('-shortest') &&
+        copyVideo.vencName === 'copy' &&
+        copyVideo.warnings.includes(TRANSLATIONS.zh['main.cmd.noVideoTrackCopy']),
+      copyVideo.warnings.join(' | ') || 'no warning'
+    )
+  }
+
+  // 11e. The buffered pipeline assembles its command elsewhere (the playout owns the input
+  //      and the MPEG-TS output), so the stand-in has to survive that hand-off too.
+  {
+    const enc = buildEncoderArgs({ ffmpegPath: FFMPEG, media: infoD, item: { ...itemD, mode: 'off' }, settings: baseSession, startPositionSec: 0 })
+    const out = tmp('out_standin_pass.ts')
+    fs.rmSync(out, { force: true })
+    const res = await run(
+      FFMPEG,
+      ['-hide_banner', '-nostdin', '-loglevel', 'error', '-fflags', '+genpts', '-i', clipD, ...enc.inputs, ...enc.args, '-f', 'mpegts', out],
+      { timeoutMs: 180000 }
+    )
+    const inv = res.code === 0 && fs.existsSync(out) ? await inspect(out) : { video: null, audio: null }
+    record(
+      'the buffered encoder pass publishes the generated track too',
+      enc.silentAudio && enc.inputs.length > 0 && Boolean(inv.video) && Boolean(inv.audio),
+      `inputs=[${enc.inputs.join(' ')}] -> video=${inv.video?.codec_name ?? 'none'}, audio=${inv.audio?.codec_name ?? 'none'} (exit ${res.code})`
+    )
+  }
 }
 
 console.log('\n=== summary ===')

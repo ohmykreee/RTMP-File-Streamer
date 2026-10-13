@@ -56,11 +56,22 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
   这一层试过的其它传输（concat manifest / `-follow` / 命名管道 / HTTP+reconnect / UDP）都因 EOF 或换段 abort
   不可用，**不要重试**。见 `src/main/stream/playout.ts`
 - **换文件两条路径刻意不同**：自然播完**只重启编码器**（RTMP 会话不动）；跳过/跳转**丢弃缓冲 + 重开会话**。
-  重开期间 `Engine.restartingSession` 为真时 `onEncoderExit` 必须直接返回，否则跳转目标自己的完成事件会拆掉新会话
+  重开期间 `Engine.restartingSession` 为真时 `onEncoderExit` 必须直接返回，否则跳转目标自己的完成事件会拆掉新会话。
+  判断「发布会话还在不在」一律用 `Playout.isSessionActive()`（把推流进程的 600ms 预热窗口也算作会话），
+  **不要**用 `isPusherRunning()`：编码是全速跑的，一个短队列能在预热窗口内编完，误判成「没有会话」会让它
+  一帧都不发就结束（实测单个 15s 文件 0.33s 编完、推流进程从未启动）
 - **蓝条只能由推流位置改写**：`currentIndex`/`positionSec`/`completedSec`/`itemDuration` 的合法入口只有
   `onPublished()` 与 `moveViewerTo()`；编码器的位置记在 `encoderIndex`/`encoderItemDuration`。播放列表
   `done`/`live` 只由 `markPlayedThrough()` 按推流位置决定。绿条取 `Playout.getEncodedSec()`，**不要**用
-  `completedSec + lead` 推算（段边界会错）。两条回归断言在 `test/engine-run.cjs`，`enginebuffered` 会再跑一遍
+  `completedSec + lead` 推算（段边界会错）。两条回归断言在 `test/engine-run.cjs`，`enginebuffered` 会再跑一遍。
+  另外**串流一结束就必须归零**（自然播完 / 手动停止 / 发布进程丢失），唯一出口是 `resetViewerTimeline()`：
+  `completedSec` 是「当前队列里的位置」，队列换掉后不可能还成立 —— 不清就会把上一批的进度留在新队列上
+  （清空 + 添加后条停在中间、多文件时像「两个文件的进度」），只有 `start()` 才会抹掉
+- **缺轨的文件要补轨**：源文件没有音频（音频编码不是 `copy`/`none`）→ `anullsrc` 生成静音；没有可用视频
+  （视频编码不是 `copy`）→ `color=c=black` 生成黑场。两者都按对应那一路的编码设置编码，并加 `-shortest` 收尾 ——
+  只推一路的流会被 ingest 直接拒绝（实测 `Error number -10053` 掉会话）。生成源**必须带 `d=`（剩余时长 +10s）**：
+  不封顶时它会被全速读到底（实测 12s 的文件推出 13.6s 黑场）。源文件必须留在 input 0（`-map` 全按它写），
+  生成输入排在源文件之后；双引擎那边经 `BuiltEncoderArgs.inputs` 交给 `Playout.startEncoder` 插入
 - **领先上限**：超限就 `pause` 编码 stdout，等推流吃到 `上限 - max(4, 上限*0.25)` 再恢复。**不要改回
   「喂数据半路无条件暂停」** —— 数据收不回、`encodedSec - publishedSec` 不会自己变小，pump 会自锁（实测把
   35s 截成 16.9s）。`BUFFER_SEC_MIN/MAX = 12/300`，下限是实测值（换文件约 5.8–7.5s）
@@ -191,6 +202,7 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
 
 - **unit**：命令构建（字幕滤镜转义、分辨率三态、CBR/VBR/CRF、像素格式与硬件编码器映射、RTMP/协议目标拼接、音画偏移）
   + **真的执行生成的命令**再解码校验 + 字幕烧录（外挂与内嵌轨各一次，`signalstats` 验证字幕区字形像素）
+  + 缺轨补轨（生成静音/黑场真的进到输出里、时长与真轨对齐、`copy`/`none` 不生成）
   + 编码缓冲上限实测 + 本地推流 + obs-websocket 端点 + 文案表三语言键集/占位符/空值
 - **e2e**（CDP 驱动）：`ui`（启动、播放列表与字幕恢复、开始/停止、跳转、语言切换落盘、日志面板）·
   `features`（拖入、串流中锁定、密钥掩码、日志留存、流选择诊断）· `presets`（保存/套用/改名/删除、

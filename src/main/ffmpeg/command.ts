@@ -77,7 +77,22 @@ function mappedStreamIndexes(
   }
 }
 
-export interface BuiltCommand extends MappedStreams {
+/**
+ * Tracks a command had to invent because the file does not carry them.
+ *
+ * Not the same question as {@link MappedStreams}: those are the source stream indexes,
+ * and a generated track has no source stream at all. These say what the output
+ * actually contains, which is what decides whether a warning about "audio only" or
+ * "video only" is still true.
+ */
+export interface GeneratedTracks {
+  /** True when silence is generated because the file has no audio track. */
+  silentAudio: boolean
+  /** True when black frames are generated because the file has no video track. */
+  blackVideo: boolean
+}
+
+export interface BuiltCommand extends MappedStreams, GeneratedTracks {
   args: string[]
   commandLine: string
   /** Short human readable description of the pipeline, shown in the UI. */
@@ -91,8 +106,16 @@ export interface BuiltCommand extends MappedStreams {
 }
 
 /** What {@link buildEncoderArgs} produces: the args plus enough context to log the choice. */
-export interface BuiltEncoderArgs extends MappedStreams {
+export interface BuiltEncoderArgs extends MappedStreams, GeneratedTracks {
   args: string[]
+  /**
+   * Input argument groups the caller must add after the source file's own `-i`.
+   *
+   * Empty unless a stand-in track is generated. The pass's source file has to stay
+   * input 0 — every `-map` in `args` names it that way — so the generated inputs are
+   * appended by whoever assembles the command line (see `Playout.startEncoder`).
+   */
+  inputs: string[]
   summary: string[]
   warnings: string[]
   vencName: string
@@ -283,6 +306,116 @@ export function describeStreams(media: MediaInfo, language: Language = DEFAULT_C
 }
 
 /* ------------------------------------------------------------------ *
+ * Stand-in tracks for files that do not carry them
+ * ------------------------------------------------------------------ */
+
+/**
+ * Publishable streams for a file that has only one of the two tracks.
+ *
+ * A one-track publish is not the same stream as a two-track one: a player that expects
+ * an audio track stalls or reconnects, and ingest servers reject it outright — measured
+ * against a relay that answered a video-only publish with `Error number -10053` and tore
+ * the whole session down, which from this side looks like "the file will not play".
+ * So when the file has no audio the command generates silence, and when it has no video
+ * it generates black frames; both are encoded with the settings the user configured and
+ * are as long as the real track (`-shortest`).
+ *
+ * The two "do not invent a track" cases are deliberate and different in kind:
+ *  - `copy` has nothing to copy — there is no source stream to pass through, and
+ *    encoding a stand-in instead would silently ignore the instruction;
+ *  - `none` is the user asking for a stream without that track.
+ */
+
+/** Whether the audio settings ask for an encoded track the file does not have. */
+function needsSilentAudio(a: AudioSettings, audioIn: MediaStreamInfo | undefined): boolean {
+  return !audioIn && a.codec !== 'none' && a.codec !== 'copy'
+}
+
+/** Whether the video settings ask for an encoded picture the file does not have. */
+function needsBlackVideo(v: VideoSettings, videoIn: MediaStreamInfo | undefined): boolean {
+  return !videoIn && v.codec !== 'copy'
+}
+
+/**
+ * Format of the generated silence.
+ *
+ * Taken from the target encoder rather than from a fixed default, so the stand-in needs
+ * no conversion of its own and the published track has exactly the layout and rate the
+ * settings name.
+ */
+function silentAudioSource(a: AudioSettings): string {
+  const layout = targetAudioChannels(a) === 1 ? 'mono' : 'stereo'
+  return `anullsrc=channel_layout=${layout}:sample_rate=${targetAudioRate(a)}`
+}
+
+/** Geometry of the black stand-in, when no source picture can supply one. */
+const BLACK_VIDEO_DEFAULT_SIZE = '1280x720'
+const BLACK_VIDEO_DEFAULT_FPS = 30
+
+/**
+ * Size and rate of the generated picture.
+ *
+ * A file with no video track has no geometry to inherit, so the session's own
+ * resolution control decides; with scaling switched off there is nothing to ask for and
+ * 1280x720 is used rather than an invented 4K picture. Anything the scale filter still
+ * has to do is done to the generated frames like any other source, so the output lands
+ * on the configured geometry either way.
+ */
+function blackVideoSource(v: VideoSettings): { source: string; fps: number } {
+  const parsed = /^(\d+):(\d+|-2)$/.exec(resolveScaleFilter(v))
+  let size = BLACK_VIDEO_DEFAULT_SIZE
+  if (parsed) {
+    const width = Number(parsed[1])
+    // `-2` is the auto height, which for a black frame is derived as 16:9.
+    const height = parsed[2] === '-2' ? Math.round((width * 9) / 32) * 2 : Number(parsed[2])
+    if (width >= 2 && height >= 2) size = `${width}x${height}`
+  }
+  const fps = v.fps > 0 ? v.fps : BLACK_VIDEO_DEFAULT_FPS
+  return { source: `color=c=black:s=${size}:r=${fps}`, fps }
+}
+
+/**
+ * How far past the file's own duration a generated track is allowed to run.
+ *
+ * `-shortest` is what actually ends it, but that only fires once the real stream has
+ * finished, and until then the generator is consumed flat out. Measured on a 12 s
+ * audio-only file: 13.6 s of black picture came out before the output closed, so the
+ * pass reported more material than the file holds and the viewer got a stretch of black
+ * after the sound had stopped. Capping the generator removes that race — both inputs run
+ * out at the same point in stream time (the same file with `d=` came out at 12.0 s).
+ *
+ * The margin covers what the file may still hold past its probed duration: a resumed
+ * pass seeks to a keyframe, so the material it starts from can overrun the nominal
+ * remainder. Ten seconds is past any GOP a normal file carries, and the cap only has to
+ * beat the real stream — it is not a duration the stream is cut to.
+ */
+const GENERATED_TRACK_MARGIN_SEC = 10
+
+/**
+ * The input group for a generated track: `-f lavfi -i <source>` on the file's clock.
+ *
+ * `-re` is repeated here because it is an INPUT option, not a session-wide one: in the
+ * paced pipeline the file is read at 1x, and a generator left unpaced would run to the
+ * end of the material immediately and fill the muxer's interleave queue with silence (or
+ * black frames) the viewer has not reached yet. `-itsoffset` keeps the stand-in on the
+ * same shifted clock as the file when a per-item A/V delay is configured.
+ */
+function generatedInputArgs(source: string, seconds: number, realtimePacing: boolean, offsetSec: number): string[] {
+  const args: string[] = []
+  if (realtimePacing) args.push('-re')
+  if (Math.abs(offsetSec) > 0.0005) args.push('-itsoffset', String(round2(offsetSec)))
+  // No duration when the file's own is unknown: an unbounded stand-in is the safe
+  // direction (it can be cut, but it cannot cut the real material short).
+  args.push('-f', 'lavfi', '-i', seconds > 0 ? `${source}:d=${round2(seconds)}` : source)
+  return args
+}
+
+/** Length of a generated track: the file's remaining material plus the margin above. */
+function generatedTrackSeconds(remainingSec: number): number {
+  return remainingSec > 0 ? remainingSec + GENERATED_TRACK_MARGIN_SEC : 0
+}
+
+/* ------------------------------------------------------------------ *
  * Encoder specific argument groups
  * ------------------------------------------------------------------ */
 
@@ -423,11 +556,31 @@ function applyVideoEncoderArgs(
   }
 }
 
+/**
+ * The audio encoder the settings name, as an ffmpeg encoder name.
+ *
+ * Shared with the stand-in track's generator so the silence is produced in the format
+ * the encoder is about to be handed.
+ */
+function audioEncoderName(a: AudioSettings): string {
+  return a.codec === 'libopus' ? 'libopus' : a.codec === 'libmp3lame' ? 'libmp3lame' : 'aac'
+}
+
+/** Channel count the audio settings ask for, clamped to what the muxers carry. */
+function targetAudioChannels(a: AudioSettings): number {
+  return Math.max(1, Math.min(2, a.channels || 2))
+}
+
+/** Sample rate the target encoder works at (Opus is fixed at 48 kHz). */
+function targetAudioRate(a: AudioSettings): number {
+  return audioEncoderName(a) === 'libopus' ? 48000 : a.sampleRate || 44100
+}
+
 /** Appends audio encoder args, returns the ffmpeg encoder name used. */
 function applyAudioArgs(args: string[], a: AudioSettings, filters: string[], sourceChannels: number): string {
-  const enc = a.codec === 'libopus' ? 'libopus' : a.codec === 'libmp3lame' ? 'libmp3lame' : 'aac'
-  const targetRate = enc === 'libopus' ? 48000 : a.sampleRate || 44100
-  const targetCh = Math.max(1, Math.min(2, a.channels || 2))
+  const enc = audioEncoderName(a)
+  const targetRate = targetAudioRate(a)
+  const targetCh = targetAudioChannels(a)
 
   if (sourceChannels > targetCh && targetCh === 1) filters.push('pan=mono|c0=0.5*c0+0.5*c1')
   if (enc === 'libopus') filters.push('aresample=48000')
@@ -522,6 +675,14 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
 
   const videoIn = pickBest(media.videoStreams)
   const audioIn = pickBest(media.audioStreams)
+  /*
+   * Stand-in tracks, decided before anything is built: they add inputs (which shifts
+   * every later input index), they supply the frame rate the GOP maths needs, and they
+   * decide whether a "one track only" warning is still true.
+   */
+  const silentAudio = needsSilentAudio(a, audioIn)
+  const blackVideo = needsBlackVideo(v, videoIn)
+  const blackSource = blackVideo ? blackVideoSource(v) : null
 
   /* ---------------- subtitle selection ---------------- */
   const mode = item.mode ?? sub.mode
@@ -586,10 +747,34 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     )
   }
 
+  /*
+   * Generated tracks go LAST, after the file and the sidecar.
+   *
+   * Every `-map` names the file as input 0, and keeping that numbering stable is what
+   * makes the stream indexes in the log mean "this stream of this file" rather than
+   * "whatever happened to be read third".
+   */
+  let blackVideoInput = -1
+  let silentAudioInput = -1
+  let nextInput = externalSubInput >= 0 ? 2 : 1
+  const generatedSec = generatedTrackSeconds(remaining)
+  if (blackSource) {
+    blackVideoInput = nextInput++
+    args.push(...generatedInputArgs(blackSource.source, generatedSec, out.realtimePacing, internalOffset))
+    summary.push(t('main.cmd.summaryBlackVideo'))
+  }
+  if (silentAudio) {
+    silentAudioInput = nextInput++
+    args.push(...generatedInputArgs(silentAudioSource(a), generatedSec, out.realtimePacing, internalOffset))
+    summary.push(t('main.cmd.summarySilentAudio'))
+  }
+
   /* ---------------- video filters ---------------- */
   const filters: string[] = []
   const scaleFilter = resolveScaleFilter(v)
-  const sourceFps = videoIn?.fps ?? 0
+  // The generated picture is already at the rate the output wants, so it must report
+  // that rate — reporting 0 would add an `fps` filter that has nothing to convert.
+  const sourceFps = videoIn?.fps ?? blackSource?.fps ?? 0
   const wantsFps = !copyVideo && v.fps > 0 && Math.abs(sourceFps - v.fps) > 0.05
 
   if (!copyVideo) {
@@ -644,8 +829,12 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   } else if (videoIn) {
     args.push('-map', `0:${videoIn.index}`)
     if (videoFilterChain) args.push('-vf', videoFilterChain)
+  } else if (blackVideoInput >= 0) {
+    args.push('-map', `${blackVideoInput}:v:0`)
+    if (videoFilterChain) args.push('-vf', videoFilterChain)
   }
   if (audioIn && a.codec !== 'none') args.push('-map', `0:${audioIn.index}`)
+  else if (silentAudioInput >= 0) args.push('-map', `${silentAudioInput}:a:0`)
 
   /* ---------------- video encoder ---------------- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
@@ -656,11 +845,17 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   if (whipWarn) warnings.push(whipWarn)
 
   if (copyVideo) {
-    args.push('-c:v', 'copy')
-    summary.unshift(t('main.cmd.summaryVideoCopy'))
-  } else if (!videoIn) {
-    warnings.push(t('main.cmd.noVideoTrack'))
+    if (videoIn) {
+      args.push('-c:v', 'copy')
+      summary.unshift(t('main.cmd.summaryVideoCopy'))
+    } else {
+      // A passthrough with nothing to pass through. The setting did ask for the picture,
+      // so the stream really is audio only — and it is not turned into an encoded one,
+      // because that is not what "copy" said.
+      warnings.push(t('main.cmd.noVideoTrackCopy'))
+    }
   } else {
+    if (blackSource) warnings.push(t('main.cmd.noVideoTrack'))
     vencName = spec.name
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
     const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
@@ -680,19 +875,30 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   let aencName = 'none'
   if (a.codec === 'none') {
     summary.push(t('main.cmd.summaryAudioNone'))
-  } else if (!audioIn) {
-    warnings.push(t('main.cmd.noAudioTrack'))
   } else if (a.codec === 'copy') {
-    aencName = 'copy'
-    args.push('-c:a', 'copy')
-    summary.push(t('main.cmd.summaryAudioCopy'))
+    if (audioIn) {
+      aencName = 'copy'
+      args.push('-c:a', 'copy')
+      summary.push(t('main.cmd.summaryAudioCopy'))
+    } else {
+      // Same as the video side: nothing to pass through, and the setting asked for it.
+      warnings.push(t('main.cmd.noAudioTrackCopy'))
+    }
   } else {
-    if (a.loudnorm) {
+    if (silentAudio) warnings.push(t('main.cmd.noAudioTrack'))
+    // Silenced material has nothing to normalise, and `loudnorm` measures the input it
+    // is given — a track that is digital silence by construction is not worth the
+    // measurement, so the filter is left off for the generated one.
+    if (a.loudnorm && !silentAudio) {
       audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
       summary.push(t('main.cmd.summaryLoudnorm'))
     }
-    aencName = applyAudioArgs(args, a, audioFilters, audioIn.channels ?? 2)
-    const avLayout = (audioIn.channels ?? 2) === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
+    // The generated silence already carries the target layout, so it is declared with
+    // the channel count the settings ask for: claiming the source's would call for a
+    // `pan` downmix from channels that do not exist.
+    const sourceChannels = audioIn ? audioIn.channels ?? 2 : targetAudioChannels(a)
+    aencName = applyAudioArgs(args, a, audioFilters, sourceChannels)
+    const avLayout = sourceChannels === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
     summary.push(
       t('main.cmd.summaryAudio', {
         encoder: aencName,
@@ -728,6 +934,13 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   }
 
   /* ---------------- muxing / output ---------------- */
+  /*
+   * A generated track has no natural end — silence and blackness are infinite — so the
+   * output is closed by the material that does: the file's own streams. Without this the
+   * pass would keep producing after its source ran out, which in the buffered pipeline
+   * means the encoder never finishes and the timeline never advances.
+   */
+  if (silentAudio || blackSource) args.push('-shortest')
   if (out.dropLateFrames) args.push('-fflags', '+genpts+igndts', '-max_delay', '0')
   args.push('-max_interleave_delta', '0')
   if (effContainer === 'flv') args.push('-flvflags', 'no_duration_filesize')
@@ -757,6 +970,8 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     aencName,
     subtitleApplied,
     remainingDurationSec: remaining,
+    silentAudio,
+    blackVideo: Boolean(blackSource),
     ...mappedStreamIndexes(videoIn, audioIn, a.codec)
   }
 }
@@ -770,7 +985,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
  * RTMP target, `-re` pacing and container flags all belong to the pusher instead.
  */
 export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): BuiltEncoderArgs {
-  const { item, settings, media } = req
+  const { item, settings, media, startPositionSec } = req
   const v = settings.video
   const a = settings.audio
   const sub = settings.subtitles
@@ -784,6 +999,42 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   const copyVideo = v.codec === 'copy'
   const videoIn = pickBest(media.videoStreams)
   const audioIn = pickBest(media.audioStreams)
+  // Same stand-in decisions as the single-process builder (see `needsSilentAudio`).
+  const silentAudio = needsSilentAudio(a, audioIn)
+  const blackVideo = needsBlackVideo(v, videoIn)
+  const blackSource = blackVideo ? blackVideoSource(v) : null
+  /*
+   * The generated inputs, as argument groups the caller appends after its own `-i`.
+   *
+   * A pass is assembled by `Playout.startEncoder` (which owns the source input, the
+   * seek and the MPEG-TS output side), so the stand-ins cannot be spliced in here —
+   * they are handed over as `inputs` instead. The file stays input 0 so every `-map`
+   * below keeps naming it, which is also why the generated tracks come after.
+   *
+   * No `-itsoffset` and no `-re`: this pipeline applies neither to the source file (the
+   * publisher is the one paced at 1x), so the stand-in must not introduce a difference
+   * the real tracks do not have.
+   */
+  const inputs: string[] = []
+  // The source file is input 0; the caller adds these groups in order after it.
+  let nextInput = 1
+  let blackVideoInput = -1
+  let silentAudioInput = -1
+  // Same "how long" arithmetic as the single-process builder: the pass gets an input
+  // seek from `Playout`, so what is left of the file is its duration minus the position.
+  const totalDuration = media.durationSec > 0 ? media.durationSec : item.durationSec
+  const startPos = Math.max(0, Math.min(startPositionSec, Math.max(0, totalDuration - 0.2)))
+  const generatedSec = generatedTrackSeconds(totalDuration > 0 ? Math.max(0, totalDuration - startPos) : 0)
+  if (blackSource) {
+    blackVideoInput = nextInput++
+    inputs.push(...generatedInputArgs(blackSource.source, generatedSec, false, 0))
+    summary.push(t('main.cmd.summaryBlackVideo'))
+  }
+  if (silentAudio) {
+    silentAudioInput = nextInput++
+    inputs.push(...generatedInputArgs(silentAudioSource(a), generatedSec, false, 0))
+    summary.push(t('main.cmd.summarySilentAudio'))
+  }
 
   /* ---- subtitle selection (same rules as the single-process builder) ---- */
   const mode = item.mode ?? sub.mode
@@ -807,7 +1058,7 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
 
   const filters: string[] = []
   const scaleFilter = resolveScaleFilter(v)
-  const sourceFps = videoIn?.fps ?? 0
+  const sourceFps = videoIn?.fps ?? blackSource?.fps ?? 0
   const wantsFps = !copyVideo && v.fps > 0 && Math.abs(sourceFps - v.fps) > 0.05
   if (!copyVideo) {
     if (scaleFilter) {
@@ -839,11 +1090,16 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
     warnings.push(t('main.cmd.offsetPositive', { sec: round2(internalOffset) }))
   }
 
-  /* ---- mapping ---- */  if (videoIn) {
+  /* ---- mapping ---- */
+  if (videoIn) {
     args.push('-map', `0:${videoIn.index}`)
+    if (filters.length > 0) args.push('-vf', filters.join(','))
+  } else if (blackVideoInput >= 0) {
+    args.push('-map', `${blackVideoInput}:v:0`)
     if (filters.length > 0) args.push('-vf', filters.join(','))
   }
   if (audioIn && a.codec !== 'none') args.push('-map', `0:${audioIn.index}`)
+  else if (silentAudioInput >= 0) args.push('-map', `${silentAudioInput}:a:0`)
 
   /* ---- video encoder ---- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
@@ -853,11 +1109,14 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   const whipWarn = whipCodecWarning(out.protocol, v, a, t)
   if (whipWarn) warnings.push(whipWarn)
   if (copyVideo) {
-    args.push('-c:v', 'copy')
-    summary.unshift(t('main.cmd.summaryVideoCopy'))
-  } else if (!videoIn) {
-    warnings.push(t('main.cmd.noVideoTrackEncoder'))
+    if (videoIn) {
+      args.push('-c:v', 'copy')
+      summary.unshift(t('main.cmd.summaryVideoCopy'))
+    } else {
+      warnings.push(t('main.cmd.noVideoTrackCopy'))
+    }
   } else {
+    if (blackSource) warnings.push(t('main.cmd.noVideoTrack'))
     args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
     const fpsForGop = v.fps > 0 ? v.fps : Math.min(120, Math.max(10, Math.round(sourceFps || 30)))
     applyVideoEncoderArgs(args, v, spec, fpsForGop, effContainer)
@@ -870,18 +1129,24 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   const audioFilters: string[] = []
   if (a.codec === 'none') {
     summary.push(t('main.cmd.summaryAudioNone'))
-  } else if (!audioIn) {
-    warnings.push(t('main.cmd.noAudioTrack'))
   } else if (a.codec === 'copy') {
-    args.push('-c:a', 'copy')
-    summary.push(t('main.cmd.summaryAudioCopy'))
+    if (audioIn) {
+      args.push('-c:a', 'copy')
+      summary.push(t('main.cmd.summaryAudioCopy'))
+    } else {
+      warnings.push(t('main.cmd.noAudioTrackCopy'))
+    }
   } else {
-    if (a.loudnorm) {
+    if (silentAudio) warnings.push(t('main.cmd.noAudioTrack'))
+    // See the single-process builder: a track of digital silence has nothing to
+    // normalise, and the generated source already carries the target layout.
+    if (a.loudnorm && !silentAudio) {
       audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
       summary.push(t('main.cmd.summaryLoudnorm'))
     }
-    const enc = applyAudioArgs(args, a, audioFilters, audioIn.channels ?? 2)
-    const copyLayout = (audioIn.channels ?? 2) === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
+    const sourceChannels = audioIn ? audioIn.channels ?? 2 : targetAudioChannels(a)
+    const enc = applyAudioArgs(args, a, audioFilters, sourceChannels)
+    const copyLayout = sourceChannels === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
     summary.push(
       t('main.cmd.summaryAudio', {
         encoder: enc,
@@ -893,7 +1158,19 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
-  return { args, summary, warnings, vencName: copyVideo ? 'copy' : spec.name, ...mappedStreamIndexes(videoIn, audioIn, a.codec) }
+  /* ---- the generated tracks have no natural end (see the single-process builder) ---- */
+  if (silentAudio || blackSource) args.push('-shortest')
+
+  return {
+    args,
+    inputs,
+    summary,
+    warnings,
+    vencName: copyVideo ? 'copy' : spec.name,
+    silentAudio,
+    blackVideo: Boolean(blackSource),
+    ...mappedStreamIndexes(videoIn, audioIn, a.codec)
+  }
 }
 
 /** Quote an argument vector for display / copy-paste. */

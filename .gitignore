@@ -17,6 +17,7 @@ test/*.mp4
 test/*.flv
 test/*.mkv
 test/*.h264
+test/*.ts
 test/*.png
 test/*.srt
 test/*.json

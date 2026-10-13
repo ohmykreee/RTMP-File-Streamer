@@ -444,6 +444,62 @@ async function main() {
   const errorsPhase1 = logs.slice(0, phase2Start).filter((l) => l.level === 'error')
   const errorsPhase2 = logs.slice(phase2Start).filter((l) => l.level === 'error')
 
+  /* ------------------------------------------------------------------ *
+   * phase three: what the progress bar shows once a session is over
+   *
+   * `completedSec` is a position inside the queue that produced it, and the bar is drawn
+   * straight from it. A session that ended — played out or stopped by hand — used to
+   * hand its total to whatever came next: after a finished run, clearing the list and
+   * adding one long file showed the previous batch's progress on a session that had not
+   * started (with several files, their combined sum), and `start()` was the only thing
+   * that cleared it. Read here, on a real session, rather than asserted about the source:
+   * both pipelines end a run through different code.
+   * ------------------------------------------------------------------ */
+  const phaseThree = []
+  const check = (name, ok, detail) => phaseThree.push({ name, ok, detail })
+
+  const endedNaturally = engine.getStatus()
+  check(
+    'a session that played out leaves no progress behind',
+    endedNaturally.state === 'idle' &&
+      endedNaturally.completedSec === 0 &&
+      endedNaturally.positionSec === 0 &&
+      endedNaturally.currentIndex === -1 &&
+      endedNaturally.currentDurationSec === 0,
+    `state=${endedNaturally.state} completed=${endedNaturally.completedSec.toFixed(2)}s position=${endedNaturally.positionSec.toFixed(2)}s index=${endedNaturally.currentIndex} duration=${endedNaturally.currentDurationSec.toFixed(2)}s`
+  )
+
+  // The queue is replaced the way the UI's clear button + add does it.
+  engine.setPlaylist([])
+  engine.setPlaylist([mkItem('e', clipB, infoB, null, 'off')])
+  const freshQueue = engine.getStatus()
+  check(
+    'a queue added after a session reads as unstarted',
+    freshQueue.completedSec === 0 && freshQueue.positionSec === 0 && freshQueue.currentIndex === -1,
+    `completed=${freshQueue.completedSec.toFixed(2)}s position=${freshQueue.positionSec.toFixed(2)}s index=${freshQueue.currentIndex}`
+  )
+
+  // The other way a session ends: the user stops it mid-file. This session publishes too
+  // (that is what gives the position something to reset), so the counters and the ingest
+  // recordings of phase 2 are closed off here — everything after this point is phase 3's.
+  const pushersBeforePhase3 = logs.filter((l) => l.message.includes('推流进程已启动')).length
+  await waitForListener()
+  const phaseThreeSessionIndex = connections.length - 1
+  await engine.start()
+  await waitUntil(() => engine.getStatus().positionSec > 1, 30000, 'phase 3 first seconds')
+  const midRun = engine.getStatus()
+  await engine.stop()
+  const afterStop = engine.getStatus()
+  check(
+    'a manually stopped session leaves no progress behind',
+    midRun.completedSec > 1 &&
+      afterStop.state === 'idle' &&
+      afterStop.completedSec === 0 &&
+      afterStop.positionSec === 0 &&
+      afterStop.currentIndex === -1,
+    `was completed=${midRun.completedSec.toFixed(2)}s at index ${midRun.currentIndex}; after stop state=${afterStop.state} completed=${afterStop.completedSec.toFixed(2)}s position=${afterStop.positionSec.toFixed(2)}s index=${afterStop.currentIndex}`
+  )
+
   /* ---- verify ---- */
   await delay(1200)
   stopping = true
@@ -466,11 +522,17 @@ async function main() {
     finalStatus.itemStatus.a === 'done' && finalStatus.itemStatus.b === 'done',
     JSON.stringify(finalStatus.itemStatus)
   )
+  /*
+   * The entries are the record of what aired and stay `done`; the position is not kept.
+   * This used to assert that `completedSec` still held both files' durations, which is
+   * exactly the leftover the progress bar showed on the NEXT queue — see phase three.
+   */
   record(
-    'aggregate progress covered both files',
-    Math.abs(finalStatus.completedSec - (infoA.durationSec + infoB.durationSec)) < 4,
-    `${finalStatus.completedSec.toFixed(1)}s of ${(infoA.durationSec + infoB.durationSec).toFixed(1)}s`
+    'the session total is not left on the status line after the run',
+    finalStatus.completedSec === 0 && finalStatus.positionSec === 0 && finalStatus.currentDurationSec === 0,
+    `completed=${finalStatus.completedSec.toFixed(2)}s position=${finalStatus.positionSec.toFixed(2)}s duration=${finalStatus.currentDurationSec.toFixed(2)}s`
   )
+  for (const r of phaseThree) record(r.name, r.ok, r.detail)
   record(
     buffered
       ? 'the buffered playout published the playlist over a single RTMP session'
@@ -969,7 +1031,9 @@ async function main() {
     `pos=${beforeSkip.positionSec.toFixed(2)}s completed=${beforeSkip.completedSec.toFixed(2)}s`
   )
 
-  const phaseTwoSessions = sessionInfo.filter((s) => s.index >= seekSessionIndex)
+  // Phase 2 only: phase 3 publishes a session of its own after this, and its recording
+  // would otherwise be counted as part of what the jump aired.
+  const phaseTwoSessions = sessionInfo.filter((s) => s.index >= seekSessionIndex && s.index < phaseThreeSessionIndex)
   /*
    * A jump discards the buffer and reopens the RTMP session at the requested file
    * (see `Playout.restartSession`), so the file the viewer asked for is expected to
@@ -1071,22 +1135,26 @@ async function main() {
 
   /*
    * "One publisher, many encoders" is the shape the two-process design exists for,
-   * so it is asserted rather than only reported. Both phases are counted, and each
-   * phase may start at most one pusher: a second start inside a single phase is a
-   * republish, which resets the RTMP timeline and re-buffers every viewer.
+   * so it is asserted rather than only reported. Each phase is counted on its own —
+   * phase 3 publishes a session of its own — and a phase may start at most the pushers
+   * it needs: a second start inside one session is a republish, which resets the RTMP
+   * timeline and re-buffers every viewer.
    */
   record(
     buffered ? 'the playout restarted its publisher exactly when the queue was jumped' : 'the playout reported its processes',
     buffered
-      ? // Session 1: one publisher for the whole playlist (the encoder restarts
-        // behind it). Session 2: the jump discards the buffer, so it opens the
-        // session, then opens a SECOND one at the jumped-to file. Anything else
-        // means either a republish that was not asked for, or a jump that did not
-        // actually restart (which would make the jump a no-op).
-        pushersBeforePhase2 === 1 && pusherStarts - pushersBeforePhase2 === 2 && encoderStarts >= 4
+      ? // Phase 1: one publisher for the whole playlist (the encoder restarts behind
+        // it). Phase 2: the jump discards the buffer, so it opens the session and then
+        // opens a SECOND one at the jumped-to file. Phase 3: one session for its own
+        // queue. Anything else means either a republish that was not asked for, or a
+        // jump that did not actually restart (which would make the jump a no-op).
+        pushersBeforePhase2 === 1 &&
+        pushersBeforePhase3 - pushersBeforePhase2 === 2 &&
+        pusherStarts - pushersBeforePhase3 === 1 &&
+        encoderStarts >= 4
       : pusherStarts === 0 && encoderStarts === 0,
     buffered
-      ? `session 1: ${pushersBeforePhase2} publisher start; session 2: ${pusherStarts - pushersBeforePhase2} (1 to open + 1 for the jump); ${encoderStarts} encoder start(s) total`
+      ? `phase 1: ${pushersBeforePhase2} publisher start; phase 2: ${pushersBeforePhase3 - pushersBeforePhase2} (1 to open + 1 for the jump); phase 3: ${pusherStarts - pushersBeforePhase3}; ${encoderStarts} encoder start(s) total`
       : `single-process pipeline: no playout processes, as expected`
   )
 

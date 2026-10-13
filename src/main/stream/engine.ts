@@ -274,6 +274,15 @@ export class StreamEngine {
 
   setPlaylist(items: PlaylistItem[]): void {
     this.items = items
+    /*
+     * A queue that is replaced while nothing is running has no viewer position: the
+     * progress bar is drawn straight from `completedSec`, which is derived from an index
+     * into the queue that just went away. Resetting here is the second half of the
+     * session-end reset — it also covers the sessions that ended badly (a lost publisher
+     * leaves the engine in `error`, not `idle`, and never reaches `finishSession`), so
+     * clearing the list and adding a new file can never inherit the old run's progress.
+     */
+    if (!this.isActive()) this.resetViewerTimeline()
     this.emitPlaylist()
     this.emitStatus()
   }
@@ -508,6 +517,30 @@ export class StreamEngine {
   }
 
   /**
+   * Puts the viewer's progress back to the start of the queue.
+   *
+   * The progress bar is drawn from these fields, so they are what "the stream is over"
+   * has to look like: a session that ended — played out or stopped by hand — must not
+   * leave its own total on screen, because the next queue is a different timeline and
+   * the numbers describe an index into the old one. Two ways that showed up in use:
+   * the bar sat in the middle of a fresh single-file queue (the finished playlist's
+   * total carried over), and after a clear + add it read as progress for the files
+   * that had already played. `completedSec` is derived from `currentIndex` and the
+   * current items (see `setPosition`), so it cannot be kept meaningful across the end
+   * of a session — the only honest value left is zero.
+   *
+   * `itemDuration` goes with it: the readout beside the bar pairs it with `positionSec`,
+   * and leaving it behind printed "00:00 / 03:02" after the run.
+   */
+  private resetViewerTimeline(): void {
+    this.currentIndex = -1
+    this.positionSec = 0
+    this.startPositionSec = 0
+    this.completedSec = 0
+    this.itemDuration = 0
+  }
+
+  /**
    * Clears the figures that belong to a SESSION rather than to one pass.
    *
    * These describe live output (`speed`, `fps`, `bitrate`, `frame`, the raw ffmpeg
@@ -623,13 +656,11 @@ export class StreamEngine {
     this.publishedSec = 0
     this.state = 'idle'
     this.connected = false
-    this.currentIndex = -1
+    // The run is over, so the viewer's progress goes back to zero — for a stop the user
+    // asked for exactly as much as for a queue that played out (see `resetViewerTimeline`).
+    this.resetViewerTimeline()
     this.encoderIndex = -1
     this.encoderItemDuration = 0
-    this.positionSec = 0
-    this.startPositionSec = 0
-    this.completedSec = 0
-    this.itemDuration = 0
     this.startedAt = null
     // The figures this session produced die with it, so a status line read after the
     // stop shows the idle state rather than the last second of the run.
@@ -743,7 +774,12 @@ export class StreamEngine {
       // 1x and still holds a backlog. Closing the session here would cut the
       // viewer off mid-file and reset the RTMP timeline, so the run waits for the
       // backlog to air first.
-      if (this.playout && this.playout.isPusherRunning()) {
+      //
+      // `isSessionActive` rather than `isPusherRunning`: a queue short enough to be
+      // encoded inside the pusher's 600 ms head start has a session that has not opened
+      // yet, and treating that as "no session" ended the run before its first byte was
+      // published (measured: a single 15 s clip was encoded in 0.33 s and never aired).
+      if (this.playout && this.playout.isSessionActive()) {
         const waitingForSec = this.playout.getNextOffset()
         const published = this.playout.getPublishedSec()
         if (published < waitingForSec - DRAIN_TOLERANCE_SEC) {
@@ -808,8 +844,16 @@ export class StreamEngine {
     }
     this.state = 'idle'
     this.connected = false
-    this.positionSec = 0
-    this.currentIndex = -1
+    /*
+     * A queue that played out ends the same way a stopped one does as far as the
+     * progress bar is concerned: back to zero. Leaving the finished total behind is what
+     * made a subsequent clear + add show the previous batch's progress on a session that
+     * had not started (see `resetViewerTimeline`); the per-entry statuses, which are the
+     * record of what aired, are untouched and stay `done`.
+     */
+    this.resetViewerTimeline()
+    this.encoderIndex = -1
+    this.encoderItemDuration = 0
     this.startedAt = null
     // Same reason as in `stop()`: the run is over, so nothing about it may stay on the
     // status line — including the link verdict, which would otherwise keep the colour
@@ -931,7 +975,9 @@ export class StreamEngine {
 
     this.logStreamChoice(item, media, built, positionSec, reason)
 
-    if (built.videoStreamIndex < 0) {
+    // Only when the stream really is audio only: a command that generated a black
+    // stand-in picture for a file with no video track *is* pushing video.
+    if (built.videoStreamIndex < 0 && !built.blackVideo) {
       this.log('warn', mainT('main.engine.noVideoSelected'))
     }
     for (const w of built.warnings) this.log('warn', w)
@@ -1041,9 +1087,11 @@ export class StreamEngine {
     const ffmpeg = this.deps.getFfmpegPath()
 
     let args: string[]
+    let inputs: string[] = []
     try {
       const built = buildEncoderArgs({ ffmpegPath: ffmpeg, media, item, settings, startPositionSec: positionSec, language: this.deps.getLanguage() })
       args = built.args
+      inputs = built.inputs
       this.lastWarnings = built.warnings
       this.logStreamChoice(item, media, built, positionSec, reason)
       for (const w of built.warnings) this.log('warn', w)
@@ -1106,7 +1154,7 @@ export class StreamEngine {
      * that backlog cannot be skipped over: the session is ended and reopened at the
      * requested file, and the buffer is discarded with it.
      */
-    const restartSession = this.playout.isPusherRunning() && (reason === 'skip' || reason === 'jump')
+    const restartSession = this.playout.isSessionActive() && (reason === 'skip' || reason === 'jump')
     const tsOffset = restartSession
       ? positionSec > 0.05
         ? PASS_START_MARGIN_SEC
@@ -1133,7 +1181,7 @@ export class StreamEngine {
     // while it is still being built is already reported as watching it.
     if (this.airedPasses.at(-1)?.tsOffset !== tsOffset) this.airedPasses.push({ ...this.encoderPass })
 
-    const pass = { input: item.path, args, startPositionSec: positionSec, tsOffset, expectedSec }
+    const pass = { input: item.path, inputs, args, startPositionSec: positionSec, tsOffset, expectedSec }
     if (restartSession) {
       /*
        * The session is being replaced, so nothing the playout reports until it is
@@ -1163,7 +1211,10 @@ export class StreamEngine {
         this.deferredEncoderExit = null
         this.handleEncoderExit(deferred.index, deferred.code, deferred.materialSec)
       }
-    } else if (this.playout.isPusherRunning()) {
+    } else if (this.playout.isSessionActive()) {
+      // The session exists — including while its publisher is still inside the head
+      // start. Starting a second one there would leave two publishers on the key, so a
+      // pass that arrives in that window replaces the encoder instead.
       this.playout.restartEncoder(pass)
     } else {
       await this.playout.start(pass)
@@ -1430,6 +1481,9 @@ export class StreamEngine {
       return
     }
     this.state = 'error'
+    // The run is over, however badly: the progress bar must not keep the position the
+    // dead session happened to reach (see `resetViewerTimeline`).
+    this.resetViewerTimeline()
     this.emitStatus()
     this.log('error', mainT('main.engine.publisherLost', { code: code ?? mainT('main.engine.unknown') }))
   }
@@ -1619,6 +1673,9 @@ export class StreamEngine {
       this.log('error', mainT('main.engine.crashNoRetry', { detail }))
       this.setItemStatus(index, 'error', mainT('main.engine.crashDetail', { detail }))
       this.state = 'error'
+      // Terminal: nothing will advance the queue, so the progress bar goes back to zero
+      // like any other end of session (see `resetViewerTimeline`).
+      this.resetViewerTimeline()
       this.emitStatus()
       return
     }

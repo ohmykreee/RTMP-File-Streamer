@@ -123,6 +123,14 @@ export interface PlayoutCallbacks {
 export interface EncoderPass {
   /** Absolute path of the source file to encode. */
   input: string
+  /**
+   * Extra inputs (generated silence / black frames) for tracks the file lacks.
+   *
+   * Complete argument groups, appended after the source input so the file stays input 0
+   * — the pass's `-map` arguments are written against that numbering. Empty for a file
+   * that carries both tracks.
+   */
+  inputs?: string[]
   /** Extra input/output arguments (filters, mapping, encoder options). */
   args: string[]
   /** Where to start inside the source, in seconds. */
@@ -284,6 +292,17 @@ export class Playout {
   private readonly dir: string
 
   private pusher: ChildProcess | null = null
+  /**
+   * True from the moment a pass is handed over until its publisher exists.
+   *
+   * Only ever true inside {@link start}'s head start. It exists so the engine can tell
+   * "there is no publish session" apart from "the publish session has not opened yet":
+   * the encoder runs flat out, so a queue short enough to be encoded inside those 600 ms
+   * would otherwise look like a queue with nothing left to air (measured with one 15 s
+   * clip: encoded in 0.33 s, the run ended, and the publisher never started — nothing
+   * was published at all).
+   */
+  private pusherPending = false
   private encoder: ChildProcess | null = null
   private seq = 0
   /** Timeline value the next encoder pass must start at. */
@@ -391,6 +410,9 @@ export class Playout {
     if (this.isPusherRunning()) return
     this.pusher = null
     this.stopping = false
+    // A session is being opened: from here until the publisher exists, "no pusher yet"
+    // must not read as "the session is over" (see `pusherPending`).
+    this.pusherPending = true
     // The encoder goes first. Its output is read and queued as it comes (bounded by
     // the lead limit, which is enforced while the publisher is still starting), so the
     // publisher finds material already waiting the moment it exists.
@@ -483,6 +505,8 @@ export class Playout {
   private async stopPusher(forced = false): Promise<void> {
     const pusher = this.pusher
     this.pusher = null
+    // Whatever the head start was waiting for, there is no session after this.
+    this.pusherPending = false
     if (!pusher || pusher.exitCode !== null) return
     const wasStopping = this.stopping
     this.suppressPusherExit = true
@@ -577,6 +601,16 @@ export class Playout {
     return this.pusher !== null && this.pusher.exitCode === null
   }
 
+  /**
+   * Whether a publish session exists: the publisher is up, or its head start is running.
+   *
+   * This — not {@link isPusherRunning} — is what "there is still something to air"
+   * means to the engine (see `pusherPending`).
+   */
+  isSessionActive(): boolean {
+    return this.pusherPending || this.isPusherRunning()
+  }
+
   /* ------------------------------------------------------------ *
    * Timeline accounting
    * ------------------------------------------------------------ */
@@ -647,6 +681,8 @@ export class Playout {
       stdio: ['pipe', 'pipe', 'pipe', 'pipe']
     })
     this.pusher = child
+    // The session exists now: `isPusherRunning()` answers from here on.
+    this.pusherPending = false
     this.pusherProgressBuf = ''
     this.callbacks.log('info', this.t('main.engine.publisherStarted', { pid: child.pid ?? '?' }))
     // Hand over whatever the encoder produced during the head start. Nothing else will:
@@ -1099,6 +1135,10 @@ export class Playout {
       '+genpts',
       '-i',
       pass.input,
+      // Generated stand-in tracks (silence for a file with no audio, black frames for
+      // one with no video) are inputs of their own, so they go here — after the file,
+      // which keeps its position as input 0 for every `-map` in `pass.args`.
+      ...(pass.inputs ?? []),
       // Stream selection belongs to `pass.args` (see `buildEncoderArgs`), which maps
       // the streams it actually found. Mapping here as well duplicated every stream
       // — the same frames encoded twice, into two stream sets — and `-map 0:a:0`

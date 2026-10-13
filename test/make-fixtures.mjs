@@ -5,6 +5,7 @@
  *   clip_c.mp4  12s 1280x720@30 blue with audio (available for manual tests)
  *   clip_d.mp4  45s  640x360@60 — long enough that the buffered playout cannot
  *              finish it before a UI jump arrives (see engine-run.cjs)
+ *   clip_e.mp4  12s audio only (mono) — no video stream, for the stand-in picture
  *   clip_emb.mkv  clip_a.mp4 with clip_a.srt muxed INTO the container, so the
  *              burn-in checks cover an internal (`0:v 1:a 2:s`) track as well as a
  *              sidecar — the two need different addressing
@@ -124,4 +125,34 @@ if (!fs.existsSync(embOut)) {
     'clip_emb.mkv (clip_a.mp4 with the sidecar muxed in as stream #2)'
   )
 }
+/*
+ * clip_e.mp4 has NO video stream at all. It is the fixture for the stand-in picture:
+ * an audio-only file (or one whose only "video" is cover art) still has to publish a
+ * video track, so the command generates black frames for it. Deliberately mono, a
+ * channel layout no other fixture has, so a downmix that should not happen shows up.
+ */
+const audioOnly = path.join(here, 'clip_e.mp4')
+if (!fs.existsSync(audioOnly)) {
+  run(
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=990:sample_rate=44100:duration=12',
+      '-ac',
+      '1',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '96k',
+      audioOnly
+    ],
+    'clip_e.mp4 (12s audio only — no video stream)'
+  )
+}
+
 console.log('fixtures ready')

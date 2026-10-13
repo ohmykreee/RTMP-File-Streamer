@@ -34,7 +34,7 @@ function step(label, script, args = []) {
 }
 
 /** The clips every downstream suite streams from. */
-const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_d.mp4', 'clip_a.srt', 'clip_emb.mkv']
+const FIXTURES = ['clip_a.mp4', 'clip_b.mp4', 'clip_c.mp4', 'clip_d.mp4', 'clip_e.mp4', 'clip_a.srt', 'clip_emb.mkv']
 
 const missing = FIXTURES.filter((f) => !fs.existsSync(path.join(here, f)))
 if (missing.length > 0) {
