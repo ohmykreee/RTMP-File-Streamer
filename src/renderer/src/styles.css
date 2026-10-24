@@ -1097,6 +1097,14 @@ input[type='number'] {
     font-size: 12px;
   }
 
+  /* The result's warning notes share the result's text size instead of the
+     global 11px `.small` utility; the smaller run looked like a different kind
+     of message rather than a footnote of the same result. */
+  .test-result .hint {
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
   .command-preview pre,
   .test-result pre {
     margin: 6px 0 0;

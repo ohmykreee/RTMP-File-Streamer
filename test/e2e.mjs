@@ -25,7 +25,7 @@ const electron = path.join(root, 'node_modules', 'electron', 'dist', process.pla
 
 /** name -> { script, how, budget, env } ; `how: 'electron-app'` boots the real app. */
 const SUITES = {
-  ui: { script: 'ui-e2e.mjs', how: 'node', budget: 420_000, what: 'UI: queue, start/pause/skip, log panel, ingest' },
+  ui: { script: 'ui-e2e.mjs', how: 'node', budget: 420_000, what: 'UI: queue, start/stop/skip, log panel, ingest' },
   features: { script: 'features-e2e.mjs', how: 'node', budget: 600_000, what: 'burn-in, hardware encoder, seek, multi-file queue' },
   presets: { script: 'preset-e2e.mjs', how: 'node', budget: 420_000, what: 'presets, RTMP tab + obs-websocket controls, resolution/bitrate widgets' },
   layout: { script: 'layout-e2e.mjs', how: 'node', budget: 300_000, what: 'player bar geometry across tabs' },
@@ -65,7 +65,7 @@ const suites = requested.length > 0 ? requested : ORDER
 
 /* The end-to-end suites need the built app and the engine test bundle. */
 if (!fs.existsSync(path.join(root, 'out', 'main', 'index.js'))) {
-  console.error('Build output missing. Run `pnpm build` first (or use `pnpm test`, which builds).')
+  console.error('Build output missing. Run `pnpm build` first (or `pnpm test:ci`, which builds before the e2e run).')
   process.exit(1)
 }
 if (suites.includes('engine') && !fs.existsSync(path.join(root, 'out', 'main', 'test-entry.cjs'))) {

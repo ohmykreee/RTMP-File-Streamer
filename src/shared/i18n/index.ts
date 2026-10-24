@@ -11,10 +11,8 @@ export {
   LANGUAGE_BADGE,
   FALLBACK_LANGUAGE,
   isLanguage,
-  isTraditionalChinese,
   detectLanguage,
   resolveLanguage,
-  mergeCatalog,
   interpolate,
   createT,
   assertCatalogsComplete

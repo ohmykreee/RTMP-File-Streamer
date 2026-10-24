@@ -18,6 +18,7 @@ import type {
   VideoSettings
 } from '@shared/types'
 import { LOG_HISTORY_LIMIT } from '@shared/defaults'
+import { translatorFor } from '@shared/i18n'
 
 export interface StreamerState {
   ready: boolean
@@ -48,7 +49,6 @@ const EMPTY_STATUS: EngineStatus = {
   order: [],
   itemStatus: {},
   itemError: {},
-  commandLine: '',
   reconnectCount: 0,
   connected: false,
   startedAt: null,
@@ -78,6 +78,9 @@ export function useStreamer() {
    * that never restarts.
    */
   const logKey = useRef(0)
+  /** Latest settings, for callbacks that must not capture a stale language. */
+  const settingsRef = useRef<AppSettings | null>(null)
+  settingsRef.current = settings
 
   /** Stamps renderer-unique keys and trims the history to the shared limit. */
   const appendLogs = useCallback((entries: LogEntry[]): void => {
@@ -101,7 +104,10 @@ export function useStreamer() {
 
   const requireBridge = useCallback((): Window['streamer'] => {
     const api = bridge()
-    if (!api) throw new Error('预加载脚本未加载，无法与主进程通信。请重新构建应用（pnpm build）。')
+    if (!api) {
+      const language = settingsRef.current?.language ?? 'en'
+      throw new Error(translatorFor(language)('app.bridgeMissing'))
+    }
     return api
   }, [bridge])
 
@@ -117,6 +123,11 @@ export function useStreamer() {
         const caps = await api.getCapabilities(force)
         setCapabilities(caps)
         return caps
+      } catch (err) {
+        // A refresh triggered by a language switch must not become an unhandled
+        // rejection; keep the previous table and report it through the log channel.
+        console.error('[capabilities]', err)
+        return null
       } finally {
         setCapsLoading(false)
       }
@@ -134,33 +145,30 @@ export function useStreamer() {
       return
     }
 
-    void (async () => {
-      const [infoRes, settingsRes, playlistRes, statusRes, logsRes] = await Promise.all([
-        api.getAppInfo(),
-        api.getSettings(),
-        api.getPlaylist(),
-        api.getStatus(),
-        api.getLogs()
-      ])
-      if (!alive) return
-      setInfo(infoRes)
-      setSettings(settingsRes)
-      setPlaylist(playlistRes)
-      setStatus(statusRes)
-      // The whole history the main process still holds, so the level filter and
-      // the 全部 view cover earlier pushes too, not just what arrived since this
-      // window opened.
-      appendLogs(logsRes.slice(-LOG_HISTORY_LIMIT))
-      setReady(true)
-      void refreshCapabilities(false)
-    })()
-
-    const offStatus = api.onStatus((s) => setStatus(s))
-    const offPlaylist = api.onPlaylist((items) => setPlaylist(items))
+    /*
+     * Subscribe before asking for the initial snapshots. A status/playlist event
+     * that arrives while the snapshot round-trip is in flight is newer than the
+     * snapshot, and applying the snapshot afterwards would overwrite it until the
+     * next engine report (~0.5 s of visibly stale UI). The flags make the snapshot
+     * fill only what no event has already delivered.
+     */
+    const seen = { status: false, playlist: false, settings: false, log: false }
+    const offStatus = api.onStatus((s) => {
+      seen.status = true
+      setStatus(s)
+    })
+    const offPlaylist = api.onPlaylist((items) => {
+      seen.playlist = true
+      setPlaylist(items)
+    })
     // The obs-websocket endpoint can rewrite the stream address outside the UI,
     // so the renderer re-reads the settings whenever the main process says so.
-    const offSettings = api.onSettings((s) => setSettings(s))
+    const offSettings = api.onSettings((s) => {
+      seen.settings = true
+      setSettings(s)
+    })
     const offLog = api.onLog((entry) => {
+      seen.log = true
       logBuf.current.push(entry)
       if (logBuf.current.length > 60) {
         const batch = logBuf.current
@@ -175,6 +183,28 @@ export function useStreamer() {
         appendLogs(batch)
       }
     }, 250)
+
+    void (async () => {
+      const [infoRes, settingsRes, playlistRes, statusRes, logsRes] = await Promise.all([
+        api.getAppInfo(),
+        api.getSettings(),
+        api.getPlaylist(),
+        api.getStatus(),
+        api.getLogs()
+      ])
+      if (!alive) return
+      setInfo(infoRes)
+      if (!seen.settings) setSettings(settingsRes)
+      if (!seen.playlist) setPlaylist(playlistRes)
+      if (!seen.status) setStatus(statusRes)
+      // The whole history the main process still holds, so the level filter and
+      // the 全部 view cover earlier pushes too, not just what arrived since this
+      // window opened. If a live entry arrived first, appending the snapshot
+      // afterwards would duplicate it.
+      if (!seen.log) appendLogs(logsRes.slice(-LOG_HISTORY_LIMIT))
+      setReady(true)
+      void refreshCapabilities(false)
+    })()
 
     return () => {
       alive = false
@@ -200,12 +230,16 @@ export function useStreamer() {
   const patchSession = useCallback(
     async <K extends keyof SessionSettings>(key: K, patch: Partial<SessionSettings[K]>) => {
       const api = requireBridge()
-      const current = await ensureSettings()
-      const nextSession: SessionSettings = { ...current.session, [key]: { ...current.session[key], ...patch } }
-      const next = await api.saveSettings({ session: nextSession })
+      /*
+       * Send only the section that changed. The main process merges it into the
+       * current settings, so two edits that overlap (two fields blurred in quick
+       * succession) cannot overwrite each other with a stale full-session copy.
+       */
+      const payload = { session: { [key]: patch } } as unknown as Partial<AppSettings>
+      const next = await api.saveSettings(payload)
       setSettings(next)
     },
-    [ensureSettings, requireBridge]
+    [requireBridge]
   )
 
   const updateVideo = useCallback((patch: Partial<VideoSettings>) => patchSession('video', patch), [patchSession])
@@ -235,9 +269,12 @@ export function useStreamer() {
     async (language: Language) => {
       const next = await requireBridge().setLanguage(language)
       setSettings(next)
+      // Encoder labels and capability warnings are produced by the main process
+      // in the old language; re-read them now rather than after a restart.
+      void refreshCapabilities(false)
       return next
     },
-    [requireBridge]
+    [refreshCapabilities, requireBridge]
   )
 
   const chooseFfmpeg = useCallback(async () => {
@@ -285,12 +322,20 @@ export function useStreamer() {
 
   /* ---------------- playlist actions ---------------- */
 
+  const busyDepth = useRef(0)
   const withBusy = useCallback(async <T,>(fn: () => Promise<T>): Promise<T | undefined> => {
+    busyDepth.current += 1
     setBusy(true)
     try {
       return await fn()
     } finally {
-      setBusy(false)
+      // Counter, not a boolean: a nested call finishing first used to clear the
+      // busy state while the outer operation was still running.
+      busyDepth.current -= 1
+      if (busyDepth.current <= 0) {
+        busyDepth.current = 0
+        setBusy(false)
+      }
     }
   }, [])
 
@@ -338,10 +383,12 @@ export function useStreamer() {
   const skipNext = useCallback(() => requireBridge().skipNext(), [requireBridge])
   const previewCommand = useCallback(() => requireBridge().previewCommand(), [requireBridge])
   const testRtmp = useCallback(
-    (url: string, key: string): Promise<RtmpTestResult> =>
+    (url: string, key: string, sessionOverride?: SessionSettings): Promise<RtmpTestResult> =>
       // The session travels with the request: the test must push what is on screen,
-      // not a copy of it read back from disk.
-      requireBridge().testRtmp({ url, streamKey: key, timeoutSec: 25, session: settings?.session }),
+      // not a copy of it read back from disk. A caller that has just committed a
+      // draft address passes the resulting session explicitly, because this hook's
+      // `settings` will not have re-rendered yet.
+      requireBridge().testRtmp({ url, streamKey: key, timeoutSec: 25, session: sessionOverride ?? settings?.session }),
     [requireBridge, settings]
   )
   /**
@@ -383,9 +430,14 @@ export function useStreamer() {
   const loadPresets = useCallback(async (): Promise<PresetsPayload | null> => {
     const api = bridge()
     if (!api) return null
-    const payload = await api.getPresets()
-    setPresets(payload)
-    return payload
+    try {
+      const payload = await api.getPresets()
+      setPresets(payload)
+      return payload
+    } catch (err) {
+      console.error('[presets]', err)
+      return null
+    }
   }, [bridge])
 
   useEffect(() => {
@@ -395,12 +447,22 @@ export function useStreamer() {
   const applyPreset = useCallback(
     async (preset: Preset) => {
       const api = requireBridge()
-      // A preset replaces every tab's settings at once, so the whole session
-      // object is written rather than a per-section patch.
-      const next = await api.saveSettings({ session: preset.settings })
-      setSettings(next)
+      // A user preset is a complete snapshot, including where it streams to. An
+      // INTERNAL preset is a starting point for encoder settings, so applying one
+      // must not replace the user's real address/key or disable obs-websocket —
+      // those blocks carry placeholder values in the built-in table.
+      if (preset.builtin) {
+        const current = await ensureSettings()
+        const next = await api.saveSettings({
+          session: { ...preset.settings, output: current.session.output }
+        })
+        setSettings(next)
+      } else {
+        const next = await api.saveSettings({ session: preset.settings })
+        setSettings(next)
+      }
     },
-    [requireBridge]
+    [ensureSettings, requireBridge]
   )
 
   const savePreset = useCallback(
@@ -453,7 +515,6 @@ export function useStreamer() {
     playlist,
     status,
     logs,
-    setLogs,
     addVideoFiles,
     addPaths,
     attachSubtitle,
@@ -473,14 +534,12 @@ export function useStreamer() {
     getLogFileInfo,
     resolveDroppedPaths,
     presets,
-    loadPresets,
     applyPreset,
     savePreset,
     deletePreset,
     renamePreset,
     openDataDir,
     obsStatus,
-    refreshObsStatus,
     applyObsWebSocket
   }
 }

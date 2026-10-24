@@ -53,7 +53,7 @@ export default function LanguageSwitcher({ language, locked, onSelect }: Languag
             'text-muted-foreground transition-colors outline-none hover:bg-muted hover:text-foreground',
             'focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/40 disabled:pointer-events-none disabled:opacity-50'
           )}
-          title={locked ? t('app.langLocked') : t('app.languageSwitch', { name: LANGUAGE_NATIVE_NAME[language] })}
+          aria-label={locked ? t('app.langLocked') : t('app.languageSwitch', { name: LANGUAGE_NATIVE_NAME[language] })}
         >
           <Globe className="lang-globe size-3.5" aria-hidden />
           <span className="lang-badge">{LANGUAGE_BADGE[language]}</span>

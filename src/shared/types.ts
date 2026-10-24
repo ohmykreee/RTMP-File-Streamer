@@ -36,6 +36,8 @@ export interface MediaStreamInfo {
   height?: number
   fps?: number
   bitrate?: number
+  /** Per-stream duration when the container does not report a format duration. */
+  durationSec?: number
   sampleRate?: number
   channels?: number
   channelLayout?: string
@@ -524,8 +526,6 @@ export interface EngineStatus {
   order: string[]
   itemStatus: Record<string, PlaylistItemStatus>
   itemError: Record<string, string>
-  /** The exact ffmpeg argument vector of the running process. */
-  commandLine: string
   /** Total reconnect attempts since the session started. */
   reconnectCount: number
   connected: boolean

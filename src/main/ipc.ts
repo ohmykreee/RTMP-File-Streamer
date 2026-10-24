@@ -21,7 +21,7 @@ import type { Language, StreamProtocol } from '@shared/types'
 import {
   addressMatchesProtocol,
   buildPushTarget,
-  DEFAULT_STREAM_PROTOCOL,
+  detectStreamProtocol,
   PROTOCOL_SCHEMES
 } from '@shared/protocol'
 import { buildCommandLine, buildTestCommand } from '@main/ffmpeg/command'
@@ -30,6 +30,7 @@ import { embeddedSubtitleRefs } from '@main/ffmpeg/probe'
 import { probeCached } from '@main/store/playlist'
 import { deletePreset, getPresetLocation, listPresets, renamePreset, savePreset } from '@main/store/presets'
 import { getPersistedLogInfo } from '@main/store/logger'
+import { collectSecrets, maskTarget, redactText } from './log-redact'
 import { readBuildInfo } from './buildInfo'
 import { mainT } from './i18n'
 import { BUILTIN_PRESETS } from '@shared/defaults'
@@ -96,7 +97,8 @@ export function registerIpc(services: AppServices): void {
    */
   ipcMain.handle(IPC.setLanguage, (_e, language: Language): AppSettings => {
     const next = services.setLanguage(language)
-    win()?.webContents.send(IPC.evtSettings, next)
+    const window = win()
+    if (window && !window.isDestroyed()) window.webContents.send(IPC.evtSettings, next)
     return next
   })
 
@@ -180,8 +182,23 @@ export function registerIpc(services: AppServices): void {
 
   /* ---------------- playlist ---------------- */
 
+  /**
+   * The engine's bookkeeping is index-based, and the renderer freezes edits while
+   * a session runs. The IPC surface is reachable from devtools or a future caller,
+   * so the same rule is enforced here rather than relying on the UI.
+   */
+  const playlistMutationAllowed = (): boolean => {
+    const state = services.engineStatus().state
+    return state === 'idle' || state === 'error'
+  }
+
+  const ensurePlaylistMutable = (): void => {
+    if (!playlistMutationAllowed()) throw new Error(mainT('main.engine.playlistLocked'))
+  }
+
   ipcMain.handle(IPC.getPlaylist, (): PlaylistItem[] => services.getPlaylist())
   ipcMain.handle(IPC.addItems, (_e, paths: string[]): Promise<PlaylistItem[]> => {
+    ensurePlaylistMutable()
     const list = Array.isArray(paths) ? paths : []
     // Only video files belong in the playlist; a stray subtitle that slipped
     // into a drop would otherwise be probed as a "video" and fail to stream.
@@ -190,17 +207,26 @@ export function registerIpc(services: AppServices): void {
     if (skipped > 0) services.pushLog('info', mainT('main.engine.ignoredNonVideo', { n: skipped }))
     return services.addItems(videos)
   })
-  ipcMain.handle(IPC.attachSubtitle, (_e, itemId: string, filePath: string): Promise<PlaylistItem | null> =>
-    services.attachSubtitle(itemId, filePath)
-  )
-  ipcMain.handle(IPC.removeItem, (_e, itemId: string): void => services.removeItem(itemId))
-  ipcMain.handle(IPC.clearPlaylist, (): void => services.clearPlaylist())
-  ipcMain.handle(IPC.reorderPlaylist, (_e, orderedIds: string[]): void =>
+  ipcMain.handle(IPC.attachSubtitle, (_e, itemId: string, filePath: string): Promise<PlaylistItem | null> => {
+    ensurePlaylistMutable()
+    return services.attachSubtitle(itemId, filePath)
+  })
+  ipcMain.handle(IPC.removeItem, (_e, itemId: string): void => {
+    ensurePlaylistMutable()
+    services.removeItem(itemId)
+  })
+  ipcMain.handle(IPC.clearPlaylist, (): void => {
+    ensurePlaylistMutable()
+    services.clearPlaylist()
+  })
+  ipcMain.handle(IPC.reorderPlaylist, (_e, orderedIds: string[]): void => {
+    ensurePlaylistMutable()
     services.reorder(Array.isArray(orderedIds) ? orderedIds : [])
-  )
-  ipcMain.handle(IPC.updateItem, (_e, itemId: string, patch: Partial<PlaylistItem>): PlaylistItem | null =>
-    services.updateItem(itemId, patch ?? {})
-  )
+  })
+  ipcMain.handle(IPC.updateItem, (_e, itemId: string, patch: Partial<PlaylistItem>): PlaylistItem | null => {
+    ensurePlaylistMutable()
+    return services.updateItem(itemId, patch ?? {})
+  })
 
   /* ---------------- engine ---------------- */
 
@@ -286,21 +312,30 @@ export function registerIpc(services: AppServices): void {
     const key = String(req?.streamKey ?? '').trim()
     // Test the session the caller sent (the settings on screen); fall back to the
     // persisted ones so a caller that predates the field still gets a test.
-    const session = req?.session ?? settings.session
+    const requested = req?.session ?? settings.session
     // The protocol decides the address scheme the test accepts and how the key
-    // travels (see `protocol.ts`).
-    const protocol: StreamProtocol = session.output.protocol ?? DEFAULT_STREAM_PROTOCOL
+    // travels (see `protocol.ts`). Fall back to the address when the caller did
+    // not send one: testing an `srt://` target with `-f flv` fails for a reason
+    // the user cannot see.
+    const protocol: StreamProtocol = requested.output.protocol ?? detectStreamProtocol(url)
+    const session: SessionSettings =
+      protocol === requested.output.protocol
+        ? requested
+        : { ...requested, output: { ...requested.output, protocol } }
     if (!addressMatchesProtocol(url, protocol)) {
       return { ok: false, message: mainT('main.dialog.badUrlProtocol', { schemes: PROTOCOL_SCHEMES[protocol] }), detail: '', elapsedMs: 0 }
     }
     // The stream key is optional: some servers take the whole path in the address.
     const target = buildPushTarget(url, key, protocol)
+    // Redact against the values THIS test used, not only the persisted session:
+    // a caller may pass an address/key that has not been saved yet.
+    const secrets = collectSecrets({ ...session.output, server: url, streamKey: key })
     // The summary and notes are shown in the UI, so the test is built in the
     // language the interface is running in.
     const test = buildTestCommand(session, url, key, settings.language)
     const args = test.args
     const timeoutMs = Math.max(5, Math.min(60, Number(req?.timeoutSec) || 20)) * 1000
-    services.pushLog('debug', mainT('main.dialog.testTarget', { target }))
+    services.pushLog('debug', mainT('main.dialog.testTarget', { target: maskTarget(target) }))
     // The summary is what makes "the test used different settings than the stream"
     // a visible fact instead of something the user has to infer from ffmpeg output.
     services.pushLog('debug', mainT('main.dialog.testParams', { params: test.summary.join(' · ') }))
@@ -326,11 +361,14 @@ export function registerIpc(services: AppServices): void {
 
     const elapsedMs = Date.now() - started
     const combined = `${timeoutResult.stderr}\n${timeoutResult.stdout}`
-    const detail = combined
-      .split(/\r?\n/)
-      .filter((l) => l.trim())
-      .slice(-30)
-      .join('\n')
+    const detail = redactText(
+      combined
+        .split(/\r?\n/)
+        .filter((l) => l.trim())
+        .slice(-30)
+        .join('\n'),
+      secrets
+    )
     const timedOut = timeoutResult.code === -2 || timeoutResult.code === -3
     const failedPattern =
       /Connection refused|Server error|Unauthorized|Cannot open connection|Unknown error|Connection reset|timed out|No route to host|Name or service not known|Immediate exit requested/i
@@ -338,7 +376,7 @@ export function registerIpc(services: AppServices): void {
 
     let message: string
     if (ok) {
-      message = mainT('main.dialog.testOk', { target, sec: (elapsedMs / 1000).toFixed(1) })
+      message = mainT('main.dialog.testOk', { target: maskTarget(target), sec: (elapsedMs / 1000).toFixed(1) })
     } else if (timeoutResult.code === -3) {
       message = mainT('main.dialog.testStuck')
     } else if (timedOut) {

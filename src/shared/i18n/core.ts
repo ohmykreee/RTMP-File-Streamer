@@ -54,17 +54,6 @@ function isChineseTag(tag: string): boolean {
 }
 
 /**
- * True for Traditional Chinese, as opposed to Simplified.
- *
- * Region and script subtags both count: `zh-TW`, `zh-HK`, `zh-MO` and `zh-Hant`
- * are Traditional, while `zh-CN`, `zh-SG`, `zh-Hans` and a bare `zh` are
- * Simplified.
- */
-export function isTraditionalChinese(tag: string): boolean {
-  return /hant/i.test(tag) || /^zh[-_](?:tw|hk|mo)(?:[-_]|$)/i.test(tag)
-}
-
-/**
  * Picks the UI language for a system locale tag.
  *
  * The rules, in order:
@@ -109,18 +98,8 @@ export type Catalog<Key extends string = string> = Record<Key, string>
 export type Translate<Key extends string = string> = (key: Key, params?: MessageParams) => string
 
 /**
- * Copy of `base` with one language's overrides applied.
- *
- * Used to assemble the run-time table: the reference language supplies every key,
- * so a key missing from a translation renders as the reference text instead of
- * being visible as a raw key. `assertCatalogsComplete` is what keeps that safety
- * net from quietly becoming the normal case.
+ * Fills `{name}` holes. Unknown placeholders are left untouched for diagnosis.
  */
-export function mergeCatalog<Key extends string>(base: Catalog<Key>, overrides: Partial<Catalog<Key>>): Catalog<Key> {
-  return { ...base, ...overrides }
-}
-
-/** Fills `{name}` holes. Unknown placeholders are left untouched for diagnosis. */
 export function interpolate(template: string, params?: MessageParams): string {
   if (!params) return template
   return template.replace(/\{(\w+)\}/g, (whole, name: string) => {

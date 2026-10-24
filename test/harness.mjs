@@ -167,17 +167,28 @@ async function makeItem(filePath, mode = 'burn') {
 }
 
 console.log('\n=== 1. i18n message tables ===')
-const { EN, TRANSLATIONS, assertCatalogsComplete, detectLanguage, resolveLanguage, LANGUAGES } = await import(
+const { EN, ZH, JA, TRANSLATIONS, assertCatalogsComplete, detectLanguage, resolveLanguage, LANGUAGES } = await import(
   pathToFileURL(path.join(here, 'i18n.bundle.mjs')).href
 )
 {
   // Every language must define exactly the reference key set. A missing entry is
   // otherwise invisible: the UI quietly renders that one string in English.
-  const problems = assertCatalogsComplete(EN, { zh: TRANSLATIONS.zh, ja: TRANSLATIONS.ja })
+  // Assert the RAW tables, not TRANSLATIONS — those are pre-filled with the
+  // reference and make a missing key impossible to detect.
+  const problems = assertCatalogsComplete(EN, { zh: ZH, ja: JA })
   record(
     'message tables define the same key set in every language',
     problems.length === 0,
     problems.slice(0, 5).join(' | ') || `${Object.keys(EN).length} keys x ${LANGUAGES.length} languages`
+  )
+
+  // Negative control: the same check must notice a key that is actually absent.
+  const missing = { ...ZH }
+  delete missing['app.title']
+  record(
+    'the key-set check reports a missing translation',
+    assertCatalogsComplete(EN, { zh: missing, ja: JA }).some((p) => p.includes('app.title')),
+    'deleted app.title from a copy'
   )
 
   // No empty translation, and no {placeholder} that only some languages carry — a
@@ -251,6 +262,38 @@ const { EN, TRANSLATIONS, assertCatalogsComplete, detectLanguage, resolveLanguag
     'the command builder writes its summary in the requested language',
     zhSummary !== enSummary && zhSummary !== '' && enSummary !== '',
     `${zhSummary.slice(0, 44)} || ${enSummary.slice(0, 44)}`
+  )
+}
+
+console.log('\n=== 1b. credential redaction ===')
+{
+  const { maskTarget, redactText, collectSecrets } = await import(
+    pathToFileURL(bundle('src/main/log-redact.ts', path.join(here, 'log-redact.bundle.mjs'))).href
+  )
+  record(
+    'credential-bearing query parameters are masked with the path key',
+    maskTarget('rtmp://relay.example:1935/live/vrochat?user=kyree&pass=secret') ===
+      'rtmp://relay.example:1935/live/***?user=***&pass=***',
+    maskTarget('rtmp://relay.example:1935/live/vrochat?user=kyree&pass=secret')
+  )
+  record(
+    'SRT passphrase is masked without inventing a path segment',
+    maskTarget('srt://relay.example:9000?passphrase=secret123') === 'srt://relay.example:9000?passphrase=***',
+    maskTarget('srt://relay.example:9000?passphrase=secret123')
+  )
+  const secrets = collectSecrets({ server: 'rtmp://relay.example/live/', streamKey: 'streamkey', protocol: 'rtmp' })
+  const output = redactText(
+    "Output #0, flv, to 'rtmp://relay.example/live/streamkey?user=kyree&pass=secret': auth -authorization JWT.X.Y",
+    secrets
+  )
+  record(
+    'redaction removes the key, query credentials and authorization token',
+    !output.includes('streamkey') &&
+      !output.includes('kyree') &&
+      !output.includes('secret') &&
+      !output.includes('JWT.X.Y') &&
+      output.includes('***'),
+    output
   )
 }
 
@@ -446,8 +489,52 @@ const builtSeek = buildStreamCommand({
 })
 const ssIdx = builtSeek.args.indexOf('-ss')
 record('input seek applied before -i', ssIdx >= 0 && ssIdx < builtSeek.args.indexOf('-i'), `-ss ${builtSeek.args[ssIdx + 1]}`)
-record('itsoffset carries sync + subtitle delay', builtSeek.args.includes('-itsoffset') && builtSeek.args.includes('1'), builtSeek.args[builtSeek.args.indexOf('-itsoffset') + 1])
+const seekOffset = builtSeek.args[builtSeek.args.indexOf('-itsoffset') + 1]
+const seekVf = builtSeek.args[builtSeek.args.indexOf('-vf') + 1] ?? ''
+record(
+  'A/V delay shifts the source input, subtitle delay compensates inside the filter chain',
+  seekOffset === '0.5' && seekVf.includes('setpts=PTS-1/TB') && seekVf.includes('setpts=PTS+1/TB') && seekVf.includes('subtitles='),
+  `-itsoffset ${seekOffset}; ${seekVf.split(',').slice(0, 3).join(',')}`
+)
 record('remaining duration reported', builtSeek.remainingDurationSec > 14 && builtSeek.remainingDurationSec < 15.1, `${builtSeek.remainingDurationSec}s`)
+
+// 2b2. libx265 must not receive the H.264 profile name or x264's private options.
+const builtHevc = buildStreamCommand({
+  ffmpegPath: FFMPEG,
+  media: infoB,
+  item: { ...itemB, mode: 'off' },
+  settings: {
+    ...baseSession,
+    video: {
+      ...baseSession.video,
+      codec: 'hevc',
+      encoder: 'x265',
+      profile: 'high',
+      preset: 'p4',
+      bitrateKbps: 1200,
+      maxBitrateKbps: 1200,
+      bufferSizeKbps: 2400
+    }
+  },
+  startPositionSec: 0,
+  outputOverride: path.join(here, 'out_hevc.mp4')
+})
+record(
+  'H.264 profile high is normalised to an HEVC profile for libx265',
+  builtHevc.args[builtHevc.args.indexOf('-profile:v') + 1] === 'main',
+  builtHevc.args[builtHevc.args.indexOf('-profile:v') + 1]
+)
+const x265Params = builtHevc.args[builtHevc.args.indexOf('-x265-params') + 1] ?? ''
+record(
+  'libx265 receives its own private options instead of -x264-params',
+  !builtHevc.args.includes('-x264-params') && x265Params.includes('bframes=') && x265Params.includes('keyint='),
+  x265Params
+)
+record(
+  'an NVENC preset is mapped to a legal libx265 preset',
+  builtHevc.args[builtHevc.args.indexOf('-preset') + 1] === 'faster',
+  builtHevc.args[builtHevc.args.indexOf('-preset') + 1]
+)
 
 // 2c. copy video, no burn
 const builtCopy = buildStreamCommand({
@@ -507,7 +594,8 @@ const {
 } = await import(pathToFileURL(path.join(here, 'protocol.bundle.mjs')).href)
 
 record('detection: rtmp/rtmps/srt/rtsp/whip schemes', detectStreamProtocol('rtmp://h/live') === 'rtmp' && detectStreamProtocol('rtmps://h/live') === 'rtmp' && detectStreamProtocol('srt://h:9000') === 'srt' && detectStreamProtocol('rtsp://h:554/a') === 'rtsp' && detectStreamProtocol('rtsps://h/a') === 'rtsp' && detectStreamProtocol('https://h/whip') === 'whip')
-record('detection: unknown or bare addresses fall back to rtmp', detectStreamProtocol('h/live') === 'rtmp' && detectStreamProtocol('') === 'rtmp' && detectStreamProtocol('webrtc://h/x') === 'whip', `${detectStreamProtocol('h/live')}`)
+record('detection: unknown or bare addresses fall back to rtmp', detectStreamProtocol('h/live') === 'rtmp' && detectStreamProtocol('') === 'rtmp' && detectStreamProtocol('webrtc://h/x') === 'rtmp', `${detectStreamProtocol('h/live')}`)
+record('webrtc:// is not accepted as a WHIP target', !addressMatchesProtocol('webrtc://h/x', 'whip') && addressMatchesProtocol('https://h/whip', 'whip'))
 record('srt key rides as a passphrase query parameter', buildPushTarget('srt://h:9000', 'secret123', 'srt') === 'srt://h:9000?passphrase=secret123', buildPushTarget('srt://h:9000', 'secret123', 'srt'))
 record('srt passphrase joins with & when the address already has a query', buildPushTarget('srt://h:9000?mode=caller', 'secret123', 'srt') === 'srt://h:9000?mode=caller&passphrase=secret123')
 record('srt passphrase is percent-encoded and never duplicated', buildPushTarget('srt://h:9000', 'a&b=c', 'srt') === 'srt://h:9000?passphrase=a%26b%3Dc' && buildPushTarget('srt://h:9000?passphrase=x', 'y', 'srt') === 'srt://h:9000?passphrase=x')
@@ -1313,8 +1401,8 @@ console.log('\n=== 10. encoder buffer is enforced ===')
   // The playout writes its log lines through the message table, which it is handed
   // rather than importing (see `PlayoutCallbacks.t`); the hold line is read below.
   const zhText = (key) => TRANSLATIONS.zh[key] ?? key
-  /** The hold acts on `-progress` reports (~0.5 s apart), so one interval of material overshoots. */
-  const LEAD_SLACK_SEC = 4
+  /** The hold acts on `-progress` reports (~0.5 s apart); a loaded machine measured up to ~4.2 s of overshoot. */
+  const LEAD_SLACK_SEC = 5
   const WINDOW_SEC = 8
 
   /** Runs one encoder pass through the real playout and reports what the buffer did. */
@@ -1562,10 +1650,10 @@ console.log('\n=== 11. stand-in tracks for files that carry only one stream ==='
     const inputPaths = withSubs.args.reduce((acc, a, i) => (withSubs.args[i - 1] === '-i' ? [...acc, a] : acc), [])
     const vf = withSubs.args[withSubs.args.indexOf('-vf') + 1] ?? ''
     record(
-      'a sidecar input does not shift the generated track onto the wrong input number',
-      inputPaths.length === 3 &&
-        inputPaths[1].endsWith('clip_a.srt') &&
-        withSubs.args.some((a, i) => a === '-map' && withSubs.args[i + 1] === '2:v:0') &&
+      'a burned sidecar is read by libass, not added as an input that shifts the generated track',
+      inputPaths.length === 2 &&
+        !inputPaths.some((p) => p.endsWith('.srt')) &&
+        withSubs.args.some((a, i) => a === '-map' && withSubs.args[i + 1] === '1:v:0') &&
         vf.includes('subtitles='),
       `inputs=${JSON.stringify(inputPaths.map((p) => path.basename(p)))}, vf=${vf.slice(0, 120)}`
     )

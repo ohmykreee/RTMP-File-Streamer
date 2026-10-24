@@ -6,11 +6,7 @@ import { SUPPORTED_SUBTITLE_EXT } from '@shared/types'
 import type { Language } from '@shared/types'
 import { translatorFor } from '@shared/i18n'
 import { dataDir, ensureDir } from './paths'
-
-export interface PlaylistStore {
-  items: PlaylistItem[]
-  media: Map<string, MediaInfo>
-}
+import { reportStoreError } from './errors'
 
 let idSeq = 0
 function newId(): string {
@@ -26,6 +22,8 @@ interface CacheEntry {
   info: MediaInfo
 }
 const probeCache = new Map<string, CacheEntry>()
+/** Bound on the cache: a long library otherwise keeps every probe result forever. */
+const PROBE_CACHE_LIMIT = 64
 
 function fileKey(p: string): string {
   try {
@@ -45,7 +43,14 @@ export async function probeCached(ffprobePath: string, filePath: string, languag
   // survive in the playlist row until the file changed.
   if (hit && hit.key === key && hit.language === (language ?? DEFAULT_PROBE_LANGUAGE)) return hit.info
   const info = await probeMedia(ffprobePath, abs, language)
-  if (!info.probeError) probeCache.set(abs, { key, language: language ?? DEFAULT_PROBE_LANGUAGE, info })
+  if (!info.probeError) {
+    probeCache.set(abs, { key, language: language ?? DEFAULT_PROBE_LANGUAGE, info })
+    while (probeCache.size > PROBE_CACHE_LIMIT) {
+      const oldest = probeCache.keys().next().value
+      if (oldest === undefined) break
+      probeCache.delete(oldest)
+    }
+  }
   return info
 }
 
@@ -58,10 +63,6 @@ export function getCachedMedia(filePath: string): MediaInfo | undefined {
     return undefined
   }
   return hit.info
-}
-
-export function invalidateProbe(filePath: string): void {
-  probeCache.delete(path.resolve(filePath))
 }
 
 /**
@@ -213,13 +214,11 @@ export async function attachSubtitleFile(
   subPath: string,
   language?: Language
 ): Promise<SubtitleTrackRef | null> {
-  let size = 0
   try {
-    size = fs.statSync(subPath).size
+    if (!fs.statSync(subPath).isFile()) return null
   } catch {
     return null
   }
-  void size
   const existing = item.subtitleTracks.find((t) => t.source === 'external' && t.path && path.resolve(t.path) === path.resolve(subPath))
   if (existing) return existing
   const ref = await probeSubtitleFile(ffprobePath, subPath, language)
@@ -250,20 +249,83 @@ export function playlistFile(): string {
   return path.join(dataDir(), 'playlist.json')
 }
 
+const SUBTITLE_MODES: SubtitleMode[] = ['off', 'burn', 'copy']
+
+function finiteNumber(value: unknown, fallback = 0): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+/** One stored row, validated into a `PlaylistItem`; anything unusable is dropped. */
+function normaliseStoredItem(raw: unknown): PlaylistItem | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as Partial<PlaylistItem> & Record<string, unknown>
+  if (typeof r.path !== 'string' || !r.path.trim()) return null
+  const filePath = r.path
+  const tracks: SubtitleTrackRef[] = []
+  for (const t of Array.isArray(r.subtitleTracks) ? r.subtitleTracks : []) {
+    if (!t || typeof t !== 'object') continue
+    if (t.source !== 'embedded' && t.source !== 'external') continue
+    if (typeof t.id !== 'string' || !t.id) continue
+    if (t.source === 'external') {
+      // A sidecar that no longer exists must not stay selectable: burning it
+      // aborts the whole pass when libass cannot open it.
+      if (typeof t.path !== 'string' || !fs.existsSync(t.path)) continue
+    } else if (typeof t.streamIndex !== 'number') {
+      continue
+    }
+    tracks.push({
+      id: t.id,
+      source: t.source,
+      ...(typeof t.path === 'string' ? { path: t.path } : {}),
+      ...(typeof t.streamIndex === 'number' ? { streamIndex: t.streamIndex } : {}),
+      codec: typeof t.codec === 'string' ? t.codec : 'unknown',
+      family: t.family === 'text' || t.family === 'bitmap' ? t.family : 'unknown',
+      ...(typeof t.language === 'string' ? { language: t.language } : {}),
+      ...(typeof t.title === 'string' ? { title: t.title } : {}),
+      ...(typeof t.isDefault === 'boolean' ? { isDefault: t.isDefault } : {}),
+      ...(typeof t.isForced === 'boolean' ? { isForced: t.isForced } : {})
+    })
+  }
+  const selected = typeof r.selectedSubtitleId === 'string' && tracks.some((t) => t.id === r.selectedSubtitleId)
+    ? r.selectedSubtitleId
+    : null
+  const mode = SUBTITLE_MODES.includes(r.mode as SubtitleMode) ? (r.mode as SubtitleMode) : 'off'
+  const exists = fs.existsSync(filePath)
+  return {
+    id: typeof r.id === 'string' && r.id ? r.id : newId(),
+    path: filePath,
+    name: typeof r.name === 'string' && r.name ? r.name : path.basename(filePath),
+    size: Math.max(0, finiteNumber(r.size)),
+    durationSec: Math.max(0, finiteNumber(r.durationSec)),
+    subtitleTracks: tracks,
+    selectedSubtitleId: selected,
+    mode: tracks.length > 0 ? mode : 'off',
+    syncOffsetSec: finiteNumber(r.syncOffsetSec),
+    subtitleDelaySec: finiteNumber(r.subtitleDelaySec),
+    // Nothing is "live" after a restart.
+    status: 'pending',
+    ...(exists ? {} : { broken: true })
+  }
+}
+
 export function loadPersistedPlaylist(): PlaylistItem[] {
   try {
     const raw = fs.readFileSync(playlistFile(), 'utf8')
-    const parsed = JSON.parse(raw) as { items?: PlaylistItem[] }
+    const parsed = JSON.parse(raw) as { items?: unknown[] }
     if (!Array.isArray(parsed.items)) return []
-    return parsed.items
-      .filter((i) => i && typeof i.path === 'string')
-      .map((i) => ({
-        ...i,
-        // Nothing is "live" after a restart.
-        status: 'pending' as const,
-        error: undefined
-      }))
-  } catch {
+    return parsed.items.map(normaliseStoredItem).filter((i): i is PlaylistItem => i !== null)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      // Preserve the unreadable queue for diagnosis rather than replacing it with
+      // an empty one on the next persist.
+      try {
+        fs.renameSync(playlistFile(), `${playlistFile()}.corrupt-${Date.now()}`)
+      } catch {
+        /* ignore lock/permission failures; the report below still happens */
+      }
+      reportStoreError('playlist', err)
+    }
     return []
   }
 }
@@ -276,6 +338,6 @@ export function persistPlaylist(items: PlaylistItem[]): void {
     fs.writeFileSync(tmp, JSON.stringify({ items }, null, 2), 'utf8')
     fs.renameSync(tmp, file)
   } catch (err) {
-    console.error('[playlist] 保存失败:', err)
+    reportStoreError('playlist', err)
   }
 }

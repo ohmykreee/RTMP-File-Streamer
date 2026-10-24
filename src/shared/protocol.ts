@@ -66,7 +66,9 @@ export function detectStreamProtocol(address: string): StreamProtocol {
   if (/^rtmps?:\/\//.test(url)) return 'rtmp'
   if (/^srt:\/\//.test(url)) return 'srt'
   if (/^rtsps?:\/\//.test(url)) return 'rtsp'
-  if (/^(https?|webrtc):\/\//.test(url)) return 'whip'
+  // WHIP is an HTTP(S) handshake; `webrtc://` is not a target ffmpeg's whip muxer
+  // can open, so it is deliberately not detected as WHIP here.
+  if (/^https?:\/\//.test(url)) return 'whip'
   return DEFAULT_STREAM_PROTOCOL
 }
 
@@ -82,6 +84,10 @@ export const PROTOCOL_SCHEMES: Record<StreamProtocol, string> = {
 export function addressMatchesProtocol(address: string, protocol: StreamProtocol | undefined): boolean {
   const url = (address ?? '').trim().toLowerCase()
   const p = protocol ?? DEFAULT_STREAM_PROTOCOL
+  // A hand-edited settings file can carry an unknown protocol; treating it as rtmp
+  // here would print `undefined` in the validation message and let a bad value
+  // through to ffmpeg.
+  if (!STREAM_PROTOCOLS.includes(p)) return false
   if (p === 'rtmp') return /^rtmps?:\/\//.test(url)
   if (p === 'srt') return /^srt:\/\//.test(url)
   if (p === 'rtsp') return /^rtsps?:\/\//.test(url)

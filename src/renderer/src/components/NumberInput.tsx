@@ -39,7 +39,21 @@ export default function NumberInput({
       onBlur={(e) => {
         const typed = e.target.value.trim()
         setDraft(null)
-        if (typed !== '') onCommit(Number(typed))
+        if (typed !== '') {
+          const parsed = Number(typed)
+          if (Number.isFinite(parsed)) {
+            // HTML `min`/`max` only produce a validation bubble; they do not stop
+            // the value from reaching the model. Clamp the committed number so
+            // CRF 1000 / fps 1e999 cannot reach the command builder.
+            const min = props.min === undefined ? Number.NEGATIVE_INFINITY : Number(props.min)
+            const max = props.max === undefined ? Number.POSITIVE_INFINITY : Number(props.max)
+            const clamped = Math.min(
+              Number.isFinite(max) ? max : Number.POSITIVE_INFINITY,
+              Math.max(Number.isFinite(min) ? min : Number.NEGATIVE_INFINITY, parsed)
+            )
+            onCommit(clamped)
+          }
+        }
         onBlur?.(e)
       }}
       onKeyDown={(e) => {

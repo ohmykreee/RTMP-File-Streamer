@@ -1,6 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { LogEntry } from '@shared/types'
+import type { LogEntry, PersistedLogInfo } from '@shared/types'
 import { ensureDir, logsDir } from './paths'
 
 /**
@@ -18,22 +18,17 @@ const TOTAL_BUDGET_BYTES = 12 * 1024 * 1024 // 12 MB across all session files
 const MAX_SINGLE_FILE_BYTES = 4 * 1024 * 1024 // roll over past this per file
 const MAX_SESSION_FILES = 20
 const FLUSH_INTERVAL_MS = 1200
-
-export interface PersistedLogInfo {
-  dir: string
-  currentFile: string
-  /** Bytes currently used by the whole Logs folder. */
-  totalBytes: number
-  fileCount: number
-  budgetBytes: number
-}
-
 let stream: fs.WriteStream | null = null
 let currentFile = ''
 let buffered: string[] = []
 let flushTimer: NodeJS.Timeout | null = null
 let bytesWrittenToCurrent = 0
 let enabled = true
+/**
+ * Set by the shutdown path. Late log lines (a control client disconnecting after
+ * `obs.stop()`, for example) must not reopen a session file that nobody will close.
+ */
+let closed = false
 
 function stamp(): string {
   const d = new Date()
@@ -84,7 +79,7 @@ function rotate(): void {
 }
 
 function openSession(reason: string): void {
-  if (!enabled) return
+  if (!enabled || closed) return
   try {
     const dir = logsDir()
     if (!ensureDir(dir)) {
@@ -154,12 +149,12 @@ function serialise(entry: LogEntry, extra?: { itemName?: string; itemPath?: stri
 }
 
 export function startLogSession(reason: string): void {
-  if (stream) return
+  if (stream || closed) return
   openSession(reason)
 }
 
 export function appendLogEntry(entry: LogEntry, extra?: { itemName?: string; itemPath?: string }): void {
-  if (!enabled) return
+  if (!enabled || closed) return
   if (!stream) startLogSession('first entry')
   buffered.push(serialise(entry, extra))
   if (flushTimer) return
@@ -186,6 +181,7 @@ export function getPersistedLogInfo(): PersistedLogInfo {
 }
 
 export function closeLogSession(): void {
+  closed = true
   if (flushTimer) {
     clearTimeout(flushTimer)
     flushTimer = null

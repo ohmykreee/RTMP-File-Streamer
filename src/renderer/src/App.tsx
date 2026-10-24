@@ -9,6 +9,7 @@ import { Badge } from '@renderer/components/ui/badge'
 import { Button } from '@renderer/components/ui/button'
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@renderer/components/ui/resizable'
 import { Spinner } from '@renderer/components/ui/spinner'
+import { TooltipButton } from '@renderer/components/ui/tooltip-button'
 import BrandMark from './components/BrandMark'
 import { useStreamer } from './hooks/useStreamer'
 import PlaylistPanel from './components/PlaylistPanel'
@@ -256,7 +257,9 @@ export default function App(): React.JSX.Element {
     (patch: Parameters<typeof st.updateOutput>[0]) => {
       if (locked) return
       setActivePresetId('')
-      void st.updateOutput(patch)
+      // Returned so the settings panel can wait for a committed address before
+      // running the connection test with it.
+      return st.updateOutput(patch)
     },
     [locked, st]
   )
@@ -301,24 +304,46 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('beforeunload', handler)
   }, [isActive])
 
+  /* A file dropped outside the playlist used to let Chromium navigate to it,
+     replacing the whole UI while the stream kept running. */
+  useEffect(() => {
+    const prevent = (e: DragEvent): void => {
+      if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
+    }
+    window.addEventListener('dragover', prevent)
+    window.addEventListener('drop', prevent)
+    return () => {
+      window.removeEventListener('dragover', prevent)
+      window.removeEventListener('drop', prevent)
+    }
+  }, [])
+
   /* Keyboard shortcuts: space = start, Ctrl+→ = next file. */
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const target = e.target as HTMLElement | null
-      const typing = target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA')
-      if (typing) return
+      /*
+       * Buttons, switches, sliders and editable regions receive Space themselves.
+       * The global handler used to swallow it: pressing Space on a switch started
+       * the stream, and every keyboard activation inside the log toolbar died.
+       */
+      const interactive =
+        target?.closest(
+          'input, select, textarea, button, a[href], [role="button"], [role="switch"], [role="slider"], [contenteditable="true"]'
+        ) ?? null
+      if (interactive || target?.isContentEditable || e.defaultPrevented) return
       if (e.code === 'Space') {
         e.preventDefault()
-        if (!isActive && canStart) void run(() => st.start())
+        if (!isActive && canStart && !actionPending) void run(() => st.start())
       }
       if (e.ctrlKey && e.code === 'ArrowRight') {
         e.preventDefault()
-        if (isActive) void run(() => st.skipNext())
+        if (isActive && status.state !== 'stopping' && !actionPending) void run(() => st.skipNext())
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [canStart, isActive, run, st])
+  }, [actionPending, canStart, isActive, run, st, status.state])
 
   /**
    * Clicking the bar jumps to that playlist entry.
@@ -337,7 +362,8 @@ export default function App(): React.JSX.Element {
   )
 
   const testRtmp = useCallback(
-    async (url: string, key: string): Promise<RtmpTestResult> => st.testRtmp(url, key),
+    async (url: string, key: string, session: Parameters<typeof st.testRtmp>[2]): Promise<RtmpTestResult> =>
+      st.testRtmp(url, key, session),
     [st]
   )
 
@@ -350,13 +376,6 @@ export default function App(): React.JSX.Element {
             <AlertDescription className="flex flex-col gap-2">
               <span className="text-foreground">{t('app.bootErrorTitle')}</span>
               <span>{t('app.bootErrorBody')}</span>
-              <span className="text-xs">
-                {t('app.bootErrorRebuild1')}
-                <code className="mono bg-muted/60 rounded px-1 py-0.5">pnpm build</code>
-                {t('app.bootErrorRebuild2')}
-                <code className="mono bg-muted/60 rounded px-1 py-0.5">pnpm start</code>
-                {t('app.bootErrorRebuild3')}
-              </span>
             </AlertDescription>
           </Alert>
         </div>
@@ -461,10 +480,10 @@ export default function App(): React.JSX.Element {
               items={playlist}
               currentIndex={status.currentIndex}
               active={isActive}
+              canStart={canStart}
               busy={st.busy}
               locked={locked}
               onAddVideos={() => void run(st.addVideoFiles)}
-              onAddPaths={(paths) => void run(() => st.addPaths(paths))}
               onRemove={(id) => void run(() => st.removeItem(id))}
               onClear={() => void run(st.clearPlaylist)}
               onReorder={(ids) => void run(() => st.reorderPlaylist(ids))}
@@ -527,7 +546,7 @@ export default function App(): React.JSX.Element {
         */}
         <footer className="player">
           <div className="player-controls">
-            <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0} />
+            <Timeline items={playlist} status={status} onJumpToItem={handleJump} disabled={playlist.length === 0 || actionPending} />
 
             <div className="controls">
               {!isActive ? (
@@ -537,16 +556,16 @@ export default function App(): React.JSX.Element {
                 </Button>
               ) : (
                 <>
-                  <Button
+                  <TooltipButton
                     className="btn"
                     variant="outline"
                     onClick={() => void run(() => st.skipNext())}
-                    disabled={actionPending}
-                    title="Ctrl+→"
+                    disabled={actionPending || status.state === 'stopping'}
+                    label={t('app.skipShortcutTitle')}
                   >
                     <SkipForward data-icon="inline-start" />
                     {t('app.skipNext')}
-                  </Button>
+                  </TooltipButton>
                   <Button className="btn" variant="destructive" onClick={() => void run(() => st.stop())} disabled={actionPending}>
                     <Square data-icon="inline-start" />
                     {t('app.stop')}
@@ -568,45 +587,45 @@ export default function App(): React.JSX.Element {
                 </span>
               </div>
               <div className="np-stats">
-                <span title={t('app.statDurationTitle')}>
-                  {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
-                </span>
-                {/* Buffered mode runs two processes: the figures above describe what has
-                    been PUBLISHED, the rest describe the ENCODER, which is free to run
-                    ahead of real time.
-                    The last figure is the measured egress, i.e. what the link is
-                    actually carrying, which nothing else on this line can say: the
-                    encoder's bitrate is the rate it was asked for, not the bytes that
-                    left. It is also the only figure that changes colour, because it is
-                    the only one that can report a problem: the engine compares it with
-                    what the session is pushing and says so (see `NetworkState`). */}
-                {status.encoder ? (
+                {isActive && (
                   <>
-                    <span title={t('app.statEncoderTitle')}>
-                      {t('app.encoderProcess', { speed: status.encoder.speed > 0 ? `${status.encoder.speed.toFixed(2)}×` : '—' })}
+                    <span title={t('app.statDurationTitle')}>
+                      {formatDuration(status.positionSec)} / {formatDuration(status.currentDurationSec)}
                     </span>
-                    <span title={t('app.statEncoderTitle')}>fps {status.encoder.fps > 0 ? status.encoder.fps.toFixed(1) : '—'}</span>
-                    <span title={t('app.statEncoderBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.encoder.bitrateKbps) })}</span>
-                    <span title={t('app.statLeadTitle')}>{t('app.bufferLead', { sec: status.encoder.leadSec.toFixed(1) })}</span>
-                    <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
-                      {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <span title={t('app.statEncodeSpeedTitle')}>
-                      {t('app.speed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
-                    </span>
-                    <span title={t('app.statBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.bitrateKbps) })}</span>
-                    <span title={t('app.statFpsTitle')}>fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
-                    <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
-                      {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
-                    </span>
+                    {status.buffered ? (
+                      <>
+                        <span title={t('app.statEncoderTitle')}>
+                          {t('app.encoderProcess', {
+                            speed: (status.encoder?.speed ?? 0) > 0 ? `${(status.encoder?.speed ?? 0).toFixed(2)}×` : '—'
+                          })}
+                        </span>
+                        <span title={t('app.statEncoderTitle')}>
+                          fps {(status.encoder?.fps ?? 0) > 0 ? (status.encoder?.fps ?? 0).toFixed(1) : '—'}
+                        </span>
+                        <span title={t('app.statEncoderBitrateTitle')}>
+                          {t('app.encoderBitrate', { rate: formatBitrate(status.encoder?.bitrateKbps ?? 0) })}
+                        </span>
+                        <span title={t('app.statLeadTitle')}>{t('app.bufferLead', { sec: (status.encoder?.leadSec ?? 0).toFixed(1) })}</span>
+                        <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
+                          {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span title={t('app.statEncodeSpeedTitle')}>
+                          {t('app.speed', { speed: status.speed > 0 ? `${status.speed.toFixed(2)}×` : '—' })}
+                        </span>
+                        <span title={t('app.statBitrateTitle')}>{t('app.encoderBitrate', { rate: formatBitrate(status.bitrateKbps) })}</span>
+                        <span title={t('app.statFpsTitle')}>fps {status.fps > 0 ? status.fps.toFixed(1) : '—'}</span>
+                        <span className={NETWORK_CLASS[status.networkState]} title={t('app.statNetworkTitle')}>
+                          {t('app.networkRate', { rate: formatBitrate(status.networkKbps) })}
+                        </span>
+                      </>
+                    )}
+                    {status.droppedFrames > 0 && <span className="warn">{t('app.droppedFrames', { n: status.droppedFrames })}</span>}
+                    <span title={t('app.statElapsedTitle')}>{t('app.elapsed', { duration: formatDuration(status.elapsedSec) })}</span>
                   </>
                 )}
-                {status.droppedFrames > 0 && <span className="warn">{t('app.droppedFrames', { n: status.droppedFrames })}</span>}
-                {status.reconnectCount > 0 && <span className="warn">{t('app.reconnectCount', { n: status.reconnectCount })}</span>}
-                <span title={t('app.statElapsedTitle')}>{t('app.elapsed', { duration: formatDuration(status.elapsedSec) })}</span>
               </div>
             </div>
           </div>
@@ -617,7 +636,6 @@ export default function App(): React.JSX.Element {
           onClear={() => void st.clearLogs()}
           expanded={logsOpen}
           onToggle={() => setLogsOpen((v) => !v)}
-          logInfo={logInfo}
           onOpenLogsDir={() => void st.openLogsDir()}
         />
       </div>

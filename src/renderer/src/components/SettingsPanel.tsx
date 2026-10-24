@@ -42,6 +42,7 @@ import { Spinner } from '@renderer/components/ui/spinner'
 import { Switch } from '@renderer/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@renderer/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
+import { TooltipButton } from '@renderer/components/ui/tooltip-button'
 import type {
   AppInfo,
   AppSettings,
@@ -56,6 +57,7 @@ import type {
   Preset,
   PresetsPayload,
   RtmpTestResult,
+  SessionSettings,
   StreamNetwork,
   StreamProtocol,
   SubtitleRenderSettings,
@@ -71,7 +73,7 @@ import { BUFFER_SEC_DEFAULT, BUFFER_SEC_MAX, BUFFER_SEC_MIN, OBS_PORT_MAX, OBS_P
 import { LANGUAGE_NATIVE_NAME, LANGUAGES, type Language } from '@shared/i18n'
 import { detectStreamProtocol, networkForProtocol, PROTOCOL_NETWORKS, STREAM_PROTOCOLS } from '@shared/protocol'
 import NumberInput from './NumberInput'
-import { useT } from '../i18n'
+import { useT, type T } from '../i18n'
 
 interface SettingsPanelProps {
   settings: AppSettings
@@ -95,11 +97,12 @@ interface SettingsPanelProps {
   onUpdateVideo: (patch: Partial<VideoSettings>) => void
   onUpdateAudio: (patch: Partial<AudioSettings>) => void
   onUpdateSubtitles: (patch: Partial<SubtitleRenderSettings>) => void
-  onUpdateOutput: (patch: Partial<OutputSettings>) => void
+  /** Returns the save promise so callers can wait for the value to land. */
+  onUpdateOutput: (patch: Partial<OutputSettings>) => Promise<void> | void
   onSaveSettings: (patch: Partial<AppSettings>) => Promise<AppSettings>
   onChooseFfmpeg: () => void
   onRefreshCapabilities: (force?: boolean) => void
-  onTestRtmp: (url: string, key: string) => Promise<RtmpTestResult>
+  onTestRtmp: (url: string, key: string, session?: SessionSettings) => Promise<RtmpTestResult>
   onPreviewCommand: () => Promise<string>
   /** Switch the interface language; an application decision, not a session setting. */
   onChangeLanguage: (language: Language) => void
@@ -175,13 +178,45 @@ const THEME_KEY: Record<ThemePreference, TranslationKey> = {
   system: 'settings.ui.themeSystem'
 }
 
+/** Where the resolved ffmpeg came from, as a sentence rather than an enum value. */
+const SOURCE_KEY: Record<FfmpegCapabilities['source'], TranslationKey> = {
+  settings: 'settings.advanced.source.settings',
+  bundled: 'settings.advanced.source.bundled',
+  path: 'settings.advanced.source.path',
+  'common-location': 'settings.advanced.source.common',
+  missing: 'settings.advanced.source.missing'
+}
+
+/** Operating-system names shown in About; Node reports `win32`/`darwin`. */
+const PLATFORM_KEY: Record<string, TranslationKey> = {
+  win32: 'settings.about.platform.windows',
+  darwin: 'settings.about.platform.macos',
+  linux: 'settings.about.platform.linux'
+}
+
+/** Built-in preset names are data, not code: render them in the active language. */
+const BUILTIN_PRESET_NAME_KEY: Record<string, TranslationKey> = {
+  'builtin:1080p60-cbr': 'settings.preset.builtin.1080p60',
+  'builtin:1080p30-balanced': 'settings.preset.builtin.1080p30',
+  'builtin:720p-quality': 'settings.preset.builtin.720p',
+  'builtin:hevc-4k': 'settings.preset.builtin.hevc4k',
+  'builtin:lowlatency-720p': 'settings.preset.builtin.lowLatency'
+}
+
+function presetName(preset: Preset, t: T): string {
+  if (!preset.builtin) return preset.name
+  const key = BUILTIN_PRESET_NAME_KEY[preset.id]
+  return key ? t(key) : preset.name
+}
+
 export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Element {
   const t = useT()
   const { settings, capabilities: caps } = props
   const [tab, setTab] = useState<TabKey>('video')
   const [testState, setTestState] = useState<{ running: boolean; result: RtmpTestResult | null }>({ running: false, result: null })
   const [commandPreview, setCommandPreview] = useState<string | null>(null)
-  const [showKey, setShowKey] = useState(false)
+  const [showStreamKey, setShowStreamKey] = useState(false)
+  const [showObsPassword, setShowObsPassword] = useState(false)
   /**
    * The push address while it is being typed.
    *
@@ -191,6 +226,20 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
    * `null` means "not editing" — the stored value is what shows.
    */
   const [serverDraft, setServerDraft] = useState<string | null>(null)
+  /**
+   * The last committed address and the save that carries it.
+   *
+   * Clicking "test" fires after the field's blur but before the IPC round-trip
+   * that persists the blur's value, so `o.server` is still the previous address.
+   * Remembering the just-committed value (and its promise) lets the test wait for
+   * that write and send the same value the user sees.
+   */
+  const serverCommitRef = useRef<{
+    server: string
+    protocol: StreamProtocol
+    network: StreamNetwork
+    promise: Promise<unknown>
+  } | null>(null)
   const v = settings.session.video
   const a = settings.session.audio
   const s = settings.session.subtitles
@@ -219,47 +268,80 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
   const presetOptions = useMemo<string[]>(() => {
     if (!activeEncoder) return []
     if (activeEncoder.presets && activeEncoder.presets.length > 0) return activeEncoder.presets
-    // `auto`: gather presets of every encoder that could be chosen for this codec.
+    // `auto`: gather presets only from encoders this machine can actually use.
+    // Including unavailable ones offered e.g. NVENC's `p4` on a software-only
+    // machine, where `auto` then resolved to libx264 and `-preset p4` failed.
     const merged = new Set<string>()
-    for (const e of encoderOptions) for (const p of e.presets ?? []) merged.add(p)
+    for (const e of encoderOptions) {
+      if (!e.available) continue
+      for (const p of e.presets ?? []) merged.add(p)
+    }
     return [...merged]
   }, [activeEncoder, encoderOptions])
 
+  /** Profile names the selected codec accepts; AV1 has no usable option here. */
+  const profileOptions = useMemo<string[]>(
+    () => (v.codec === 'hevc' ? ['main', 'main10'] : v.codec === 'h264' ? ['baseline', 'main', 'high'] : []),
+    [v.codec]
+  )
+
+  const commitServer = (raw: string): void => {
+    const trimmed = raw.trim()
+    const patch: Partial<OutputSettings> = {}
+    if (trimmed !== o.server) patch.server = trimmed
+    if (trimmed !== '') {
+      const detected = detectStreamProtocol(trimmed)
+      if (detected !== o.protocol) {
+        patch.protocol = detected
+        patch.network = networkForProtocol(detected, o.network)
+      }
+    }
+    if (Object.keys(patch).length === 0) return
+    const promise = Promise.resolve(props.onUpdateOutput(patch))
+    serverCommitRef.current = {
+      server: patch.server ?? o.server,
+      protocol: patch.protocol ?? o.protocol,
+      network: patch.network ?? o.network,
+      promise
+    }
+  }
+
   const runTest = async (): Promise<void> => {
     setTestState({ running: true, result: null })
+    // Wait for the blur commit, then build the session the user is looking at.
+    const committed = serverCommitRef.current
+    if (committed) await committed.promise.catch(() => {})
+    const server = committed?.server ?? o.server
+    const protocol = committed?.protocol ?? o.protocol
+    const network = committed?.network ?? o.network
+    const sessionForTest: SessionSettings = { ...settings.session, output: { ...o, server, protocol, network } }
     // Last-resort guard: the main process already bounds the ffmpeg run, this
     // only stops the button from staying "正在测试…" forever if the IPC answer
     // itself never arrives.
     const guard = new Promise<RtmpTestResult>((resolve) =>
-      window.setTimeout(
-        () => resolve({ ok: false, message: t('settings.output.testTimeout'), detail: '', elapsedMs: 31000 }),
-        31000
-      )
+      window.setTimeout(() => resolve({ ok: false, message: t('settings.output.testTimeout'), detail: '', elapsedMs: 31000 }), 31000)
     )
     try {
-      const result = await Promise.race([props.onTestRtmp(o.server, o.streamKey), guard])
+      const result = await Promise.race([props.onTestRtmp(server, o.streamKey, sessionForTest), guard])
       setTestState({ running: false, result })
     } catch (err) {
       setTestState({ running: false, result: { ok: false, message: String(err), detail: '', elapsedMs: 0 } })
     }
   }
 
-  /** Writes the obs-websocket block of the output settings. */
-  const updateObs = (patch: Partial<ObsWebSocketSettings>): void => {
-    props.onUpdateOutput({ obsWebSocket: { ...o.obsWebSocket, ...patch } })
-  }
+  /** Writes the obs-websocket block of the output settings, returning the save. */
+  const updateObs = (patch: Partial<ObsWebSocketSettings>): Promise<void> =>
+    Promise.resolve(props.onUpdateOutput({ obsWebSocket: { ...o.obsWebSocket, ...patch } }))
 
   /**
-   * Restarts the control endpoint.
+   * Restarts the control endpoint after a write lands.
    *
    * The main process reads the *persisted* settings when it (re)binds the port,
-   * and writing them goes through IPC, so the restart has to wait for the write
-   * to land — otherwise it would restart with the previous values (turning the
-   * switch off would leave the old server listening). Only one restart is kept
-   * in flight: typing in the port field would otherwise queue one per keystroke.
+   * so a fixed 250 ms timer restarted with the previous value whenever the save
+   * was slower. Operations are serialised, so the last change wins.
    */
   const [obsRestarting, setObsRestarting] = useState(false)
-  const obsTimer = useRef<number | null>(null)
+  const obsQueue = useRef<Promise<void>>(Promise.resolve())
   const applyObsNow = async (): Promise<void> => {
     setObsRestarting(true)
     try {
@@ -268,23 +350,20 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
       setObsRestarting(false)
     }
   }
-  const applyObs = (): void => {
-    if (obsTimer.current !== null) window.clearTimeout(obsTimer.current)
-    obsTimer.current = window.setTimeout(() => {
-      obsTimer.current = null
-      void applyObsNow()
-    }, 250)
+  const applyObs = (save: Promise<unknown> | void): void => {
+    obsQueue.current = obsQueue.current
+      .then(() => Promise.resolve(save))
+      .then(() => applyObsNow())
+      .catch(() => {})
   }
-  useEffect(
-    () => () => {
-      if (obsTimer.current !== null) window.clearTimeout(obsTimer.current)
-    },
-    []
-  )
 
   const showCommand = async (): Promise<void> => {
-    const cmd = await props.onPreviewCommand()
-    setCommandPreview(cmd)
+    try {
+      const cmd = await props.onPreviewCommand()
+      setCommandPreview(cmd)
+    } catch (err) {
+      setCommandPreview(String(err))
+    }
   }
 
   return (
@@ -334,7 +413,22 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             <NativeSelect
               wrapperClassName="w-full"
               value={v.codec}
-              onChange={(e) => props.onUpdateVideo({ codec: e.target.value as VideoCodecName, encoder: 'auto' })}
+              onChange={(e) => {
+                const codec = e.target.value as VideoCodecName
+                // Profiles are codec-specific: `high` is an H.264 name and makes
+                // libx265 fail at init, while `main10` means nothing to H.264.
+                const nextProfile =
+                  codec === 'hevc'
+                    ? v.profile === 'main10'
+                      ? 'main10'
+                      : 'main'
+                    : codec === 'h264'
+                      ? v.profile === 'baseline' || v.profile === 'high'
+                        ? v.profile
+                        : 'high'
+                      : ''
+                props.onUpdateVideo({ codec, encoder: 'auto', profile: nextProfile })
+              }}
             >
               {(Object.keys(CODEC_KEY) as VideoCodecName[]).map((c) => (
                 <NativeSelectOption key={c} value={c}>
@@ -350,7 +444,18 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 <NativeSelect
                   wrapperClassName="w-full"
                   value={v.encoder}
-                  onChange={(e) => props.onUpdateVideo({ encoder: e.target.value as VideoEncoderChoice })}
+                  onChange={(e) => {
+                    const encoder = e.target.value as VideoEncoderChoice
+                    const next = encoderOptions.find((x) => x.value === encoder)
+                    const presets = next?.presets ?? []
+                    // A preset from one encoder can be an invalid option for
+                    // another (NVENC's p1…p7 vs libx264's veryfast); falling back
+                    // to that encoder's first choice keeps the field truthful.
+                    props.onUpdateVideo({
+                      encoder,
+                      ...(presets.length > 0 && !presets.includes(v.preset) ? { preset: presets[0] } : {})
+                    })
+                  }}
                 >
                   {encoderOptions.map((e) => (
                     <NativeSelectOption key={e.value} value={e.value} disabled={!e.available && e.value !== 'auto'}>
@@ -400,9 +505,10 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                   />
                 )}
 
-                {v.rateControl !== 'cbr' && v.rateControl !== 'crf' && (
+                {v.rateControl !== 'cbr' && (
                   <BitrateField
                     label={t('settings.video.maxBitrate')}
+                    hint={v.rateControl === 'crf' ? t('settings.video.maxBitrateCrfHint') : undefined}
                     valueKbps={v.maxBitrateKbps}
                     minKbps={100}
                     onChange={(maxBitrateKbps) => props.onUpdateVideo({ maxBitrateKbps })}
@@ -460,9 +566,15 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                     onChange={(e) => props.onUpdateVideo({ profile: e.target.value })}
                   >
                     <NativeSelectOption value="">{t('settings.video.tuneUnset')}</NativeSelectOption>
-                    <NativeSelectOption value="baseline">{t('settings.video.profile.baseline')}</NativeSelectOption>
-                    <NativeSelectOption value="main">main</NativeSelectOption>
-                    <NativeSelectOption value="high">{t('settings.video.profile.high')}</NativeSelectOption>
+                    {profileOptions.map((profile) => (
+                      <NativeSelectOption key={profile} value={profile}>
+                        {profile === 'baseline' || profile === 'high'
+                          ? t(`settings.video.profile.${profile}` as TranslationKey)
+                          : profile === 'main'
+                            ? t('settings.video.profile.main')
+                            : t('settings.video.profile.main10')}
+                      </NativeSelectOption>
+                    ))}
                   </NativeSelect>
                 </Field>
               </FieldGroup>
@@ -759,18 +871,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                    * ask for (nothing is pushed until one is typed), so it neither
                    * falls back to the default nor flips the protocol.
                    */
-                  const trimmed = e.target.value.trim()
                   setServerDraft(null)
-                  const patch: Partial<OutputSettings> = {}
-                  if (trimmed !== o.server) patch.server = trimmed
-                  if (trimmed !== '') {
-                    const detected = detectStreamProtocol(trimmed)
-                    if (detected !== o.protocol) {
-                      patch.protocol = detected
-                      patch.network = networkForProtocol(detected, o.network)
-                    }
-                  }
-                  if (Object.keys(patch).length > 0) props.onUpdateOutput(patch)
+                  commitServer(e.target.value)
                 }}
                 spellCheck={false}
               />
@@ -803,7 +905,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
           <Field label={t('settings.output.streamKey')} hint={t(STREAM_KEY_HINT[o.protocol])}>
             <div className="secret-row">
               <Input
-                type={showKey ? 'text' : 'password'}
+                type={showStreamKey ? 'text' : 'password'}
                 className="h-7 font-mono text-xs"
                 value={o.streamKey}
                 placeholder={t('settings.output.nonePlaceholder')}
@@ -811,9 +913,16 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                 spellCheck={false}
                 autoComplete="off"
               />
-              <Button type="button" size="sm" variant="outline" className="secret-toggle" onClick={() => setShowKey((v) => !v)}>
-                {showKey ? <EyeOff data-icon="inline-start" aria-hidden /> : <Eye data-icon="inline-start" aria-hidden />}
-                {showKey ? t('settings.output.hide') : t('settings.output.show')}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="secret-toggle"
+                aria-pressed={showStreamKey}
+                onClick={() => setShowStreamKey((value) => !value)}
+              >
+                {showStreamKey ? <EyeOff data-icon="inline-start" aria-hidden /> : <Eye data-icon="inline-start" aria-hidden />}
+                {showStreamKey ? t('settings.output.hide') : t('settings.output.show')}
               </Button>
             </div>
           </Field>
@@ -961,7 +1070,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
           </FieldGroup>
           <Toggle
             label={t('settings.advanced.realtimePacing')}
-            hint={t('settings.advanced.realtimePacingHint')}
+            hint={o.buffered ? t('settings.advanced.realtimePacingHintBuffered') : t('settings.advanced.realtimePacingHint')}
             checked={o.realtimePacing}
             onChange={(c) => props.onUpdateOutput({ realtimePacing: c })}
           />
@@ -973,7 +1082,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
           />
           <Toggle
             label={t('settings.advanced.dropLateFrames')}
-            hint={t('settings.advanced.dropLateFramesHint')}
+            hint={o.buffered ? t('settings.advanced.dropLateFramesHintBuffered') : t('settings.advanced.dropLateFramesHint')}
             checked={o.dropLateFrames}
             onChange={(c) => props.onUpdateOutput({ dropLateFrames: c })}
           />
@@ -1007,10 +1116,9 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             hint={t('settings.obs.enabledHint')}
             checked={o.obsWebSocket.enabled}
             onChange={(c) => {
-              updateObs({ enabled: c })
               // Both directions restart the endpoint: enabling binds the port,
-              // disabling must release it again.
-              applyObs()
+              // disabling must release it again. The restart waits for the save.
+              applyObs(updateObs({ enabled: c }))
             }}
           />
 
@@ -1024,8 +1132,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                     placeholder="127.0.0.1"
                     spellCheck={false}
                     onCommit={(host) => {
-                      updateObs({ host: host.trim() })
-                      applyObs()
+                      applyObs(updateObs({ host: host.trim() }))
                     }}
                   />
                 </Field>
@@ -1035,28 +1142,33 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
                     max={OBS_PORT_MAX}
                     value={o.obsWebSocket.port}
                     onCommit={(n) => {
-                      updateObs({ port: clampNumber(n, OBS_PORT_MIN, OBS_PORT_MAX, 4455) })
-                      applyObs()
+                      applyObs(updateObs({ port: clampNumber(n, OBS_PORT_MIN, OBS_PORT_MAX, 4455) }))
                     }}
                   />
                 </Field>
                 <Field label={t('settings.obs.password')} hint={t('settings.obs.passwordHint')}>
                   <div className="secret-row">
                     <DraftInput
-                      type={showKey ? 'text' : 'password'}
+                      type={showObsPassword ? 'text' : 'password'}
                       className="h-7 font-mono text-xs"
                       value={o.obsWebSocket.password}
                       placeholder={t('settings.output.nonePlaceholder')}
                       spellCheck={false}
                       autoComplete="off"
                       onCommit={(password) => {
-                        updateObs({ password })
-                        applyObs()
+                        applyObs(updateObs({ password }))
                       }}
                     />
-                    <Button type="button" size="sm" variant="outline" className="secret-toggle" onClick={() => setShowKey((v) => !v)}>
-                      {showKey ? <EyeOff data-icon="inline-start" aria-hidden /> : <Eye data-icon="inline-start" aria-hidden />}
-                      {showKey ? t('settings.output.hide') : t('settings.output.show')}
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="secret-toggle"
+                      aria-pressed={showObsPassword}
+                      onClick={() => setShowObsPassword((value) => !value)}
+                    >
+                      {showObsPassword ? <EyeOff data-icon="inline-start" aria-hidden /> : <Eye data-icon="inline-start" aria-hidden />}
+                      {showObsPassword ? t('settings.output.hide') : t('settings.output.show')}
                     </Button>
                   </div>
                 </Field>
@@ -1193,7 +1305,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             </div>
             <div className="kv">
               <span>{t('settings.advanced.source')}</span>
-              <code>{caps?.source ?? '—'}</code>
+              <code>{caps ? t(SOURCE_KEY[caps.source]) : '—'}</code>
             </div>
           </div>
 
@@ -1245,7 +1357,7 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
               <code>{formatAppVersion(props.info)}</code>
             </div>
             <div className="kv">
-              <span>Electron / Chromium</span>
+              <span>{t('settings.about.runtime')}</span>
               <code>
                 {props.info?.electron ?? '—'} / {props.info?.chrome ?? '—'}
               </code>
@@ -1253,7 +1365,8 @@ export default function SettingsPanel(props: SettingsPanelProps): React.JSX.Elem
             <div className="kv">
               <span>{t('settings.about.platform')}</span>
               <code>
-                {props.info?.platform ?? '—'} {props.info?.arch ?? ''}
+                {props.info?.platform ? (PLATFORM_KEY[props.info.platform] ? t(PLATFORM_KEY[props.info.platform]) : props.info.platform) : '—'}{' '}
+                {props.info?.arch ?? ''}
               </code>
             </div>
             <div className="kv">
@@ -1364,7 +1477,7 @@ function PresetBar({
           .filter((p) => p.builtin)
           .map((p) => (
             <NativeSelectOption key={p.id} value={p.id}>
-              {p.name}
+              {presetName(p, t)}
             </NativeSelectOption>
           ))}
       </NativeSelectOptGroup>
@@ -1372,7 +1485,7 @@ function PresetBar({
         <NativeSelectOptGroup label={t('settings.preset.userGroup')}>
           {userPresets.map((p) => (
             <NativeSelectOption key={p.id} value={p.id}>
-              {p.name}
+              {presetName(p, t)}
             </NativeSelectOption>
           ))}
         </NativeSelectOptGroup>
@@ -1408,24 +1521,30 @@ function PresetBar({
         </Badge>
       )}
 
-      <Button size="xs" variant="outline" onClick={() => toggleMenu('save')} disabled={locked} title={t('settings.preset.saveTitle')}>
+      <TooltipButton
+        size="xs"
+        variant="outline"
+        onClick={() => toggleMenu('save')}
+        disabled={locked}
+        label={t('settings.preset.saveTitle')}
+      >
         <Save data-icon="inline-start" aria-hidden />
         {t('settings.preset.saveAs')}
-      </Button>
+      </TooltipButton>
 
       {active && !active.builtin && (
         <>
-          <Button
+          <TooltipButton
             size="xs"
             variant="outline"
             onClick={() => toggleMenu('rename')}
             disabled={locked}
-            title={t('settings.preset.renameTitle', { name: active.name })}
+            label={t('settings.preset.renameTitle', { name: active.name })}
           >
             <PenLine data-icon="inline-start" aria-hidden />
             {t('settings.preset.rename')}
-          </Button>
-          <Button
+          </TooltipButton>
+          <TooltipButton
             size="xs"
             variant="destructive"
             onClick={() => {
@@ -1433,18 +1552,23 @@ function PresetBar({
               onDeletePreset(active.id)
             }}
             disabled={locked}
-            title={t('settings.preset.deleteTitle', { name: active.name })}
+            label={t('settings.preset.deleteTitle', { name: active.name })}
           >
             <Trash2 data-icon="inline-start" aria-hidden />
             {t('settings.preset.delete')}
-          </Button>
+          </TooltipButton>
         </>
       )}
 
-      <Button size="xs" variant="ghost" onClick={onOpenDataDir} title={presets?.location.dir ?? t('settings.preset.dataDirTitle')}>
+      <TooltipButton
+        size="xs"
+        variant="ghost"
+        onClick={onOpenDataDir}
+        label={presets?.location.dir ?? t('settings.preset.dataDirTitle')}
+      >
         <FolderOpen data-icon="inline-start" aria-hidden />
         {t('settings.preset.dataDir')}
-      </Button>
+      </TooltipButton>
 
       {menu !== 'none' && (
         <div className="preset-menu" data-mode={menu}>
@@ -1458,13 +1582,14 @@ function PresetBar({
               value={name}
               placeholder={t('settings.preset.namePlaceholder')}
               maxLength={80}
+              disabled={locked || !writable}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') (menu === 'save' ? save : rename)()
                 if (e.key === 'Escape') closeMenu()
               }}
             />
-            <Button size="sm" onClick={menu === 'save' ? save : rename} disabled={!name.trim()}>
+            <Button size="sm" onClick={menu === 'save' ? save : rename} disabled={locked || !writable || !name.trim()}>
               {menu === 'save' ? t('settings.preset.saveButton') : t('settings.preset.renameButton')}
             </Button>
             <Button size="sm" variant="ghost" onClick={closeMenu}>
@@ -1524,6 +1649,8 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
 function formatAppVersion(info: AppInfo | null): string {
   if (!info) return '—'
   if (!info.commit) return info.version
+  // "nightly" is a build channel name, not UI prose: it is hardcoded on purpose
+  // and deliberately not translated.
   return info.nightly ? `nightly v${info.version} (${info.commit})` : `v${info.version} (${info.commit})`
 }
 
@@ -1546,12 +1673,18 @@ function DraftInput({
 } & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'onBlur'>): React.JSX.Element {
   const [draft, setDraft] = useState(value)
   const [editing, setEditing] = useState(false)
+  /** Escape must blur without letting the blur handler commit the old draft. */
+  const skipBlurCommit = useRef(false)
   useEffect(() => {
     if (!editing) setDraft(value)
   }, [value, editing])
 
   const commit = (): void => {
     setEditing(false)
+    if (skipBlurCommit.current) {
+      skipBlurCommit.current = false
+      return
+    }
     if (draft !== value) onCommit(draft)
   }
 
@@ -1568,6 +1701,10 @@ function DraftInput({
         if (e.key === 'Enter') e.currentTarget.blur()
         // Escape abandons the edit rather than committing a half-typed value.
         if (e.key === 'Escape') {
+          // `setDraft` is asynchronous, but blur fires `commit` synchronously
+          // with the pre-escape draft; without this flag Escape saved the very
+          // value it was supposed to discard (and restarted the listener).
+          skipBlurCommit.current = true
           setEditing(false)
           setDraft(value)
           e.currentTarget.blur()
@@ -1713,6 +1850,12 @@ function clampNumber(value: number, min: number, max: number, fallback: number):
   return Math.min(max, Math.max(min, value))
 }
 
+/** yuv420p encoders reject odd geometry; the UI stores the same value ffmpeg gets. */
+function normaliseDimension(value: number): number {
+  if (!Number.isFinite(value)) return 2
+  return Math.max(2, Math.round(value / 2) * 2)
+}
+
 /* ------------------------------------------------------------------ *
  * Resolution: width + height + "auto" checkbox
  * ------------------------------------------------------------------ */
@@ -1728,31 +1871,37 @@ function ResolutionField({
   const enabled = Boolean(value.scale?.trim())
 
   const setEnabled = (on: boolean): void => {
+    const width = normaliseDimension(value.scaleWidth || 1920)
+    const height = normaliseDimension(value.scaleHeight || 1080)
     onChange({
-      scale: on ? (value.scaleAuto ? `${value.scaleWidth}:-2` : `${value.scaleWidth}:${value.scaleHeight}`) : '',
-      scaleWidth: value.scaleWidth || 1920,
-      scaleHeight: value.scaleHeight || 1080
+      scale: on ? (value.scaleAuto ? `${width}:-2` : `${width}:${height}`) : '',
+      scaleWidth: width,
+      scaleHeight: height
     })
   }
 
-  const setWidth = (width: number): void => {
+  const setWidth = (raw: number): void => {
+    const width = normaliseDimension(raw)
     onChange({
       scaleWidth: width,
-      scale: value.scaleAuto ? `${width}:-2` : `${width}:${value.scaleHeight}`
+      scale: value.scaleAuto ? `${width}:-2` : `${width}:${normaliseDimension(value.scaleHeight || 1080)}`
     })
   }
 
-  const setHeight = (height: number): void => {
+  const setHeight = (raw: number): void => {
+    const height = normaliseDimension(raw)
     onChange({
       scaleHeight: height,
-      scale: `${value.scaleWidth}:${height}`
+      scale: `${normaliseDimension(value.scaleWidth || 1920)}:${height}`
     })
   }
 
   const setAuto = (auto: boolean): void => {
+    const width = normaliseDimension(value.scaleWidth || 1920)
+    const height = normaliseDimension(value.scaleHeight || 1080)
     onChange({
       scaleAuto: auto,
-      scale: auto ? `${value.scaleWidth}:-2` : `${value.scaleWidth}:${value.scaleHeight}`
+      scale: auto ? `${width}:-2` : `${width}:${height}`
     })
   }
 
@@ -1765,7 +1914,6 @@ function ResolutionField({
       scale: value.scaleAuto ? `${preset.width}:-2` : `${preset.width}:${preset.height}`
     })
   }
-
   const activePreset = SCALE_PRESETS.find(
     (p) => p.width === value.scaleWidth && (value.scaleAuto || p.height === value.scaleHeight)
   )

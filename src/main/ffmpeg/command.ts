@@ -10,7 +10,6 @@ import type {
   StreamProtocol,
   SubtitleRenderSettings,
   SubtitleTrackRef,
-  VideoCodecName,
   VideoSettings
 } from '@shared/types'
 import type { Translate, TranslationKey } from '@shared/i18n'
@@ -49,7 +48,7 @@ export interface BuildRequest {
   language?: Language
 }
 
-export type SubtitleApplication = 'burn-text' | 'burn-bitmap' | 'copy' | 'none'
+export type SubtitleApplication = 'burn-text' | 'copy' | 'none'
 
 /** The stream indexes a built command actually mapped, for the diagnostics in the log. */
 export interface MappedStreams {
@@ -116,6 +115,8 @@ export interface BuiltEncoderArgs extends MappedStreams, GeneratedTracks {
    * appended by whoever assembles the command line (see `Playout.startEncoder`).
    */
   inputs: string[]
+  /** A/V offset the caller must apply to the source input (`-itsoffset`). */
+  inputOffsetSec: number
   summary: string[]
   warnings: string[]
   vencName: string
@@ -140,8 +141,16 @@ interface EncoderSpec {
  */
 export function escapeFilterPath(p: string): string {
   const s = path.resolve(p).replace(/\\/g, '/')
-  // `C:/x` -> `C\:/x`; a colon is only special as the option separator.
-  return s.replace(/:/g, '\\:').replace(/'/g, "\\'")
+  // The filtergraph parser has two escaping levels. Inside the single-quoted
+  // value a colon still separates an option, and the whole description treats
+  // `[`, `]` and `;` as syntax as well. Film names regularly carry brackets, so
+  // all of them are escaped rather than only the Windows drive colon.
+  return s
+    .replace(/:/g, '\\:')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/;/g, '\\;')
+    .replace(/'/g, "\\'")
 }
 
 function round2(n: number): number {
@@ -190,7 +199,12 @@ function subtitlesFilterArg(source: string, streamIndex: number, s: SubtitleRend
   const parts: string[] = [`filename='${source}'`]
   if (streamIndex >= 0) parts.push(`si=${streamIndex}`)
   if (s.styleMode === 'force' || s.styleMode === 'plain') {
-    const style = buildForceStyle(s).replace(/([,:])/g, '\\$1')
+    // The second escaping level: a backslash or quote inside a font name would
+    // otherwise end the quoted force_style value early.
+    const style = buildForceStyle(s)
+      .replace(/\\/g, '\\\\')
+      .replace(/'/g, "\\'")
+      .replace(/([,:])/g, '\\$1')
     parts.push(`force_style='${style}'`)
   }
   return `subtitles=${parts.join(':')}`
@@ -250,13 +264,43 @@ function burnSourceMissingWarning(track: SubtitleTrackRef, t: Translate<Translat
  * Falls back to a plain `1920:-2` when a settings object from an older schema has
  * no usable geometry, so a stale config can never produce an invalid filter.
  */
+/**
+ * Rounds a dimension to the smallest legal even value.
+ *
+ * yuv420p (and therefore every H.264/HEVC software encoder, and most hardware
+ * ones) requires even dimensions. The test pattern already rounded; the real
+ * command did not, so an odd width produced a "not divisible by 2" failure that
+ * the connection test could never reproduce.
+ */
+export function evenDimension(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value < 2) return fallback
+  return Math.max(2, Math.round(value / 2) * 2)
+}
+
 export function resolveScaleFilter(v: VideoSettings): string {
   if (!v.scale || !v.scale.trim()) return ''
-  const rawWidth = Math.round(v.scaleWidth || 0)
-  const rawHeight = Math.round(v.scaleHeight || 0)
-  if (rawWidth < 2) return '1920:-2'
-  if (!v.scaleAuto && rawHeight < 2) return `${rawWidth}:-2`
-  return v.scaleAuto ? `${rawWidth}:-2` : `${rawWidth}:${rawHeight}`
+  const width = evenDimension(Math.round(v.scaleWidth || 0), 1920)
+  if (v.scaleAuto) return `${width}:-2`
+  const height = evenDimension(Math.round(v.scaleHeight || 0), 0)
+  return height >= 2 ? `${width}:${height}` : `${width}:-2`
+}
+
+/**
+ * Timing compensation for the `subtitles` filter.
+ *
+ * libass compares the subtitle cue's own timestamps with the video frame's PTS,
+ * so `-itsoffset` on the source input does not move the subtitles with the
+ * picture: a positive A/V offset makes text subtitles appear EARLIER, and the
+ * subtitle delay field has the same inverted effect. The filter chain shifts
+ * the frame timestamps back by the whole offset before libass reads them, then
+ * restores the published timeline afterwards. Frames are not reordered; only
+ * the values libass sees change.
+ */
+function subtitleTimingFilters(offsetSec: number, subDelaySec: number): [string, string] | null {
+  const shift = offsetSec + subDelaySec
+  if (Math.abs(shift) <= 0.0005) return null
+  const value = round2(shift)
+  return [`setpts=PTS-${value}/TB`, `setpts=PTS+${value}/TB`]
 }
 
 /* ------------------------------------------------------------------ *
@@ -419,6 +463,56 @@ function generatedTrackSeconds(remainingSec: number): number {
  * Encoder specific argument groups
  * ------------------------------------------------------------------ */
 
+const H264_PROFILES = new Set(['baseline', 'main', 'high'])
+const HEVC_PROFILES = new Set(['main', 'main10', 'mainstillpicture'])
+
+/**
+ * Profile name the selected encoder will accept.
+ *
+ * `high` is an H.264 profile; passing it to libx265 aborts encoder init with
+ * "unknown profile <high>". The settings field is shared by both codecs, so the
+ * value is normalised here — `high` and `baseline` have no HEVC equivalent and
+ * fall back to `main`, while an unknown value is simply not sent (ffmpeg's own
+ * default is safer than a guessed name).
+ */
+function profileForCodec(v: VideoSettings, spec: EncoderSpec): string {
+  if (!v.profile) return ''
+  if (spec.name === 'libx264') return H264_PROFILES.has(v.profile) ? v.profile : ''
+  if (spec.name === 'libx265') {
+    if (HEVC_PROFILES.has(v.profile)) return v.profile
+    if (v.profile === 'high' || v.profile === 'baseline') return 'main'
+    return ''
+  }
+  return v.profile
+}
+
+/**
+ * Preset name a software encoder will accept.
+ *
+ * `preset` is one field shared by every encoder, and a preset saved under one
+ * encoder can be invalid for another (`p4` is NVENC-only, `8` is SVT-AV1-only).
+ * The UI normalises on an encoder switch, but presets, hand-edited settings and
+ * older files can still deliver the other family; passing it through made
+ * libx264 abort with "preset p4 not found".
+ */
+function softwarePreset(preset: string, encoder: string): string {
+  if (encoder === 'libx264') {
+    const x264Presets = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower']
+    if (x264Presets.includes(preset)) return preset
+    const n = /^p([1-7])$/.exec(preset)
+    if (n) return x264Presets[Math.min(x264Presets.length - 1, Number(n[1]) - 1)]
+    return 'veryfast'
+  }
+  if (encoder === 'libx265') {
+    const x265Presets = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow']
+    if (x265Presets.includes(preset)) return preset
+    const n = /^p([1-7])$/.exec(preset)
+    if (n) return x265Presets[Math.min(x265Presets.length - 1, Number(n[1]) - 1)]
+    return 'medium'
+  }
+  return preset
+}
+
 function pixelFormatFor(v: VideoSettings, spec: EncoderSpec): string {
   const requested = v.pixelFormat || 'yuv420p'
   // Hardware encoders need their own 8-bit surface formats: AMF and QSV take NV12.
@@ -459,10 +553,11 @@ function applyVideoEncoderArgs(
       args.push('-cpu-used', String(Math.max(0, Math.min(8, Number(numeric)))))
       args.push('-usage', 'realtime', '-lag-in-frames', '0')
     } else if (v.preset) {
-      args.push('-preset', v.preset)
+      args.push('-preset', softwarePreset(v.preset, spec.name))
     }
     if (v.tune && spec.name !== 'libsvtav1' && spec.name !== 'libaom-av1') args.push('-tune', v.tune)
-    if (v.profile && (spec.name === 'libx264' || spec.name === 'libx265')) args.push('-profile:v', v.profile)
+    const profile = profileForCodec(v, spec)
+    if (profile && (spec.name === 'libx264' || spec.name === 'libx265')) args.push('-profile:v', profile)
   } else if (spec.kind === 'nvenc') {
     args.push('-preset', /^p[1-7]$/.test(v.preset) ? v.preset : 'p4')
     if (v.profile && spec.name.includes('h264')) args.push('-profile:v', v.profile)
@@ -522,7 +617,7 @@ function applyVideoEncoderArgs(
       args.push('-look_ahead', '0')
     } else if (spec.name === 'libx264' || spec.name === 'libx265') {
       // Full CBR emulation so strict ingest servers stay happy.
-      x264.push('nal-hrd=cbr', 'force-cfr=1')
+      if (spec.name === 'libx264') x264.push('nal-hrd=cbr', 'force-cfr=1')
       if (spec.name === 'libx265') x265.push('strict-cbr=1')
       args.push('-sc_threshold', '0')
     }
@@ -537,18 +632,26 @@ function applyVideoEncoderArgs(
   /* ---- keyframes (kept in one place so nothing overrides the GOP) ---- */
   if (gopFrames > 0) {
     args.push('-g', String(gopFrames), '-keyint_min', String(gopFrames))
-    if (spec.name === 'libx264' || spec.name === 'libx265') {
+    if (spec.name === 'libx264') {
       x264.push(`keyint=${gopFrames}`, `min-keyint=${gopFrames}`, 'scenecut=0')
+      args.push('-sc_threshold', '0')
+    } else if (spec.name === 'libx265') {
+      x265.push(`keyint=${gopFrames}`, `min-keyint=${gopFrames}`, 'scenecut=0')
       args.push('-sc_threshold', '0')
     }
   }
 
   if (spec.name === 'libx264' || spec.name === 'libx265') {
-    x264.push(`bframes=${bf}`, `rc-lookahead=${Math.max(0, Math.min(60, Math.round(fps / 2)))}`)
+    // Each encoder has its own private-option namespace; sending x264's flags to
+    // x265 is accepted but silently ignored ("AVOption x264-params ... has not
+    // been used for any stream"), so B-frames and lookahead never took effect.
+    const lookahead = `rc-lookahead=${Math.max(0, Math.min(60, Math.round(fps / 2)))}`
+    if (spec.name === 'libx264') x264.push(`bframes=${bf}`, lookahead)
+    else x265.push(`bframes=${bf}`, lookahead)
   }
 
   /* ---- private option dictionaries, emitted once ---- */
-  if (x264.length > 0 && (spec.name === 'libx264' || spec.name === 'libx265')) {
+  if (x264.length > 0 && spec.name === 'libx264') {
     args.push('-x264-params', [...new Set(x264)].join(':'))
   }
   if (x265.length > 0 && spec.name === 'libx265') {
@@ -577,12 +680,15 @@ function targetAudioRate(a: AudioSettings): number {
 }
 
 /** Appends audio encoder args, returns the ffmpeg encoder name used. */
-function applyAudioArgs(args: string[], a: AudioSettings, filters: string[], sourceChannels: number): string {
+function applyAudioArgs(args: string[], a: AudioSettings, filters: string[]): string {
   const enc = audioEncoderName(a)
   const targetRate = targetAudioRate(a)
   const targetCh = targetAudioChannels(a)
 
-  if (sourceChannels > targetCh && targetCh === 1) filters.push('pan=mono|c0=0.5*c0+0.5*c1')
+  // Channel layout conversion is left to aresample/aformat plus the `-ac`
+  // below. A hand-written `pan=mono|c0=0.5*c0+0.5*c1` downmix discarded the
+  // centre channel, so 5.1 dialogue (which lives in the centre) nearly vanished
+  // on a mono target; ffmpeg's default downmix includes it.
   if (enc === 'libopus') filters.push('aresample=48000')
   else filters.push(`aresample=${targetRate}`)
   if (enc === 'aac' || enc === 'libmp3lame') {
@@ -605,11 +711,54 @@ function applyAudioArgs(args: string[], a: AudioSettings, filters: string[], sou
  * the video track is dropped or left undecodable, so the user must be told
  * rather than left guessing why the picture is black.
  */
-function flvCodecWarning(codec: VideoCodecName, container: ContainerName | null, t: Translate<TranslationKey>): string | null {
-  if (container !== 'flv') return null
+function flvCodecWarning(codec: string | undefined, container: ContainerName | null, t: Translate<TranslationKey>): string | null {
+  if (container !== 'flv' || !codec) return null
   if (codec === 'hevc') return t('main.cmd.hevcEnhancedRtmp')
   if (codec === 'av1') return t('main.cmd.av1EnhancedRtmp')
   return null
+}
+
+/** The codec that will actually be written, following a `copy` back to its source. */
+function effectiveVideoCodec(v: VideoSettings, videoIn: MediaStreamInfo | undefined): string {
+  return v.codec === 'copy' ? (videoIn?.codec ?? 'copy') : v.codec
+}
+
+/** Same for audio: a copied track keeps the source codec, not the word `copy`. */
+function effectiveAudioCodec(a: AudioSettings, audioIn: MediaStreamInfo | undefined): string {
+  return a.codec === 'copy' ? (audioIn?.codec ?? 'copy') : a.codec
+}
+
+/**
+ * Codec combinations that fail (or lose a track) at the muxer, reported before
+ * the stream starts. `copy` is the case that used to slip through: the warnings
+ * were built from the settings word "copy", which never matches a codec name,
+ * while the muxer sees the real source codec.
+ */
+function copyCodecWarnings(
+  v: VideoSettings,
+  a: AudioSettings,
+  videoIn: MediaStreamInfo | undefined,
+  audioIn: MediaStreamInfo | undefined,
+  container: ContainerName | null,
+  t: Translate<TranslationKey>
+): string[] {
+  const warnings: string[] = []
+  if (v.codec === 'copy' && videoIn) {
+    const codec = videoIn.codec.toLowerCase()
+    if (container === 'flv' && codec !== 'h264' && codec !== 'hevc' && codec !== 'av1') {
+      warnings.push(t('main.cmd.copyVideoUnsupported', { codec: videoIn.codec, container: 'FLV' }))
+    }
+    if (container === 'mpegts' && codec === 'av1') {
+      warnings.push(t('main.cmd.av1NotTs'))
+    }
+  }
+  if (a.codec === 'copy' && audioIn) {
+    const codec = audioIn.codec.toLowerCase()
+    if (container === 'flv' && codec !== 'aac' && codec !== 'mp3' && codec !== 'opus') {
+      warnings.push(t('main.cmd.copyAudioUnsupported', { codec: audioIn.codec, container: 'FLV' }))
+    }
+  }
+  return warnings
 }
 
 /**
@@ -622,13 +771,13 @@ function flvCodecWarning(codec: VideoCodecName, container: ContainerName | null,
  */
 function whipCodecWarning(
   protocol: StreamProtocol | undefined,
-  v: VideoSettings,
-  a: AudioSettings,
+  videoCodec: string,
+  audioCodec: string,
   t: Translate<TranslationKey>
 ): string | null {
   if ((protocol ?? DEFAULT_STREAM_PROTOCOL) !== 'whip') return null
-  if (v.codec !== 'h264') return t('main.cmd.whipNeedsH264')
-  if (a.codec !== 'libopus' && a.codec !== 'none') return t('main.cmd.whipNeedsOpus')
+  if (videoCodec !== 'h264') return t('main.cmd.whipNeedsH264')
+  if (audioCodec !== 'libopus' && audioCodec !== 'opus' && audioCodec !== 'none') return t('main.cmd.whipNeedsOpus')
   return null
 }
 
@@ -699,16 +848,12 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     ? track.family === 'text' || (track.family === 'unknown' && !/(pgs|dvd|dvb|xsub|hdmv)/i.test(track.codec))
     : false
   const hasExternalSub = track?.source === 'external' && !!track.path
-  const burnBitmapExternal = mode === 'burn' && !!track && !isTextTrack && hasExternalSub && !copyVideo && !!videoIn
 
   /* ---------------- timestamp offsets ---------------- */
   const avOffset = item.syncOffsetSec || 0
   const subDelay = item.subtitleDelaySec || 0
-  // Embedded subtitle streams ride inside input 0, so their delay folds into the A/V offset.
-  // A single `-itsoffset` shifts video, audio and embedded subtitles together; a
-  // negative value simply drops the leading frames.
-  const internalOffset = avOffset + subDelay
-  const hasOffset = Math.abs(internalOffset) > 0.0005
+  const hasAvOffset = Math.abs(avOffset) > 0.0005
+  const hasSubDelay = Math.abs(subDelay) > 0.0005
 
   /* ---------------- inputs ---------------- */
   const args: string[] = ['-hide_banner', '-nostdin', '-loglevel', 'info']
@@ -720,35 +865,26 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     args.push('-ss', String(round2(startPos)))
     summary.push(t('main.cmd.summaryStart', { time: round2(startPos) }))
   }
-  if (hasOffset) {
-    // `-itsoffset` shifts video, audio and embedded subtitles together.
-    // Measured behaviour (no `-copyts`): a negative offset trims the head and the
-    // stream still starts at 0; a positive offset delays everything, so the muxed
-    // stream opens with that much empty timeline before the first frame.
-    args.push('-itsoffset', String(round2(internalOffset)))
-    summary.push(t('main.cmd.summaryOffset', { time: round2(internalOffset) }))
-    if (internalOffset > 0) {
-      warnings.push(t('main.cmd.offsetPositive', { sec: round2(internalOffset) }))
-    }
+  if (hasAvOffset) {
+    // `-itsoffset` shifts the audio/video timeline. Measured behaviour (no
+    // `-copyts`): a negative offset trims the head and the stream still starts at
+    // 0; a positive offset delays everything, so the muxed stream opens with that
+    // much empty timeline before the first frame.
+    args.push('-itsoffset', String(round2(avOffset)))
+    summary.push(t('main.cmd.summaryOffset', { time: round2(avOffset) }))
+    if (avOffset > 0) warnings.push(t('main.cmd.offsetPositive', { sec: round2(avOffset) }))
   }
+  if (hasSubDelay) summary.push(t('main.cmd.summarySubtitleOffset', { time: round2(subDelay) }))
   args.push('-fflags', '+genpts', '-i', item.path)
 
-  let externalSubInput = -1
-  if (mode === 'burn' && track && hasExternalSub) {
-    // The sidecar carries the same shift so it stays aligned with the video.
-    if (hasOffset) args.push('-itsoffset', String(round2(internalOffset)))
-    args.push('-i', track.path!)
-    externalSubInput = 1
-    summary.push(
-      t('main.cmd.summaryExternalSub', {
-        mode: t(isTextTrack ? 'main.cmd.subModeBurn' : 'main.cmd.subModeOverlay'),
-        name: path.basename(track.path!)
-      })
-    )
+  if (mode === 'burn' && track && hasExternalSub && isTextTrack) {
+    // libass opens the sidecar itself; there is no subtitle input in the
+    // filtergraph. The sidecar is only described here.
+    summary.push(t('main.cmd.summaryExternalSub', { mode: t('main.cmd.subModeBurn'), name: path.basename(track.path!) }))
   }
 
   /*
-   * Generated tracks go LAST, after the file and the sidecar.
+   * Generated tracks go after the file.
    *
    * Every `-map` names the file as input 0, and keeping that numbering stable is what
    * makes the stream indexes in the log mean "this stream of this file" rather than
@@ -756,16 +892,16 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
    */
   let blackVideoInput = -1
   let silentAudioInput = -1
-  let nextInput = externalSubInput >= 0 ? 2 : 1
+  let nextInput = 1
   const generatedSec = generatedTrackSeconds(remaining)
   if (blackSource) {
     blackVideoInput = nextInput++
-    args.push(...generatedInputArgs(blackSource.source, generatedSec, out.realtimePacing, internalOffset))
+    args.push(...generatedInputArgs(blackSource.source, generatedSec, out.realtimePacing, avOffset))
     summary.push(t('main.cmd.summaryBlackVideo'))
   }
   if (silentAudio) {
     silentAudioInput = nextInput++
-    args.push(...generatedInputArgs(silentAudioSource(a), generatedSec, out.realtimePacing, internalOffset))
+    args.push(...generatedInputArgs(silentAudioSource(a), generatedSec, out.realtimePacing, avOffset))
     summary.push(t('main.cmd.summarySilentAudio'))
   }
 
@@ -792,25 +928,38 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
 
   /* Burn-in runs last so font sizes match the output resolution. */
   let burnText = false
-  if (mode === 'burn' && track && isTextTrack) {
+  if (mode === 'burn' && track) {
     if (copyVideo) {
       warnings.push(t('main.cmd.copyCannotBurn'))
-    } else {
+    } else if (isTextTrack) {
       const burn = resolveTextBurnSource(media, item.path, track)
       if (burn) {
+        // libass reads the cue times itself; the A/V input shift must be undone
+        // for it (and the subtitle delay added) or text subtitles move in the
+        // opposite direction from the one the field promises.
+        const timing = subtitleTimingFilters(avOffset, subDelay)
+        if (timing) filters.push(timing[0])
         filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
+        if (timing) filters.push(timing[1])
         burnText = true
-      } else {
-        warnings.push(burnSourceMissingWarning(track, t))
-      }
-      if (burnText) {
         summary.push(
           `${t('main.cmd.summaryBurn')}${track.source === 'embedded' ? t('main.cmd.summaryBurnEmbedded', { n: track.streamIndex ?? '?' }) : ''}`
         )
+      } else {
+        warnings.push(burnSourceMissingWarning(track, t))
       }
+    } else if (track.source === 'embedded') {
+      // PGS/DVD/DVB are subtitle streams, not video streams: the old `[1:v]`
+      // overlay could never initialize. Be explicit instead of failing mid-encode.
+      warnings.push(t('main.cmd.embeddedBitmapNoBurn'))
+    } else {
+      warnings.push(t('main.cmd.externalBitmapNoBurn'))
     }
-  } else if (mode === 'burn' && track && !isTextTrack && !hasExternalSub && !copyVideo) {
-    warnings.push(t('main.cmd.embeddedBitmapNoBurn'))
+  }
+  if (hasSubDelay && mode !== 'off' && track && (mode === 'copy' || !isTextTrack || copyVideo)) {
+    // Copied subtitle packets keep their original timestamps, and a bitmap
+    // subtitle is not rendered by libass, so neither can carry the delay.
+    warnings.push(t('main.cmd.subDelayIgnored'))
   }
 
   const videoFilterChain = filters.join(',')
@@ -820,13 +969,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   // Streams are mapped by their absolute ffprobe index, not by `0:v:0`-style
   // specifiers: the first video stream can be cover art (attached_pic) while
   // `pickBest` selected the real track, and the two must not diverge.
-  if (burnBitmapExternal) {
-    const base = videoFilterChain || 'null'
-    const graph = `[0:${videoIn!.index}]${base}[vbase];[vbase][${externalSubInput}:v]overlay=eof_action=pass:repeatlast=0[vout]`
-    args.push('-filter_complex', graph)
-    args.push('-map', '[vout]')
-    summary.push(t('main.cmd.summaryBitmapOverlay'))
-  } else if (videoIn) {
+  if (videoIn) {
     args.push('-map', `0:${videoIn.index}`)
     if (videoFilterChain) args.push('-vf', videoFilterChain)
   } else if (blackVideoInput >= 0) {
@@ -839,9 +982,12 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   /* ---------------- video encoder ---------------- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
   let vencName = 'copy'
-  const flvWarn = flvCodecWarning(v.codec, effContainer, t)
+  const effectiveVideo = effectiveVideoCodec(v, videoIn)
+  const effectiveAudio = effectiveAudioCodec(a, audioIn)
+  const flvWarn = flvCodecWarning(effectiveVideo, effContainer, t)
   if (flvWarn) warnings.push(flvWarn)
-  const whipWarn = whipCodecWarning(protocol, v, a, t)
+  for (const w of copyCodecWarnings(v, a, videoIn, audioIn, effContainer, t)) warnings.push(w)
+  const whipWarn = whipCodecWarning(protocol, effectiveVideo, effectiveAudio, t)
   if (whipWarn) warnings.push(whipWarn)
 
   if (copyVideo) {
@@ -897,7 +1043,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
     // the channel count the settings ask for: claiming the source's would call for a
     // `pan` downmix from channels that do not exist.
     const sourceChannels = audioIn ? audioIn.channels ?? 2 : targetAudioChannels(a)
-    aencName = applyAudioArgs(args, a, audioFilters, sourceChannels)
+    aencName = applyAudioArgs(args, a, audioFilters)
     const avLayout = sourceChannels === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
     summary.push(
       t('main.cmd.summaryAudio', {
@@ -910,24 +1056,29 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
-  if (effContainer === 'flv' && aencName === 'libopus') {
+  if (effContainer === 'flv' && (effectiveAudio === 'libopus' || effectiveAudio === 'opus')) {
     warnings.push(t('main.cmd.opusInFlv'))
   }
-  if (effContainer === 'mpegts' && aencName === 'aac') args.push('-bsf:a', 'aac_adtstoasc')
 
   /* ---------------- subtitle handling result ---------------- */
   let subtitleApplied: SubtitleApplication = 'none'
   if (mode === 'burn' && track && !copyVideo) {
     if (burnText) subtitleApplied = 'burn-text'
-    else if (burnBitmapExternal) subtitleApplied = 'burn-bitmap'
   } else if (mode === 'copy' && track) {
+    const supportsSubtitleTrack = effContainer === 'mpegts' || effContainer === 'mkv'
     if (!isTextTrack) {
       warnings.push(t('main.cmd.bitmapNoCopy'))
-    } else if (track.source === 'embedded') {
-      args.push('-map', `0:${track.streamIndex}`, '-c:s', 'copy')
-      subtitleApplied = 'copy'
-      summary.push(t('main.cmd.summarySubCopy'))
-      if (effContainer === 'flv') warnings.push(t('main.cmd.flvNoSubtitleTrack'))
+    } else if (track.source === 'embedded' && track.streamIndex !== undefined) {
+      if (supportsSubtitleTrack) {
+        args.push('-map', `0:${track.streamIndex}`, '-c:s', 'copy')
+        subtitleApplied = 'copy'
+        summary.push(t('main.cmd.summarySubCopy'))
+      } else {
+        // FLV cannot carry a subtitle track at all; mapping one made ffmpeg fail
+        // while opening the muxer ("Could not write header") and the whole push
+        // never started. RTSP/WHIP have no subtitle container either.
+        warnings.push(t('main.cmd.flvNoSubtitleTrack'))
+      }
     } else {
       warnings.push(t('main.cmd.externalSubNoTrack'))
     }
@@ -944,7 +1095,7 @@ export function buildStreamCommand(req: BuildRequest): BuiltCommand {
   if (out.dropLateFrames) args.push('-fflags', '+genpts+igndts', '-max_delay', '0')
   args.push('-max_interleave_delta', '0')
   if (effContainer === 'flv') args.push('-flvflags', 'no_duration_filesize')
-  if (out.extraOutputArgs.trim()) args.push(...out.extraOutputArgs.trim().split(/\s+/))
+  if (out.extraOutputArgs.trim()) args.push(...splitOutputArgs(out.extraOutputArgs))
   args.push('-progress', 'pipe:1', '-nostats')
 
   const target = req.outputOverride ?? buildPushTarget(out.server, out.streamKey, protocol)
@@ -1015,6 +1166,12 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
    * publisher is the one paced at 1x), so the stand-in must not introduce a difference
    * the real tracks do not have.
    */
+  /* ---- timestamp offsets ---- */
+  const avOffset = item.syncOffsetSec || 0
+  const subDelay = item.subtitleDelaySec || 0
+  const hasAvOffset = Math.abs(avOffset) > 0.0005
+  const hasSubDelay = Math.abs(subDelay) > 0.0005
+
   const inputs: string[] = []
   // The source file is input 0; the caller adds these groups in order after it.
   let nextInput = 1
@@ -1027,12 +1184,12 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   const generatedSec = generatedTrackSeconds(totalDuration > 0 ? Math.max(0, totalDuration - startPos) : 0)
   if (blackSource) {
     blackVideoInput = nextInput++
-    inputs.push(...generatedInputArgs(blackSource.source, generatedSec, false, 0))
+    inputs.push(...generatedInputArgs(blackSource.source, generatedSec, false, avOffset))
     summary.push(t('main.cmd.summaryBlackVideo'))
   }
   if (silentAudio) {
     silentAudioInput = nextInput++
-    inputs.push(...generatedInputArgs(silentAudioSource(a), generatedSec, false, 0))
+    inputs.push(...generatedInputArgs(silentAudioSource(a), generatedSec, false, avOffset))
     summary.push(t('main.cmd.summarySilentAudio'))
   }
 
@@ -1051,11 +1208,6 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
     ? track.family === 'text' || (track.family === 'unknown' && !/(pgs|dvd|dvb|xsub|hdmv)/i.test(track.codec))
     : false
 
-  const avOffset = item.syncOffsetSec || 0
-  const subDelay = item.subtitleDelaySec || 0
-  const internalOffset = avOffset + subDelay
-  const hasOffset = Math.abs(internalOffset) > 0.0005
-
   const filters: string[] = []
   const scaleFilter = resolveScaleFilter(v)
   const sourceFps = videoIn?.fps ?? blackSource?.fps ?? 0
@@ -1071,24 +1223,42 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
     }
   }
 
-  let burnText = false
-  if (mode === 'burn' && track && isTextTrack && !copyVideo) {
-    const burn = resolveTextBurnSource(media, item.path, track)
-    if (burn) {
-      filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
-      burnText = true
+  if (mode === 'burn' && track) {
+    if (copyVideo) {
+      warnings.push(t('main.cmd.copyCannotBurn'))
+    } else if (isTextTrack) {
+      const burn = resolveTextBurnSource(media, item.path, track)
+      if (burn) {
+        // Same compensation as the single-process builder: the pass input is
+        // shifted by `avOffset` and libass reads unshifted cue times.
+        const timing = subtitleTimingFilters(avOffset, subDelay)
+        if (timing) filters.push(timing[0])
+        filters.push(subtitlesFilterArg(burn.filename, burn.streamIndex, sub))
+        if (timing) filters.push(timing[1])
+        summary.push(
+          `${t('main.cmd.summaryBurn')}${track.source === 'embedded' ? t('main.cmd.summaryBurnEmbedded', { n: track.streamIndex ?? '?' }) : ''}`
+        )
+      } else {
+        warnings.push(burnSourceMissingWarning(track, t))
+      }
     } else {
-      warnings.push(burnSourceMissingWarning(track, t))
-    }
-    if (burnText) {
-      summary.push(
-        `${t('main.cmd.summaryBurn')}${track.source === 'embedded' ? t('main.cmd.summaryBurnEmbedded', { n: track.streamIndex ?? '?' }) : ''}`
-      )
+      warnings.push(t(track.source === 'embedded' ? 'main.cmd.embeddedBitmapNoBurn' : 'main.cmd.externalBitmapNoBurn'))
     }
   }
-  if (hasOffset && internalOffset > 0) {
-    warnings.push(t('main.cmd.offsetPositive', { sec: round2(internalOffset) }))
+  if (mode === 'copy' && track) {
+    // The encoder writes MPEG-TS, but the publisher decides the final container
+    // and cannot pass a subtitle track through FLV. Copying is not implemented
+    // in the buffered pipeline; say so instead of dropping it silently.
+    warnings.push(t(track.source === 'embedded' && isTextTrack ? 'main.cmd.subCopyBuffered' : isTextTrack ? 'main.cmd.externalSubNoTrack' : 'main.cmd.bitmapNoCopy'))
   }
+  if (hasSubDelay && mode !== 'off' && track && (mode === 'copy' || !isTextTrack || copyVideo)) {
+    warnings.push(t('main.cmd.subDelayIgnored'))
+  }
+  if (hasAvOffset && avOffset > 0) {
+    warnings.push(t('main.cmd.offsetPositive', { sec: round2(avOffset) }))
+  }
+  if (hasAvOffset) summary.push(t('main.cmd.summaryOffset', { time: round2(avOffset) }))
+  if (hasSubDelay) summary.push(t('main.cmd.summarySubtitleOffset', { time: round2(subDelay) }))
 
   /* ---- mapping ---- */
   if (videoIn) {
@@ -1104,9 +1274,12 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   /* ---- video encoder ---- */
   const spec: EncoderSpec = copyVideo ? { name: 'copy', kind: 'copy' } : encoderArgFor(v.encoder, v.codec, available)
   const effContainer = containerForProtocol(out.protocol)
-  const flvWarn = flvCodecWarning(v.codec, effContainer, t)
+  const effectiveVideo = effectiveVideoCodec(v, videoIn)
+  const effectiveAudio = effectiveAudioCodec(a, audioIn)
+  const flvWarn = flvCodecWarning(effectiveVideo, effContainer, t)
   if (flvWarn) warnings.push(flvWarn)
-  const whipWarn = whipCodecWarning(out.protocol, v, a, t)
+  for (const w of copyCodecWarnings(v, a, videoIn, audioIn, effContainer, t)) warnings.push(w)
+  const whipWarn = whipCodecWarning(out.protocol, effectiveVideo, effectiveAudio, t)
   if (whipWarn) warnings.push(whipWarn)
   if (copyVideo) {
     if (videoIn) {
@@ -1145,7 +1318,7 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
       summary.push(t('main.cmd.summaryLoudnorm'))
     }
     const sourceChannels = audioIn ? audioIn.channels ?? 2 : targetAudioChannels(a)
-    const enc = applyAudioArgs(args, a, audioFilters, sourceChannels)
+    const enc = applyAudioArgs(args, a, audioFilters)
     const copyLayout = sourceChannels === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
     summary.push(
       t('main.cmd.summaryAudio', {
@@ -1164,6 +1337,7 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   return {
     args,
     inputs,
+    inputOffsetSec: avOffset,
     summary,
     warnings,
     vencName: copyVideo ? 'copy' : spec.name,
@@ -1173,9 +1347,66 @@ export function buildEncoderArgs(req: Omit<BuildRequest, 'outputOverride'>): Bui
   }
 }
 
+/**
+ * Splits the "extra output arguments" field into an argv vector.
+ *
+ * A plain `trim().split(/\s+/)` cannot express a value with a space in it
+ * (`-metadata title="My Stream"` became three tokens, the last of which ffmpeg
+ * treated as the output URL). Quotes group a token; a backslash escapes the next
+ * character only when it would otherwise separate or quote, so Windows paths are
+ * left alone.
+ */
+export function splitOutputArgs(input: string): string[] {
+  const text = (input ?? '').trim()
+  if (!text) return []
+  const out: string[] = []
+  let current = ''
+  let token = false
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (quote) {
+      if (ch === quote) {
+        quote = null
+        token = true
+        continue
+      }
+      if (ch === '\\' && quote === '"' && (text[i + 1] === '"' || text[i + 1] === '\\')) {
+        current += text[(i += 1)]
+        token = true
+        continue
+      }
+      current += ch
+      token = true
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      token = true
+      continue
+    }
+    if (/\s/.test(ch)) {
+      if (token) {
+        out.push(current)
+        current = ''
+        token = false
+      }
+      continue
+    }
+    if (ch === '\\' && /[\s"'\\]/.test(text[i + 1] ?? '')) {
+      current += text[(i += 1)]
+      token = true
+      continue
+    }
+    current += ch
+    token = true
+  }
+  if (token) out.push(current)
+  return out
+}
+
 /** Quote an argument vector for display / copy-paste. */
-export function buildCommandLine(bin: string, args: string[]): string {
-  const quote = (s: string): string => {
+export function buildCommandLine(bin: string, args: string[]): string {  const quote = (s: string): string => {
     if (s === '') return '""'
     if (!/[\s"'\\$`|&<>^]/.test(s)) return s
     return `"${s.replace(/"/g, '\\"')}"`
@@ -1293,7 +1524,7 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
     ? encoderArgFor('x264', 'h264', available)
     : encoderArgFor(v.encoder, v.codec, available)
   args.push('-c:v', spec.name, '-pix_fmt', pixelFormatFor(v, spec))
-  applyVideoEncoderArgs(args, v, spec, fps, out.container)
+  applyVideoEncoderArgs(args, v, spec, fps, effContainer)
   if (v.repeatHeaders && flv) args.push('-flags', '+cgop')
   if (wantsCopy) {
     notes.push(t('main.cmd.testCopyVideoNote'))
@@ -1317,9 +1548,14 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
     // No audio track at all: the test must push what the stream would push.
     summary.push(t('main.cmd.testNoAudio'))
   } else {
-    // The sine source is a single channel, which is what `applyAudioArgs` needs to
-    // know before it decides whether a `pan` downmix is required.
-    const enc = applyAudioArgs(args, a, audioFilters, 1)
+    // Same filter order as the real command: loudnorm measures the decoded input,
+    // so it has to run before the resample/format conversion.
+    if (a.loudnorm) {
+      audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
+      summary.push(t('main.cmd.summaryLoudnorm'))
+    }
+    // The sine source is a single channel; the target layout is applied below.
+    const enc = applyAudioArgs(args, a, audioFilters)
     if (a.codec === 'copy') {
       notes.push(t('main.cmd.testCopyAudioNote'))
     }
@@ -1327,10 +1563,6 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
     const layout = Math.max(1, Math.min(2, a.channels || 2)) === 1 ? t('main.cmd.testMono') : t('main.cmd.testStereo')
     const bitrate = a.rateControl === 'vbr' && enc !== 'libopus' ? 'VBR' : `${a.bitrateKbps}kbps`
     summary.push(t('main.cmd.summaryAudio', { encoder: enc, bitrate, rate, layout }))
-    if (a.loudnorm) {
-      audioFilters.push('loudnorm=I=-16:TP=-1.5:LRA=11')
-      summary.push(t('main.cmd.summaryLoudnorm'))
-    }
   }
   if (audioFilters.length > 0) args.push('-af', audioFilters.join(','))
 
@@ -1343,9 +1575,17 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
    */
   const codecWarning = flvCodecWarning(wantsCopy ? 'h264' : v.codec, effContainer, t)
   if (codecWarning) notes.push(codecWarning)
-  const whipWarn = whipCodecWarning(protocol, { ...v, codec: wantsCopy ? 'h264' : v.codec }, a, t)
+  const whipWarn = whipCodecWarning(
+    protocol,
+    wantsCopy ? 'h264' : v.codec,
+    a.codec === 'copy' ? 'aac' : a.codec,
+    t
+  )
   if (whipWarn) notes.push(whipWarn)
   if (flv && a.codec === 'libopus') notes.push(t('main.cmd.opusInFlv'))
+  // The test pattern has no subtitle track and no real source geometry: burning or
+  // copying subtitles is not exercised by this command, and the result must say so.
+  if (settings.subtitles.mode !== 'off') notes.push(t('main.cmd.testNoSubtitlesNote'))
 
   /* ---------------- muxing / destination ---------------- */
   /*
@@ -1355,7 +1595,7 @@ export function buildTestCommand(settings: SessionSettings, url: string, streamK
    * the flag twice and let the last one win — here the user's text is the only copy,
    * so the test command stays readable when it is the thing being inspected.
    */
-  const extra = out.extraOutputArgs.trim() ? out.extraOutputArgs.trim().split(/\s+/) : []
+  const extra = splitOutputArgs(out.extraOutputArgs)
   const mentions = (flag: string): boolean => extra.includes(flag)
   if (!mentions('-max_interleave_delta')) args.push('-max_interleave_delta', '0')
   if (flv && !mentions('-flvflags')) args.push('-flvflags', 'no_duration_filesize')

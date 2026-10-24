@@ -87,13 +87,10 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
   }, [])
 
   const resolveTarget = useCallback(
-    (frac: number): { itemId: string; positionSec: number; name: string; time: number } | null => {
+    (frac: number): { itemId: string; name: string } | null => {
       if (segments.length === 0) return null
       const seg = segments.find((s) => frac >= s.start && frac < s.end) ?? segments[segments.length - 1]
-      const width = Math.max(1e-6, seg.end - seg.start)
-      const within = Math.max(0, Math.min(1, (frac - seg.start) / width))
-      const position = within * (seg.duration || 0)
-      return { itemId: seg.item.id, positionSec: position, name: seg.item.name, time: position }
+      return { itemId: seg.item.id, name: seg.item.name }
     },
     [segments]
   )
@@ -126,9 +123,25 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
   }, [fractionFromEvent, items, onJumpToItem, resolveTarget, status.currentIndex])
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>): void => {
-    if (disabled || segments.length === 0) return
+    if (disabled || segments.length === 0 || e.button !== 0) return
+    e.preventDefault()
+    // Pointer capture keeps `pointerup` coming to this element even when the
+    // pointer leaves the window, so releasing outside cannot leave the bar stuck
+    // in its dragging state.
+    e.currentTarget.setPointerCapture?.(e.pointerId)
     draggingRef.current = true
     setDragFraction(fractionFromEvent(e.clientX))
+  }
+
+  /** Keyboard equivalent of dragging: move one entry per arrow press. */
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>): void => {
+    if (disabled || segments.length === 0) return
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    e.preventDefault()
+    const current = segments.findIndex((s) => s.item.id === items[status.currentIndex]?.id)
+    const from = current >= 0 ? current : 0
+    const next = e.key === 'ArrowLeft' ? Math.max(0, from - 1) : Math.min(items.length - 1, from + 1)
+    if (next !== from) onJumpToItem(items[next].id)
   }
 
   const preview = resolveTarget(hoverFraction ?? 0)
@@ -143,12 +156,17 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
           onPointerDown={onPointerDown}
           onPointerMove={(e) => !draggingRef.current && setHoverFraction(fractionFromEvent(e.clientX))}
           onPointerLeave={() => setHoverFraction(null)}
+          onLostPointerCapture={() => {
+            draggingRef.current = false
+            setDragFraction(null)
+          }}
+          onKeyDown={onKeyDown}
           title={disabled ? t('timeline.emptyTitle') : t('timeline.dragHint')}
           role="slider"
           aria-label={t('timeline.progressAria')}
           aria-valuemin={0}
           aria-valuemax={Math.round(totalDuration)}
-          aria-valuenow={Math.round(status.completedSec)}
+          aria-valuenow={Math.min(Math.round(status.completedSec), Math.round(totalDuration))}
           tabIndex={0}
         >
           {segments.map((seg, idx) => {
@@ -159,7 +177,6 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
                 key={seg.item.id}
                 className={`timeline-seg st-${st}${isCurrent ? ' current' : ''}`}
                 style={{ left: `${seg.start * 100}%`, width: `${Math.max(0, (seg.end - seg.start) * 100)}%` }}
-                title={t('timeline.segment', { name: seg.item.name, duration: formatDuration(seg.duration) })}
               />
             )
           })}
@@ -184,13 +201,11 @@ export default function Timeline({ items, status, onJumpToItem, disabled }: Time
           {preview && dragFraction === null && hoverFraction !== null && (
             <div className="timeline-tooltip" style={{ left: `${hoverFraction * 100}%` }}>
               <div className="tt-name">{preview.name}</div>
-              <div className="tt-time mono">{formatDuration(preview.time)}</div>
             </div>
           )}
           {preview && dragFraction !== null && (
             <div className="timeline-tooltip dragging" style={{ left: `${dragFraction * 100}%` }}>
               <div className="tt-name">{preview.name}</div>
-              <div className="tt-time mono">{formatDuration(preview.time)}</div>
             </div>
           )}
         </div>

@@ -135,10 +135,10 @@ export interface EncoderPass {
   args: string[]
   /** Where to start inside the source, in seconds. */
   startPositionSec: number
+  /** A/V offset applied to the source input (`-itsoffset`), in seconds. */
+  inputOffsetSec?: number
   /** Timeline value the pass must start at, so the published stream stays continuous. */
   tsOffset: number
-  /** Expected amount of material, used only for logging. */
-  expectedSec: number
   /**
    * Identity of this pass, assigned by {@link Playout.startEncoder}.
    *
@@ -148,14 +148,6 @@ export interface EncoderPass {
    * one. Callers leave this unset.
    */
   seq?: number
-  /**
-   * Set when this pass is being killed to make room for another one.
-   *
-   * Its output is discarded with the buffer, so it must report nothing at all — not
-   * even "the pass completed", which the engine would otherwise read as the queue
-   * having finished. Callers leave this unset.
-   */
-  abandoned?: boolean
 }
 
 const FFMPEG_INPUT_SEEK = '-ss'
@@ -266,13 +258,20 @@ function sweepStaleTempDirs(): void {
   }
 }
 
-sweepStaleTempDirs()
+/**
+ * Whether the one-time sweep of old scratch folders has run.
+ *
+ * It used to run at module load, which meant a synchronous `readdirSync` plus a
+ * `statSync` per candidate before the application had started doing anything. It
+ * is deferred to the first playout instead: that is the first moment a scratch
+ * folder can exist, and it is once per process either way.
+ */
+let staleTempDirsSwept = false
 
 /** Rounds a pass offset up to the millisecond ffmpeg is given, plus the margin. */
 function passStartOffset(tsOffset: number): number {
   return Math.ceil((tsOffset + PASS_SPLICE_MARGIN_SEC) * 1000) / 1000
 }
-
 export class Playout {
   private readonly ffmpegPath: string
   private readonly outputArgs: string[]
@@ -350,10 +349,17 @@ export class Playout {
   private pusherLastReportAt = 0
   /** True once the "publisher has gone quiet" warning was written for this silence. */
   private pusherSilenceReported = false
+  /** Periodic health/silence check, independent of publisher progress. */
+  private healthTimer: NodeJS.Timeout | null = null
   /**
-   * True while the publisher is being stopped on purpose (see `stopPusher`).
+   * Monotonic identity of the current publish session.
+   *
+   * The head start is an `await`, and a skip/jump/stop can happen inside it. The
+   * old `start()` only re-checked `stopping` (which `restartSession` sets back to
+   * false), so it woke up and started a second publisher on the same key. Every
+   * start/restart/stop bumps this; a waiting start whose epoch is stale exits.
    */
-  private suppressPusherExit = false
+  private epoch = 0
   private pusherProgressBuf = ''
   private encoderProgressBuf = ''
   /** Bytes accepted from the encoder but not yet taken by the publisher. */
@@ -372,9 +378,13 @@ export class Playout {
    * a skip: 50s published against 35s encoded), this says which side invented the
    * difference. Diag only — nothing depends on it.
    */
-  private tsPts = { pass: 0, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
+  private tsPts = { first: NaN, last: NaN, packets: 0, videoHeaders: 0 }
 
   constructor(ffmpegPath: string, outputArgs: string[], leadLimitSec: number, callbacks: PlayoutCallbacks) {
+    if (!staleTempDirsSwept) {
+      staleTempDirsSwept = true
+      sweepStaleTempDirs()
+    }
     this.ffmpegPath = ffmpegPath
     this.outputArgs = outputArgs
     this.leadLimitSec = Math.max(0, leadLimitSec)
@@ -408,6 +418,8 @@ export class Playout {
     // handle would silently swallow every later pass, because the encoder writes
     // into a pipe whose reader is gone.
     if (this.isPusherRunning()) return
+    this.epoch += 1
+    const epoch = this.epoch
     this.pusher = null
     this.stopping = false
     // A session is being opened: from here until the publisher exists, "no pusher yet"
@@ -422,7 +434,10 @@ export class Playout {
     // encoder come up to speed.
     const waitMs = retry ? PUSHER_HEAD_START_RETRY_MS : PUSHER_HEAD_START_MS
     await new Promise<void>((resolve) => setTimeout(resolve, waitMs))
-    if (this.stopping) return
+    // A stop, a skip/jump restart or another start may have happened during the head
+    // start. `stopping` alone is not enough: `restartSession` clears it again before
+    // calling here, which is how the old start woke up and created a second publisher.
+    if (this.stopping || epoch !== this.epoch) return
     this.startPusher()
   }
 
@@ -455,6 +470,12 @@ export class Playout {
    */
   async restartSession(pass: EncoderPass): Promise<void> {
     /*
+     * Invalidate a head start that is still waiting from the previous start, and do
+     * it before the first await: that timer is exactly what used to create a second
+     * publisher behind the new one.
+     */
+    this.epoch += 1
+    /*
      * The encoder goes first, before anything is awaited.
      *
      * Killing it is what makes the abandoned file stop being relayed and, just as
@@ -463,7 +484,7 @@ export class Playout {
      * "pass complete" would be attributed to the pass that replaced it, advancing
      * the timeline by the wrong amount and marking the wrong playlist entry done.
      */
-    this.killEncoder(true)
+    this.killEncoder()
     // Forced: the buffered audio/video is being thrown away, so there is nothing to
     // flush and no reason to wait for the publisher to end the session politely.
     await this.stopPusher(true)
@@ -480,7 +501,7 @@ export class Playout {
     this.networkRate.reset()
     this.pusherSentBytes = 0
     this.passMaterial.clear()
-    this.tsPts = { pass: 0, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
+    this.tsPts = { first: NaN, last: NaN, packets: 0, videoHeaders: 0 }
     this.stopping = false
     this.callbacks.log('info', this.t('main.engine.bufferDropped'))
     await this.start(pass, true)
@@ -488,7 +509,9 @@ export class Playout {
 
   /** Stops both processes and removes the buffer directory. */
   async stop(): Promise<void> {
+    this.epoch += 1
     this.stopping = true
+    this.clearHealthTimer()
     this.killEncoder()
     await this.stopPusher()
     this.cleanup()
@@ -503,13 +526,14 @@ export class Playout {
    * exit is never reported as the stream breaking.
    */
   private async stopPusher(forced = false): Promise<void> {
+    this.epoch += 1
     const pusher = this.pusher
     this.pusher = null
     // Whatever the head start was waiting for, there is no session after this.
     this.pusherPending = false
+    this.clearHealthTimer()
     if (!pusher || pusher.exitCode !== null) return
     const wasStopping = this.stopping
-    this.suppressPusherExit = true
     try {
       if (forced) pusher.kill('SIGKILL')
       else pusher.stdin?.end()
@@ -525,12 +549,14 @@ export class Playout {
         }
         resolve()
       }, 2500)
-      pusher.once('exit', () => {
+      // `close` rather than `exit`: it is emitted for a spawn failure too (where the
+      // process never existed), so a wedged spawn cannot leave this waiting for an
+      // event that will never come.
+      pusher.once('close', () => {
         clearTimeout(timer)
         resolve()
       })
     })
-    this.suppressPusherExit = false
     this.stopping = wasStopping
   }
 
@@ -628,6 +654,7 @@ export class Playout {
   }
 
   private cleanup(): void {
+    this.clearHealthTimer()
     this.clearEncoderHold()
     try {
       fs.rmSync(this.dir, { recursive: true, force: true })
@@ -684,6 +711,11 @@ export class Playout {
     // The session exists now: `isPusherRunning()` answers from here on.
     this.pusherPending = false
     this.pusherProgressBuf = ''
+    this.pusherLastReportAt = 0
+    this.pusherSilenceReported = false
+    this.pusherSpeed = 0
+    this.pusherSentBytes = 0
+    this.healthAt = 0
     this.callbacks.log('info', this.t('main.engine.publisherStarted', { pid: child.pid ?? '?' }))
     // Hand over whatever the encoder produced during the head start. Nothing else will:
     // this only runs on a `drain`, and the queue was filled before the publisher existed.
@@ -691,15 +723,22 @@ export class Playout {
     child.stdout?.on('data', () => {})
     // fd 3 is the progress pipe (`stdio: ['pipe','pipe','pipe','pipe']`), so it is
     // a readable stream here even though `ChildProcess['stdio']` is typed loosely.
+    const epoch = this.epoch
     const pusherProgress = child.stdio[3] as Readable | null
     pusherProgress?.setEncoding('utf8')
-    pusherProgress?.on('data', (chunk: string) => this.onPusherOutput(chunk))
+    pusherProgress?.on('data', (chunk: string) => {
+      // A replaced publisher can still deliver buffered progress after the restart
+      // began; that data belongs to the old timeline and must not move the viewer.
+      if (this.pusher === child && epoch === this.epoch) this.onPusherOutput(chunk)
+    })
     // The pusher's own log is the only place RTMP failures surface ("Cannot open
     // connection", "Server error", muxer complaints). It used to be swallowed:
     // `-progress` came in on stderr and every non-progress line was dropped, so a
     // publisher that never connected looked identical to one that was streaming.
     child.stderr?.setEncoding('utf8')
-    child.stderr?.on('data', (chunk: string) => this.onPusherLog(chunk))
+    child.stderr?.on('data', (chunk: string) => {
+      if (this.pusher === child) this.onPusherLog(chunk)
+    })
     child.stdin?.on('drain', () => this.pump())
     // A publisher that dies mid-write (or is stopped) makes its stdin fail. That
     // is a normal teardown path here, not an exception: without a handler the
@@ -713,21 +752,33 @@ export class Playout {
       // An intentional teardown closes this pipe from under an in-flight write, which
       // surfaces here as EOF/EPIPE on every stop and every jump; only a failure while
       // the session is supposed to be running means anything (see below).
-      if (this.stopping || this.suppressPusherExit) return
+      if (this.stopping || this.pusher !== child) return
       const code = (err as NodeJS.ErrnoException).code ?? err.message
       this.callbacks.log('error', this.t('main.playout.writeFailed', { code }))
     })
     child.on('error', (err) => {
       this.callbacks.log('error', this.t('main.playout.processError', { error: err.message }))
     })
-    child.on('exit', (code) => {
-      if (this.pusher === child) this.pusher = null
-      // A restart stops the publisher deliberately; reporting that as a fault would
-      // make the engine abandon the session the restart was opening.
-      if (this.stopping || this.suppressPusherExit) return
+    child.on('close', (code) => {
+      // Only the publisher that is still current owns this session. A stop/restart
+      // nulls the slot before the process exits, which is what keeps its late close
+      // from being reported as a lost stream.
+      const wasCurrent = this.pusher === child
+      if (wasCurrent) this.pusher = null
+      if (!wasCurrent || this.stopping) return
+      this.clearHealthTimer()
       this.callbacks.log('warn', this.t('main.engine.publisherExited', { code: code ?? this.t('main.engine.unknown') }))
       this.callbacks.onPusherExit(code)
     })
+    this.healthTimer = setInterval(() => this.reportHealth(), 1000)
+  }
+
+  /** Stops the periodic health/silence check. */
+  private clearHealthTimer(): void {
+    if (this.healthTimer) {
+      clearInterval(this.healthTimer)
+      this.healthTimer = null
+    }
   }
 
   /* ------------------------------------------------------------ *
@@ -1098,8 +1149,6 @@ export class Playout {
         // The publisher has caught up with the encoder; it simply waits for the
         // next datagram, which is why this transport survives encoder restarts.
         this.callbacks.log('debug', this.t('main.engine.publisherCaughtUp'))
-      } else if (key === 'speed') {
-        // no-op: the pusher is paced by -re, so this is always ~1x
       }
     }
   }
@@ -1119,6 +1168,10 @@ export class Playout {
     // while a file change is in flight.
     this.clearEncoderHold()
     this.holdReported = false
+    // A fresh encoder starts on a packet boundary; a half-packet left by the
+    // previous process must never be prepended to it (it would shift the whole new
+    // stream off the 188-byte grid).
+    this.carry = Buffer.alloc(0)
     // Baseline for the burst accounting in the hold log: a pass that is never released
     // must not report a duration measured from the epoch (Date.now() default of 0).
     this.burstFromSec = this.encodedSec
@@ -1128,6 +1181,12 @@ export class Playout {
       '-nostdin',
       '-loglevel',
       'info',
+      // Per-item A/V offset: `buildEncoderArgs` returned it instead of applying it
+      // itself because the caller owns the source input. Subtitles compensate for it
+      // inside the filter chain (see `subtitleTimingFilters`).
+      ...(Math.abs(pass.inputOffsetSec ?? 0) > 0.0005
+        ? ['-itsoffset', String(Math.round((pass.inputOffsetSec ?? 0) * 100) / 100)]
+        : []),
       ...(pass.startPositionSec > 0.05
         ? [FFMPEG_INPUT_SEEK, String(Math.round(pass.startPositionSec * 100) / 100), '-noaccurate_seek']
         : []),
@@ -1201,7 +1260,7 @@ export class Playout {
       'pipe:1'
     ]
     this.callbacks.log('debug', this.t('main.engine.encoderCmd', { seq: this.seq, args: args.join(' ') }))
-    this.tsPts = { pass: this.seq, first: NaN, last: NaN, packets: 0, videoHeaders: 0, suspended: false }
+    this.tsPts = { first: NaN, last: NaN, packets: 0, videoHeaders: 0 }
     // fd 0 is ignored (`-nostdin`), fd 1 is the transport stream, fd 2 is the log,
     // fd 3 is progress. fd 1 gets exactly one reader and is never given an encoding.
     const child = spawn(this.ffmpegPath, args, {
@@ -1235,27 +1294,19 @@ export class Playout {
       if (isCurrent()) this.onEncoderOutput(chunk, pass.seq ?? 0)
     })
     child.stderr?.setEncoding('utf8')
-    child.stderr?.on('data', (chunk: string) => this.onEncoderLog(chunk))
+    child.stderr?.on('data', (chunk: string) => {
+      if (isCurrent()) this.onEncoderLog(chunk)
+    })
     child.on('error', (err) => {
       this.callbacks.log('error', this.t('main.playout.encoderProcessError', { error: err.message }))
     })
-    child.on('exit', (code) => {
+    // `close` covers spawn failures too: Node emits `error` and then `close`, never
+    // `exit`, when the binary cannot be started. Listening only for `exit` left the
+    // engine waiting forever for a pass that had never run.
+    child.on('close', (code) => {
       const wasCurrent = this.encoder === child
       if (wasCurrent) this.encoder = null
       if (this.stopping || !wasCurrent) return
-      // A kill is asynchronous: by the time this fires the engine may already have
-      // been handed the next file, and that exit is the one that must be accounted.
-      // `pass.seq` is carried on the pass so the report cannot be attributed twice.
-      if (pass.seq !== this.seq) return
-      // Abandoned on purpose (a skip or a jump is replacing it): this pass produced
-      // nothing the viewer will hear, so it must not be reported. Reporting it makes
-      // the engine account for material that is being thrown away — and when that
-      // happens to be the last entry of the queue it looks exactly like "the playlist
-      // finished", which tears down the session the restart was opening.
-      if (pass.abandoned) {
-        this.passMaterial.delete(pass.seq ?? 0)
-        return
-      }
       // The pass is complete (or died): account for what it produced. The
       // publisher keeps reading the socket either way.
       this.finishPass(pass, code)
@@ -1335,8 +1386,7 @@ export class Playout {
    * A pass finished: account for its span and let the caller start the next one.
    *
    * There is no segment file to inspect — the pass streamed its output into the
-   * socket — so the span comes from the last progress report, falling back to what
-   * the pass was asked to produce.
+   * socket — so the span comes from the last progress report.
    */
   private finishPass(pass: EncoderPass, code: number | null): void {
     // `seq` is always set by `startEncoder`; the fallback only satisfies the type.
@@ -1356,8 +1406,9 @@ export class Playout {
       this.callbacks.onEncoderExit(code, 0)
       return
     }
-    // Prefer the measured span; fall back to what the pass was asked to produce.
-    const span = materialSec > 0 ? materialSec : pass.expectedSec
+    // The measured span is the only reliable source: the pass may have been cut
+    // short, and a nominal duration would advance the timeline past what aired.
+    const span = materialSec
     this.publishSegment(span)
     const pts = this.getTsPtsSpan()
     this.callbacks.log(
@@ -1378,14 +1429,12 @@ export class Playout {
   /**
    * Kills the current encoder, if any.
    *
-   * `abandon` marks it as discarded rather than finished: a kill is asynchronous, so
-   * the process can still exit normally afterwards, and without this the engine
-   * would be told that a file it just skipped over had completed.
+   * Its exit handler ignores a replaced encoder (the pipe can still deliver its
+   * completion), so this is also where its measurement is forgotten.
    */
-  private killEncoder(abandon = false): void {
+  private killEncoder(): void {
     const child = this.encoder
     this.encoder = null
-    if (abandon && this.currentPass) this.currentPass.abandoned = true
     // The pass will never report again: its exit handler ignores a replaced encoder,
     // so nothing else would remove its measurement from the map.
     if (this.currentPass?.seq !== undefined) this.passMaterial.delete(this.currentPass.seq)

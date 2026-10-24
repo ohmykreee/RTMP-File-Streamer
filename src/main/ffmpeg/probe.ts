@@ -108,6 +108,8 @@ function toStreamInfo(s: FfprobeStream): MediaStreamInfo {
   if (fps) info.fps = Math.round(fps * 1000) / 1000
   const br = num(s.bit_rate)
   if (br) info.bitrate = br
+  const streamDuration = num(s.duration)
+  if (streamDuration !== undefined) info.durationSec = streamDuration
   const sr = num(s.sample_rate)
   if (sr) info.sampleRate = sr
   if (s.channels) info.channels = s.channels
@@ -155,7 +157,7 @@ export async function probeMedia(ffprobePath: string, filePath: string, language
 
   const res = await runProcess(
     ffprobePath,
-    ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-show_entries', 'stream=index,codec_type,codec_name,codec_long_name,width,height,avg_frame_rate,r_frame_rate,bit_rate,sample_rate,channels,channel_layout,tags,disposition:format=format_name,format_long_name,duration,size,bit_rate', filePath],
+    ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', '-show_entries', 'stream=index,codec_type,codec_name,codec_long_name,width,height,avg_frame_rate,r_frame_rate,bit_rate,duration,sample_rate,channels,channel_layout,tags,disposition:format=format_name,format_long_name,duration,size,bit_rate', filePath],
     60000
   )
 
@@ -187,7 +189,7 @@ export async function probeMedia(ffprobePath: string, filePath: string, language
   let duration = num(fmt.duration) ?? 0
   if (!duration) {
     for (const s of base.streams) {
-      const d = num((s as unknown as { duration?: string }).duration)
+      const d = s.durationSec
       if (d && d > duration) duration = d
     }
   }
@@ -214,6 +216,40 @@ export function embeddedSubtitleRefs(info: MediaInfo): SubtitleTrackRef[] {
   })
 }
 
+/**
+ * Numbers-first sniff for a `.sub` sidecar.
+ *
+ * `.sub` is ambiguous: VobSub is a bitmap format, while MicroDVD/SubViewer use
+ * plain text. ffprobe recognises the common cases, but when it cannot, guessing
+ * from the extension alone marked text subtitles as unburnable (and sent them to
+ * a bitmap path that cannot work). The first few KB are enough to tell them
+ * apart: MicroDVD starts with `{n}{n}`, SubViewer files carry `[INFORMATION]`.
+ */
+function sniffTextSubtitle(filePath: string): boolean {
+  try {
+    const fd = fs.openSync(filePath, 'r')
+    try {
+      const buf = Buffer.alloc(4096)
+      const read = fs.readSync(fd, buf, 0, buf.length, 0)
+      const head = buf.subarray(0, read).toString('utf8')
+      return /^\s*\{\d+\}\{\d+\}/.test(head) || /\[INFORMATION\]/i.test(head)
+    } finally {
+      fs.closeSync(fd)
+    }
+  } catch {
+    return false
+  }
+}
+
+function pairSubtitleExists(idxPath: string): boolean {
+  const subPath = idxPath.replace(/\.idx$/i, '.sub')
+  try {
+    return fs.statSync(subPath).size > 0
+  } catch {
+    return false
+  }
+}
+
 /** Probe a sidecar subtitle file (srt/ass/vtt/sup/idx+sub) into a track reference. */
 export async function probeSubtitleFile(
   ffprobePath: string,
@@ -221,8 +257,31 @@ export async function probeSubtitleFile(
   language: Language = DEFAULT_PROBE_LANGUAGE
 ): Promise<SubtitleTrackRef | null> {
   const ext = path.extname(filePath).toLowerCase()
+  /** Extension fallback, used only when ffprobe cannot describe the file. */
   const fallbackFamily: SubtitleCodecFamily =
-    ext === '.sup' || ext === '.sub' || ext === '.idx' ? 'bitmap' : ext === '.srt' || ext === '.ass' || ext === '.ssa' || ext === '.vtt' ? 'text' : 'unknown'
+    ext === '.sup'
+      ? 'bitmap'
+      : ext === '.idx'
+        ? pairSubtitleExists(filePath)
+          ? 'bitmap'
+          : 'unknown'
+        : ext === '.sub'
+          ? sniffTextSubtitle(filePath)
+            ? 'text'
+            : 'bitmap'
+          : ext === '.srt' || ext === '.ass' || ext === '.ssa' || ext === '.vtt'
+            ? 'text'
+            : 'unknown'
+
+  // An empty sidecar cannot render anything; accepting it only moves the failure
+  // to libass, where it aborts the whole filter graph.
+  let size = 0
+  try {
+    size = fs.statSync(filePath).size
+  } catch {
+    return null
+  }
+  if (size <= 0) return null
 
   const info = await probeMedia(ffprobePath, filePath, language)
   const sub = info.subtitleStreams[0]
@@ -248,8 +307,4 @@ export async function probeSubtitleFile(
   const base = path.basename(filePath)
   ref.title = sub.title ?? base
   return ref
-}
-
-export function hasVideoStream(info: MediaInfo): boolean {
-  return info.videoStreams.length > 0
 }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { LogEntry, LogLevel, PersistedLogInfo } from '@shared/types'
+import type { LogEntry, LogLevel } from '@shared/types'
 import type { TranslationKey } from '@shared/i18n'
 import { ChevronRight, FolderOpen, Trash2 } from 'lucide-react'
 import { cn } from 'cn'
@@ -8,6 +8,7 @@ import { Label } from '@renderer/components/ui/label'
 import { Separator } from '@renderer/components/ui/separator'
 import { Switch } from '@renderer/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@renderer/components/ui/toggle-group'
+import { TooltipButton } from '@renderer/components/ui/tooltip-button'
 import { formatClock } from '../lib/format'
 import { useT } from '../i18n'
 
@@ -16,8 +17,6 @@ interface LogPanelProps {
   onClear: () => void
   expanded: boolean
   onToggle: () => void
-  /** Persisted log usage, shown next to the in-memory count. */
-  logInfo: PersistedLogInfo | null
   onOpenLogsDir: () => void
 }
 
@@ -71,7 +70,6 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
   const [levels, setLevels] = useState<Set<LogLevel>>(() => new Set())
   const [autoscroll, setAutoscroll] = useState(true)
   const endRef = useRef<HTMLDivElement | null>(null)
-  const scrollRef = useRef<HTMLDivElement | null>(null)
 
   const showingAll = levels.size === 0
 
@@ -121,7 +119,20 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
 
   return (
     <section className={cn('logs', expanded ? 'expanded' : 'collapsed')}>
-      <header className="logs-head" onClick={onToggle}>
+      <header
+        className="logs-head"
+        onClick={onToggle}
+        role="button"
+        tabIndex={0}
+        aria-expanded={expanded}
+        aria-controls="log-body"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            onToggle()
+          }
+        }}
+      >
         <span className="logs-title">
           <ChevronRight className={cn('chevron size-3.5', expanded && 'open')} aria-hidden />
           {t('log.title')}
@@ -137,7 +148,6 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
                  text-sm) outweighs the plain `.seg-btn` rule, so the compact size
                  has to be stated in the same vocabulary as the component. */
               className={cn(SEG_ITEM, showingAll && 'active aria-pressed:bg-primary aria-pressed:text-primary-foreground')}
-              title={t('log.showAllTitle')}
             >
               {t('log.all')}
             </ToggleGroupItem>
@@ -149,7 +159,6 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
                 key={l.key}
                 value={l.key}
                 className={cn(SEG_ITEM, levels.has(l.key) && 'active aria-pressed:bg-primary aria-pressed:text-primary-foreground')}
-                title={t('log.onlyLevelTitle', { level: t(l.labelKey) })}
               >
                 {t(l.labelKey)}
               </ToggleGroupItem>
@@ -159,20 +168,20 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
             <Switch id="log-autoscroll" size="sm" checked={autoscroll} onCheckedChange={setAutoscroll} />
             {t('log.autoscroll')}
           </Label>
-          <Button size="xs" variant="ghost" onClick={onOpenLogsDir} title={t('log.openDirTitle')}>
+          <TooltipButton size="xs" variant="ghost" onClick={onOpenLogsDir} label={t('log.openDirTitle')}>
             <FolderOpen data-icon="inline-start" />
             {t('log.openDir')}
-          </Button>
+          </TooltipButton>
           <Button size="xs" variant="ghost" onClick={onClear}>
             <Trash2 data-icon="inline-start" />
-            {t('playlist.clear')}
+            {t('log.clear')}
           </Button>
         </div>
       </header>
       {expanded && (
         <div
           className="logs-body"
-          ref={scrollRef}
+          id="log-body"
           onScroll={(e) => {
             const el = e.currentTarget
             const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40
@@ -181,7 +190,7 @@ export default function LogPanel({ logs, onClear, expanded, onToggle, onOpenLogs
           }}
         >
           {visible.length === 0 ? (
-            <p className="muted small px-3 py-1">{t('log.empty')}</p>
+            <p className="muted small px-3 py-1">{logs.length === 0 ? t('log.empty') : t('log.noMatch')}</p>
           ) : (
             visible.map((entry) => (
               <div key={entry.id} className={`log-line lv-${entry.level}`}>

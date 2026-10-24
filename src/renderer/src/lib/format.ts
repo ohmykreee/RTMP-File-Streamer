@@ -13,14 +13,14 @@ export function formatDuration(totalSeconds: number | undefined | null): string 
 }
 
 export function formatBytes(bytes: number | undefined): string {
-  if (!bytes || bytes <= 0) return '0 B'
+  if (!bytes || bytes <= 0 || !Number.isFinite(bytes)) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
   return `${(bytes / 1024 ** i).toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
 
 export function formatBitrate(kbps: number | undefined): string {
-  if (!kbps || kbps <= 0) return '—'
+  if (!kbps || kbps <= 0 || !Number.isFinite(kbps)) return '—'
   return kbps >= 1000 ? `${(kbps / 1000).toFixed(2)} Mbps` : `${Math.round(kbps)} kbps`
 }
 
@@ -85,15 +85,4 @@ export const STATUS_KEY: Record<PlaylistItem['status'], TranslationKey> = {
   done: 'playlist.status.done',
   skipped: 'playlist.status.skipped',
   error: 'app.state.error'
-}
-
-export function shortName(p: string): string {
-  const parts = p.split(/[\\/]/)
-  return parts[parts.length - 1] ?? p
-}
-
-export function dirName(p: string): string {
-  const parts = p.split(/[\\/]/)
-  parts.pop()
-  return parts.join('\\')
 }

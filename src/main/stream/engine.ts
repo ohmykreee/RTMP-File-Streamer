@@ -1,5 +1,4 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import path from 'node:path'
 import type {
   EngineState,
   EngineStatus,
@@ -11,18 +10,21 @@ import type {
   PlaylistItemStatus,
   SessionSettings
 } from '@shared/types'
-import { buildEncoderArgs, buildStreamCommand, describeStreams, type BuiltCommand, type BuiltEncoderArgs } from '../ffmpeg/command'
+import { buildEncoderArgs, buildStreamCommand, describeStreams, splitOutputArgs, type BuiltCommand, type BuiltEncoderArgs } from '../ffmpeg/command'
 import type { Language } from '@shared/types'
 import type { StreamProtocol } from '@shared/types'
 import { mainT } from '../i18n'
+import { collectSecrets, maskTarget, redactText } from '../log-redact'
 import { Playout } from './playout'
 import { ByteRateMeter } from './byte-rate'
 import {
+  addressMatchesProtocol,
   buildPushTarget,
   containerForProtocol,
   DEFAULT_STREAM_PROTOCOL,
   muxerForProtocol,
   networkForProtocol,
+  PROTOCOL_SCHEMES,
   protocolKeyArgs
 } from '@shared/protocol'
 import { BUFFER_SEC_MIN } from '@shared/defaults'
@@ -155,8 +157,13 @@ function bufferLeadLimitSec(output: SessionSettings['output']): number {
  * the single-process FLV path, where ffmpeg writes the Enhanced-RTMP `av01` tag
  * directly.
  */
-function bufferedRelaySupportsCodec(settings: SessionSettings): boolean {
-  return settings.video.codec !== 'av1'
+function bufferedRelaySupportsCodec(settings: SessionSettings, media: MediaInfo): boolean {
+  // A copied track keeps its SOURCE codec, so the settings word `copy` says
+  // nothing about whether MPEG-TS can carry it. AV1 cannot (the muxer writes it
+  // as private data and the demuxer drops it), so a copied AV1 source must take
+  // the single-process path just like an encoded one.
+  const codec = settings.video.codec === 'copy' ? media.videoStreams[0]?.codec : settings.video.codec
+  return codec !== 'av1'
 }
 
 export class StreamEngine {
@@ -191,7 +198,6 @@ export class StreamEngine {
   private startedAt: number | null = null
   private reconnectCount = 0
   private commandLine = ''
-  private lastWarnings: string[] = []
 
   private child: ChildProcessWithoutNullStreams | null = null
   private generation = 0
@@ -202,6 +208,7 @@ export class StreamEngine {
   private stopping = false
   private restartTimer: NodeJS.Timeout | null = null
   private reconnectTimer: NodeJS.Timeout | null = null
+  private drainTimer: NodeJS.Timeout | null = null
   private logSeq = 1
   private lastStderrLine = ''
   private lastStderrRepeat = 0
@@ -229,7 +236,7 @@ export class StreamEngine {
    * viewer, so "the last file was encoded" is not "the stream is over" — a 35s
    * playlist is fully encoded in a few seconds and still needs 35s of airtime.
    */
-  private drain: { startedAt: number; lastProgressAt: number; waitingForSec: number } | null = null
+  private drain: { startedAt: number; lastProgressAt: number; waitingForSec: number; stallLogged: boolean } | null = null
   /**
    * True while a skip or a jump is replacing the RTMP session.
    *
@@ -330,7 +337,6 @@ export class StreamEngine {
       order: this.items.map((i) => i.id),
       itemStatus,
       itemError,
-      commandLine: this.commandLine,
       reconnectCount: this.reconnectCount,
       connected: this.connected,
       startedAt: this.startedAt,
@@ -464,7 +470,10 @@ export class StreamEngine {
     if (this.networkOkSince === 0) this.networkOkSince = now
     if (now - this.networkOkSince >= NETWORK_RECOVER_MS) {
       this.networkState = next
-      if (next === 'ok') this.networkOkSince = now
+      // Restart the hold for the NEXT step: a bad -> warn upgrade that left the
+      // stamp at its old value let the very next ok sample clear the colour,
+      // which is exactly the "recovered link must hold" rule being defeated.
+      this.networkOkSince = now
     }
     return this.networkState
   }
@@ -556,7 +565,9 @@ export class StreamEngine {
     this.bitrateKbps = 0
     this.frame = 0
     this.droppedFrames = 0
+    this.reconnectCount = 0
     this.encoderStats = null
+    this.commandLine = ''
     this.networkRate.reset()
     // Stamped here as well as on the transitions below: with no timestamp the first
     // reading that looks healthy would clear a colour it has not earned, which is
@@ -582,11 +593,17 @@ export class StreamEngine {
       this.log('warn', mainT('main.engine.playlistEmpty'))
       return this.getStatus()
     }
-    if (this.state === 'live' || this.state === 'connecting' || this.state === 'preparing') {
+    /*
+     * The guard is deliberately "any running state", not a list of three: a
+     * `draining` session still owns the publish timeline and a `stopping` one is
+     * mid-teardown. Either could be re-entered from IPC/devtools even though the UI
+     * disables its own buttons, and starting over a live playout would append the
+     * new pass to a timeline nobody can rewind.
+     */
+    if (this.isActive() || this.state === 'stopping') {
       this.log('info', mainT('main.engine.alreadyStreaming'))
       return this.getStatus()
     }
-    this.cancelTimers()
     const ffmpeg = this.deps.getFfmpegPath()
     if (!ffmpeg) {
       this.log('error', mainT('main.engine.noFfmpeg'))
@@ -594,6 +611,36 @@ export class StreamEngine {
       this.emitStatus()
       return this.getStatus()
     }
+    const settings = this.deps.getSettings()
+    if (!settings.output.server.trim()) {
+      this.log('error', mainT('main.engine.noTarget'))
+      this.state = 'error'
+      this.emitStatus()
+      return this.getStatus()
+    }
+    // The UI validates only on the test button; a hand-edited settings file or an
+    // obs-websocket write could still pair an srt address with rtmp and reach
+    // ffmpeg as `-f flv srt://…`. Refuse before spawning anything.
+    if (!addressMatchesProtocol(settings.output.server, settings.output.protocol)) {
+      this.log(
+        'error',
+        mainT('main.dialog.badUrlProtocol', {
+          schemes: PROTOCOL_SCHEMES[settings.output.protocol ?? DEFAULT_STREAM_PROTOCOL]
+        })
+      )
+      this.state = 'error'
+      this.emitStatus()
+      return this.getStatus()
+    }
+    /*
+     * Claim the state synchronously, before the first await. The real launch is
+     * asynchronous (kill, probe, spawn), and two IPC calls arriving in that window
+     * would otherwise both pass the guard and start two sessions.
+     */
+    this.state = 'preparing'
+    this.stopping = false
+    this.cancelTimers()
+    this.generation += 1
 
     for (const item of this.items) {
       item.status = 'pending'
@@ -601,10 +648,8 @@ export class StreamEngine {
     }
     this.completedSec = 0
     this.startedAt = Date.now()
-    this.reconnectCount = 0
-    this.stopping = false
     this.resetSessionStats()
-    // A new session starts a new RTMP timeline, so the pass log and the published
+    // A new session starts a new publish timeline, so the pass log and the published
     // position must not carry over from the previous run.
     this.airedPasses = []
     this.publishedSec = 0
@@ -613,6 +658,14 @@ export class StreamEngine {
     this.encoderIndex = -1
     this.encoderItemDuration = 0
     const firstIndex = atIndex !== undefined ? Math.max(0, Math.min(atIndex, this.items.length - 1)) : 0
+    /*
+     * Starting at an entry means the entries before it were passed over, not played:
+     * `markPlayedThrough` marks everything before the live index done, so leaving them
+     * pending would make the first pusher report claim they had aired.
+     */
+    if (atIndex !== undefined) {
+      for (let i = 0; i < firstIndex; i += 1) this.items[i].status = 'skipped'
+    }
     /*
      * Opening the session moves the viewer to the first entry, whichever pipeline runs.
      * In buffered mode `launchCurrentFrom` deliberately leaves the viewer's fields
@@ -623,21 +676,27 @@ export class StreamEngine {
     this.moveViewerTo(firstIndex, 0, this.items[firstIndex]?.durationSec || 0)
     this.emitPlaylist()
 
-    const settings = this.deps.getSettings()
     const target = buildPushTarget(settings.output.server, settings.output.streamKey, settings.output.protocol)
-    // The full target (which contains the stream key) is only shown in the debug
-    // log, not in the UI and not in the info log.
     this.log('info', mainT('main.engine.sessionStarting'))
-    this.log('debug', `${mainT('main.engine.streamTarget')}: ${target}`)
+    // Even debug output only names the server: the log is persisted and the panel
+    // is copyable, so the key never belongs in it.
+    this.log('debug', `${mainT('main.engine.streamTarget')}: ${maskTarget(target)}`)
     this.log('info', mainT('main.engine.playlistReady', { n: this.items.length, duration: formatDuration(this.items.reduce((s, i) => s + (i.durationSec || 0), 0)) }))
 
-    await this.launchCurrent(0, 'session-start')
+    await this.launchCurrent(firstIndex, 'session-start').catch((err) => this.failLaunch(err))
     return this.getStatus()
   }
 
   async stop(): Promise<EngineStatus> {
     if (this.state === 'idle') return this.getStatus()
     this.stopping = true
+    /*
+     * Invalidate every launch that is still awaiting something (probe, encoder
+     * build, the playout's head start). Without this they resume after `stop()`
+     * has cleared the handles and spawn a publisher nobody can stop — the UI is
+     * already back to idle while ffmpeg is still pushing.
+     */
+    this.generation += 1
     this.cancelTimers()
     this.state = 'stopping'
     this.emitStatus()
@@ -668,6 +727,7 @@ export class StreamEngine {
     for (const item of this.items) {
       if (item.status === 'live' || item.status === 'preparing') item.status = 'pending'
     }
+    this.stopping = false
     this.emitPlaylist()
     this.emitStatus()
     this.log('info', mainT('main.engine.stopped'))
@@ -680,8 +740,15 @@ export class StreamEngine {
       this.log('warn', mainT('main.engine.nothingStreaming'))
       return this.getStatus()
     }
+    // A stop in progress is tearing the session down; advancing the queue while the
+    // old encoder is still being killed is what opened a new pass with no owner.
+    if (this.stopping || this.state === 'stopping') {
+      this.log('warn', mainT('main.engine.nothingStreaming'))
+      return this.getStatus()
+    }
     this.log('info', mainT('main.engine.skipReason', { reason }))
     this.setItemStatus(this.currentIndex, 'skipped')
+    this.resetEntriesFrom(this.currentIndex + 1)
     await this.advanceTo(this.currentIndex + 1, 'skip')
     return this.getStatus()
   }
@@ -693,10 +760,21 @@ export class StreamEngine {
       this.log('warn', mainT('main.engine.itemNotFound'))
       return this.getStatus()
     }
+    if (this.stopping || this.state === 'stopping') {
+      this.log('warn', mainT('main.engine.nothingStreaming'))
+      return this.getStatus()
+    }
     for (let i = 0; i < index; i += 1) {
       const st = this.items[i].status
       if (st !== 'done') this.items[i].status = 'skipped'
     }
+    /*
+     * A jump replaces the publish session and discards the buffer, so every entry
+     * from the target onward is about to be played again. Leaving a later entry's
+     * `live`/`done` badge behind made two rows claim "streaming" at once (the row
+     * the viewer was on before the jump and the row the jump landed on).
+     */
+    this.resetEntriesFrom(index)
     this.emitPlaylist()
     this.log('info', mainT('main.engine.jumpingTo', { name: this.items[index].name }))
     if (this.state === 'idle') {
@@ -704,6 +782,28 @@ export class StreamEngine {
     }
     await this.advanceTo(index, 'jump')
     return this.getStatus()
+  }
+
+  /**
+   * Clears playback badges of entries that a jump/skip is about to replay.
+   *
+   * A jump starts a new publish session at the target; every entry from there on
+   * is about to play again, so `live`, `preparing`, `done`, `skipped` and `error`
+   * all describe the session being replaced and must not survive it. In
+   * particular a later entry left `live` made two rows claim "streaming" at once
+   * after a backward jump.
+   */
+  private resetEntriesFrom(index: number): void {
+    let changed = false
+    for (let i = Math.max(0, index); i < this.items.length; i += 1) {
+      const item = this.items[i]
+      if (item.status !== 'pending' || item.error) {
+        item.status = 'pending'
+        delete item.error
+        changed = true
+      }
+    }
+    if (changed) this.emitPlaylist()
   }
 
   /* ------------------------------------------------------------ *
@@ -719,6 +819,10 @@ export class StreamEngine {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
+    if (this.drainTimer) {
+      clearInterval(this.drainTimer)
+      this.drainTimer = null
+    }
   }
 
   private async killChild(graceful: boolean): Promise<void> {
@@ -733,33 +837,32 @@ export class StreamEngine {
           /* ignore */
         }
         resolve()
-      }, graceful ? 3500 : 400)
+      }, graceful ? 1500 : 400)
       child.once('close', () => {
         clearTimeout(t)
         resolve()
       })
     })
-    if (graceful) {
-      try {
-        child.stdin.write('q')
-      } catch {
-        try {
-          child.kill()
-        } catch {
-          /* ignore */
-        }
-      }
-    } else {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* ignore */
-      }
+    /*
+     * `q` was written to stdin here, but every command is built with `-nostdin`,
+     * so ffmpeg ignores it and the stop waited the full 3.5 s before SIGKILL.
+     * SIGTERM is what ffmpeg handles; the timer above is only the backstop.
+     */
+    try {
+      child.kill('SIGTERM')
+    } catch {
+      /* ignore */
     }
     await done
   }
 
   private async advanceTo(index: number, reason: 'finish' | 'skip' | 'jump' | 'retry'): Promise<void> {
+    /*
+     * A timer can outlive the session it was scheduled by (publisher lost, queue
+     * ended, user pressed stop). Launching here after the teardown would recreate a
+     * session with no owner — the UI already shows idle and nothing can stop it.
+     */
+    if (this.state === 'idle' || this.stopping) return
     const settings = this.deps.getSettings()
     if (index >= this.items.length) {
       if (settings.output.loopPlaylist) {
@@ -784,13 +887,14 @@ export class StreamEngine {
         const published = this.playout.getPublishedSec()
         if (published < waitingForSec - DRAIN_TOLERANCE_SEC) {
           const now = Date.now()
-          this.drain = { startedAt: now, lastProgressAt: now, waitingForSec }
+          this.drain = { startedAt: now, lastProgressAt: now, waitingForSec, stallLogged: false }
           this.state = 'draining'
           this.emitStatus()
           this.log(
             'info',
             mainT('main.engine.drainingBuffer', { time: formatDuration(waitingForSec - published) })
           )
+          this.startDrainWatchdog()
           return
         }
       }
@@ -799,6 +903,19 @@ export class StreamEngine {
       return
     }
     await this.launchCurrentFrom(index, 0, reason)
+  }
+
+  /**
+   * Checks the drain independently of publisher progress.
+   *
+   * The check used to run only from `onPublished`, and that callback both refreshed
+   * `lastProgressAt` first and stopped arriving when the publisher stalled — so the
+   * 45 s "publisher is stuck" branch could never fire and a dead socket left the
+   * engine in `draining` forever.
+   */
+  private startDrainWatchdog(): void {
+    if (this.drainTimer) clearInterval(this.drainTimer)
+    this.drainTimer = setInterval(() => this.checkDrainComplete(), 1000)
   }
 
   /**
@@ -812,6 +929,14 @@ export class StreamEngine {
    * entry that never aired must not be reported as finished.
    */
   private async finishSession(playedOut = false): Promise<void> {
+    /*
+     * Invalidate in-flight launches before awaiting anything. A queued 150 ms
+     * `advanceTo` or a probe that is still running would otherwise wake up after
+     * this teardown and create a new session.
+     */
+    this.stopping = true
+    this.generation += 1
+    this.cancelTimers()
     this.drain = null
     /*
      * Resolve the queue BEFORE anything is awaited.
@@ -854,11 +979,15 @@ export class StreamEngine {
     this.resetViewerTimeline()
     this.encoderIndex = -1
     this.encoderItemDuration = 0
+    this.encoderPass = null
+    this.airedPasses = []
+    this.publishedSec = 0
     this.startedAt = null
     // Same reason as in `stop()`: the run is over, so nothing about it may stay on the
     // status line — including the link verdict, which would otherwise keep the colour
     // the session ended on.
     this.resetSessionStats()
+    this.stopping = false
     this.emitStatus()
   }
 
@@ -871,6 +1000,9 @@ export class StreamEngine {
     if (!item) return
 
     await this.killChild(true)
+    // A stop that arrived during the kill invalidates this launch (it also bumped
+    // the generation); continuing here would spawn after the UI reached idle.
+    if (this.stopping || this.state === 'stopping') return
     this.cancelTimers()
     const generation = ++this.generation
     /*
@@ -899,7 +1031,6 @@ export class StreamEngine {
       this.droppedFrames = 0
     }
     this.connected = false
-    this.stopping = false
     this.emitStatus()
 
     /* --- probe (cached) --- */
@@ -910,7 +1041,7 @@ export class StreamEngine {
     if (!media) {
       media = await this.deps.probeMedia(item.path)
     }
-    if (generation !== this.generation) return
+    if (generation !== this.generation || this.stopping) return
 
     if (!media.videoStreams.length && !media.audioStreams.length) {
       const msg = media.probeError || mainT('main.engine.mediaUnreadable')
@@ -919,12 +1050,15 @@ export class StreamEngine {
       this.state = 'error'
       this.emitStatus()
       this.restartTimer = setTimeout(() => {
-        void this.advanceTo(index + 1, 'finish')
+        if (generation !== this.generation || this.stopping) return
+        void this.advanceTo(index + 1, 'finish').catch((err) => this.failLaunch(err))
       }, 800)
       return
     }
 
-    this.itemDuration = media.durationSec || item.durationSec || 0
+    // In buffered mode the viewer is still on the previous file; `moveViewerTo`
+    // and the pusher's reports are the only writers of `itemDuration`.
+    if (viewerStateFromThisPass) this.itemDuration = media.durationSec || item.durationSec || 0
     if (media.durationSec && Math.abs(media.durationSec - item.durationSec) > 1) {
       item.durationSec = media.durationSec
       this.emitPlaylist()
@@ -942,7 +1076,7 @@ export class StreamEngine {
      * back to the single-process FLV path below (ffmpeg writes AV1 as Enhanced-RTMP
      * `av01` directly). */
     if (bufferedMode(settings.output)) {
-      if (bufferedRelaySupportsCodec(settings)) {
+      if (bufferedRelaySupportsCodec(settings, media)) {
         await this.launchBuffered(index, item, media, positionSec, reason, generation)
         return
       }
@@ -971,7 +1105,6 @@ export class StreamEngine {
       return
     }
     this.commandLine = built.commandLine
-    this.lastWarnings = built.warnings
 
     this.logStreamChoice(item, media, built, positionSec, reason)
 
@@ -984,6 +1117,9 @@ export class StreamEngine {
     this.log('ffmpeg', built.commandLine)
 
     /* --- spawn --- */
+    // The probe/build above are awaits; a stop during either one must not end in a
+    // process whose handle `stop()` has already dropped.
+    if (generation !== this.generation || this.stopping) return
     const ffmpeg = this.deps.getFfmpegPath()
     this.state = 'connecting'
     this.emitStatus()
@@ -998,9 +1134,16 @@ export class StreamEngine {
       this.emitStatus()
       return
     }
+    if (generation !== this.generation || this.stopping) {
+      try {
+        child.kill('SIGKILL')
+      } catch {
+        /* ignore */
+      }
+      return
+    }
     this.child = child
     this.state = 'live'
-    this.connected = true
     this.setItemStatus(index, 'live')
     this.emitStatus()
 
@@ -1014,7 +1157,7 @@ export class StreamEngine {
       this.setItemStatus(index, 'error', err.message)
     })
     child.on('close', (code, signal) => {
-      void this.onClose(generation, index, code, signal)
+      void this.onClose(generation, index, code, signal).catch((err) => this.failLaunch(err))
     })
   }
 
@@ -1088,14 +1231,15 @@ export class StreamEngine {
 
     let args: string[]
     let inputs: string[] = []
+    let inputOffsetSec = 0
     try {
       const built = buildEncoderArgs({ ffmpegPath: ffmpeg, media, item, settings, startPositionSec: positionSec, language: this.deps.getLanguage() })
       args = built.args
       inputs = built.inputs
-      this.lastWarnings = built.warnings
+      inputOffsetSec = built.inputOffsetSec
       this.logStreamChoice(item, media, built, positionSec, reason)
       for (const w of built.warnings) this.log('warn', w)
-      if (generation !== this.generation) return
+      if (generation !== this.generation || this.stopping) return
     } catch (err) {
       this.log('error', mainT('main.engine.buildEncoderFailed', { error: String(err) }))
       this.setItemStatus(index, 'error', String(err))
@@ -1155,12 +1299,12 @@ export class StreamEngine {
      * requested file, and the buffer is discarded with it.
      */
     const restartSession = this.playout.isSessionActive() && (reason === 'skip' || reason === 'jump')
+    const playout = this.playout
     const tsOffset = restartSession
       ? positionSec > 0.05
         ? PASS_START_MARGIN_SEC
         : 0
-      : this.playout.getNextOffset() + (positionSec > 0.05 ? PASS_START_MARGIN_SEC : 0)
-    const expectedSec = Math.max(0, this.encoderItemDuration - positionSec)
+      : playout.getNextOffset() + (positionSec > 0.05 ? PASS_START_MARGIN_SEC : 0)
     if (restartSession) {
       // The timeline restarts with the session, so what the viewer is watching is
       // reported against the new one from here on.
@@ -1178,10 +1322,15 @@ export class StreamEngine {
     if (resetViewer || restartSession) this.moveViewerTo(index, positionSec, this.encoderItemDuration)
     this.encoderPass = { index, startSec: positionSec, itemDurationSec: this.encoderItemDuration, tsOffset }
     // Recorded before the encoder starts, so a pusher that crosses into this pass
-    // while it is still being built is already reported as watching it.
-    if (this.airedPasses.at(-1)?.tsOffset !== tsOffset) this.airedPasses.push({ ...this.encoderPass })
+    // while it is still being built is already reported as watching it. Duplicate
+    // offsets are kept: a pass that produced no material must still occupy its slot,
+    // or every later report would be mapped to the pass before it.
+    this.airedPasses.push({ ...this.encoderPass })
+    // The log is consulted per publisher report; keeping a bounded tail prevents a
+    // multi-day loop from turning that lookup into an ever-growing scan.
+    if (this.airedPasses.length > 128) this.airedPasses.splice(0, this.airedPasses.length - 64)
 
-    const pass = { input: item.path, inputs, args, startPositionSec: positionSec, tsOffset, expectedSec }
+    const pass = { input: item.path, inputs, args, startPositionSec: positionSec, tsOffset, inputOffsetSec }
     if (restartSession) {
       /*
        * The session is being replaced, so nothing the playout reports until it is
@@ -1193,10 +1342,11 @@ export class StreamEngine {
        */
       this.restartingSession = true
       try {
-        await this.playout.restartSession(pass)
+        await playout.restartSession(pass)
       } finally {
         this.restartingSession = false
       }
+      if (generation !== this.generation || this.stopping || this.playout !== playout) return
       // The new pass has been handed over and will air from the start of the file.
       this.encoderPass = { index, startSec: positionSec, itemDurationSec: this.encoderItemDuration, tsOffset }
       this.airedPasses = [{ ...this.encoderPass }]
@@ -1211,17 +1361,17 @@ export class StreamEngine {
         this.deferredEncoderExit = null
         this.handleEncoderExit(deferred.index, deferred.code, deferred.materialSec)
       }
-    } else if (this.playout.isSessionActive()) {
+    } else if (playout.isSessionActive()) {
       // The session exists — including while its publisher is still inside the head
       // start. Starting a second one there would leave two publishers on the key, so a
       // pass that arrives in that window replaces the encoder instead.
-      this.playout.restartEncoder(pass)
+      playout.restartEncoder(pass)
     } else {
-      await this.playout.start(pass)
+      await playout.start(pass)
+      if (generation !== this.generation || this.stopping || this.playout !== playout) return
     }
 
     this.state = 'live'
-    this.connected = true
     /*
      * The entry is marked `preparing`, not `live`.
      *
@@ -1247,7 +1397,7 @@ export class StreamEngine {
     if (containerForProtocol(protocol) === 'flv') args.push('-flvflags', 'no_duration_filesize')
     if (protocol === 'rtsp') args.push('-rtsp_transport', networkForProtocol(protocol, out.network))
     args.push(...protocolKeyArgs(protocol, out.streamKey))
-    if (out.extraOutputArgs.trim()) args.push(...out.extraOutputArgs.trim().split(/\s+/))
+    if (out.extraOutputArgs.trim()) args.push(...splitOutputArgs(out.extraOutputArgs))
     args.push('-f', muxerForProtocol(protocol), buildPushTarget(out.server, out.streamKey, protocol))
     return args
   }
@@ -1264,9 +1414,15 @@ export class StreamEngine {
      * late blocks still name the pass that just aired. Acting on them re-opens an
      * entry the session already closed out — measured: the final entry was marked
      * done by `finishSession` and then flipped straight back to `live` by the last
-     * report of the dead pusher, so the queue claimed the run ended mid-file.
+     * report of the dead pusher, so the queue claimed the run ended mid-file. The
+     * same applies while a skip/jump is replacing the session: the new timeline
+     * starts at zero and the old publisher's tail must not move the viewer.
      */
-    if (this.stopping || this.state === 'idle') return
+    if (this.stopping || this.restartingSession || this.state === 'idle') return
+    if (!this.connected) {
+      this.connected = true
+      this.log('info', mainT('main.engine.rtmpAccepted'))
+    }
     // Progress, not elapsed time, is what proves the pusher is still working, so
     // the drain stall guard measures inactivity rather than duration.
     if (seconds > this.publishedSec && this.drain) this.drain.lastProgressAt = Date.now()
@@ -1311,6 +1467,14 @@ export class StreamEngine {
     let changed = false
     for (let i = 0; i < this.items.length; i += 1) {
       const item = this.items[i]
+      // Only the entry being published may say "live"; a jump can leave the row
+      // that was live before it (or a row a previous run marked done) behind. The
+      // published position is the authority that clears it.
+      if (i > live.index && (item.status === 'live' || item.status === 'done')) {
+        item.status = 'pending'
+        changed = true
+        continue
+      }
       /*
        * The session timeline only moves forward, so an entry the viewer has already
        * passed can never become current again. Holding onto `done` is what makes the
@@ -1346,7 +1510,11 @@ export class StreamEngine {
       if (seconds >= p.tsOffset - 0.001) found = p
       else break
     }
-    return found ?? this.airedPasses.at(-1) ?? null
+    // The fallback is the OLDEST pass, matching the comment above: before the
+    // pusher's first report the session has only just started, and returning the
+    // newest (possibly a pass encoded during a reconnect) moved the viewer into a
+    // file that had not aired yet.
+    return found ?? this.airedPasses[0] ?? null
   }
 
   /**
@@ -1360,24 +1528,28 @@ export class StreamEngine {
    */
   private checkDrainComplete(): void {
     const drain = this.drain
-    if (!drain || this.stopping) return
+    if (!drain || this.stopping || this.state === 'idle') return
     const now = Date.now()
     let playedOut = false
     if (this.publishedSec >= drain.waitingForSec - DRAIN_TOLERANCE_SEC) {
       this.log('info', mainT('main.engine.bufferAired', { sec: this.publishedSec.toFixed(1) }))
       playedOut = true
     } else if (now - drain.lastProgressAt > DRAIN_STALL_MS) {
-      this.log(
-        'warn',
-        mainT('main.engine.publisherStalled', { sec: this.publishedSec.toFixed(1), delivered: drain.waitingForSec.toFixed(1) })
-      )
+      // The interval calls this every second, so the line is written once per stall.
+      if (!drain.stallLogged) {
+        drain.stallLogged = true
+        this.log(
+          'warn',
+          mainT('main.engine.publisherStalled', { sec: this.publishedSec.toFixed(1), delivered: drain.waitingForSec.toFixed(1) })
+        )
+      }
     } else if ((now - drain.startedAt) / 1000 > drain.waitingForSec + DRAIN_MAX_SEC) {
       this.log('warn', mainT('main.engine.drainTooLong', { sec: drain.waitingForSec.toFixed(1) }))
     } else {
       return
     }
     // The drained queue itself is the queue played out; a stalled publisher is not.
-    void this.finishSession(playedOut)
+    void this.finishSession(playedOut).catch((err) => this.failLaunch(err))
   }
 
   /** An encoder pass ended: what it produced is now part of the stream. */
@@ -1430,14 +1602,23 @@ export class StreamEngine {
     // that exists to cover the hand-over (measured 5.8–7.5 s of encoder restart). The
     // short delay that remains only keeps the next pass from being spawned inside this
     // pass's own exit handler.
+    const generation = this.generation
     this.restartTimer = setTimeout(() => {
-      void this.advanceTo(index + 1, 'finish')
+      if (generation !== this.generation || this.stopping) return
+      void this.advanceTo(index + 1, 'finish').catch((err) => this.failLaunch(err))
     }, NEXT_PASS_DELAY_MS)
   }
 
   /** The pusher died: that *is* the RTMP session, so the run is over. */
   private onPusherExit(code: number | null): void {
     if (this.stopping) return
+    /*
+     * The session that scheduled the pending advance is gone. Cancel it and
+     * invalidate any in-flight launch, or a 150 ms `advanceTo` can start a new
+     * encoder/session after the reconnect budget has already been exhausted.
+     */
+    this.generation += 1
+    this.cancelTimers()
     this.connected = false
     // The buffered playout is the RTMP session, so a dead publisher takes it with
     // it: without this the engine keeps handing encoder passes to a playout whose
@@ -1449,6 +1630,10 @@ export class StreamEngine {
       this.publishedSec = 0
       this.drain = null
       void playout.stop()
+    } else {
+      this.airedPasses = []
+      this.publishedSec = 0
+      this.drain = null
     }
     /*
      * A publish that failed is retried before the run is given up on.
@@ -1463,6 +1648,7 @@ export class StreamEngine {
     if (settings.output.maxReconnectAttempts > 0 && this.reconnectCount < settings.output.maxReconnectAttempts) {
       this.reconnectCount += 1
       const delayMs = Math.max(1, settings.output.reconnectDelaySec) * 1000
+      const generation = this.generation
       this.state = 'reconnecting'
       this.emitStatus()
       this.log(
@@ -1475,17 +1661,56 @@ export class StreamEngine {
         })
       )
       this.reconnectTimer = setTimeout(() => {
-        if (this.stopping) return
-        void this.launchCurrentFrom(this.currentIndex, Math.max(0, this.positionSec), 'retry')
+        if (this.stopping || this.state === 'idle' || generation !== this.generation) return
+        void this.launchCurrentFrom(this.currentIndex, Math.max(0, this.positionSec), 'retry').catch((err) => this.failLaunch(err))
       }, delayMs)
       return
     }
+    this.failSession(code)
+  }
+
+  /**
+   * Ends a session that cannot continue, leaving the status line honest.
+   *
+   * The state, progress bar, statistics and the current entry all described a live
+   * session; only the last of them used to be left behind, so the footer kept
+   * showing the final second of a run whose pill already said "Error".
+   */
+  private failSession(code: number | null, reason?: string): void {
+    this.cancelTimers()
     this.state = 'error'
+    /*
+     * The session may still own processes — a buffered encoder can be running
+     * behind a playout even when the launch path that failed is this one. Leaving
+     * them alive is the "UI says error, server still receives" state.
+     */
+    void this.killChild(true)
+    if (this.playout) {
+      const playout = this.playout
+      this.playout = null
+      void playout.stop()
+    }
+    const index = this.encoderPass?.index ?? this.currentIndex
+    const detail = reason ?? mainT('main.engine.publisherLost', { code: code ?? mainT('main.engine.unknown') })
+    if (index >= 0) this.setItemStatus(index, 'error', detail)
+    this.encoderPass = null
+    this.encoderIndex = -1
+    this.encoderItemDuration = 0
+    this.startedAt = null
+    this.connected = false
     // The run is over, however badly: the progress bar must not keep the position the
     // dead session happened to reach (see `resetViewerTimeline`).
     this.resetViewerTimeline()
+    this.resetSessionStats()
     this.emitStatus()
-    this.log('error', mainT('main.engine.publisherLost', { code: code ?? mainT('main.engine.unknown') }))
+    this.log('error', detail)
+  }
+
+  /** Surfaces an exception thrown by a fire-and-forget launch path. */
+  private failLaunch(err: unknown): void {
+    if (this.stopping) return
+    const message = err instanceof Error ? err.message : String(err)
+    this.failSession(null, mainT('main.engine.launchFailed', { error: message }))
   }
 
   private sumDurationsBefore(index: number): number {
@@ -1522,12 +1747,6 @@ export class StreamEngine {
             // never reach the end.
             if (elapsed > this.outTimeSec - 1) {
               this.outTimeSec = elapsed
-              // ffmpeg's `-progress` timeline is relative to the *output*, and after
-              // an input seek the output is rebased to zero: seeking to 12s in a 20s
-              // file reports 8s of material, not 20s. The position inside the file is
-              // therefore the seek offset plus what ffmpeg has produced since — using
-              // the reported value directly made the bar jump backwards at every seek
-              // and never reach the end.
               this.setPosition(this.startPositionSec + elapsed)
             }
           }
@@ -1658,8 +1877,10 @@ export class StreamEngine {
       // buffered pipeline never republishes at a file change and does not wait at all.
       this.state = 'preparing'
       this.emitStatus()
+      const generationAtExit = this.generation
       this.restartTimer = setTimeout(() => {
-        void this.advanceTo(index + 1, 'finish')
+        if (generationAtExit !== this.generation || this.stopping) return
+        void this.advanceTo(index + 1, 'finish').catch((err) => this.failLaunch(err))
       }, REPUBLISH_DELAY_MS)
       return
     }
@@ -1673,15 +1894,24 @@ export class StreamEngine {
       this.log('error', mainT('main.engine.crashNoRetry', { detail }))
       this.setItemStatus(index, 'error', mainT('main.engine.crashDetail', { detail }))
       this.state = 'error'
-      // Terminal: nothing will advance the queue, so the progress bar goes back to zero
-      // like any other end of session (see `resetViewerTimeline`).
+      this.cancelTimers()
+      this.generation += 1
+      this.encoderPass = null
+      this.encoderIndex = -1
+      this.encoderItemDuration = 0
+      this.startedAt = null
+      // Terminal: nothing will advance the queue, so the progress bar and the live
+      // figures go back to zero like any other end of session (see
+      // `resetViewerTimeline` / `resetSessionStats`).
       this.resetViewerTimeline()
+      this.resetSessionStats()
       this.emitStatus()
       return
     }
 
     this.reconnectCount += 1
     const delay = Math.max(1, settings.output.reconnectDelaySec) * 1000
+    const generationAtExit = this.generation
     this.state = 'reconnecting'
     this.emitStatus()
     this.log(
@@ -1695,7 +1925,8 @@ export class StreamEngine {
       })
     )
     this.reconnectTimer = setTimeout(() => {
-      void this.launchCurrentFrom(index, Math.max(0, this.positionSec - 1), 'retry')
+      if (generationAtExit !== this.generation || this.stopping) return
+      void this.launchCurrentFrom(index, Math.max(0, this.positionSec - 1), 'retry').catch((err) => this.failLaunch(err))
     }, delay)
   }
 
@@ -1703,17 +1934,8 @@ export class StreamEngine {
    * External helpers
    * ------------------------------------------------------------ */
 
-  /** Merge freshly probed media info into a playlist item without touching playback. */
-  updateItemMedia(itemId: string, media: MediaInfo): void {
-    const item = this.items.find((i) => i.id === itemId)
-    if (!item) return
-    item.durationSec = media.durationSec || item.durationSec
-    item.size = media.size || item.size
-    this.emitPlaylist()
-  }
-
   /**
-   * The entry the preview and the "show in folder" action should describe.
+   * The entry the preview should describe.
    *
    * The ENCODER's entry, not the viewer's: this answers "what is this app encoding
    * right now", and in buffered mode the two are different files for most of a
@@ -1725,36 +1947,34 @@ export class StreamEngine {
   }
 
   getCommandPreview(): string {
-    if (this.commandLine) return this.commandLine
+    const settings = this.deps.getSettings()
+    const secrets = collectSecrets(settings.output)
+    if (this.commandLine) return redactText(this.commandLine, secrets)
     const item = this.encoderItem()
     if (!item) return mainT('main.engine.previewEmpty')
     const media = this.deps.getMedia(item.path)
     if (!media) return mainT('main.engine.previewProbing')
     try {
-      return buildStreamCommand({
+      const command = buildStreamCommand({
         ffmpegPath: this.deps.getFfmpegPath() || 'ffmpeg',
         media,
         item,
-        settings: this.deps.getSettings(),
+        settings,
         startPositionSec: 0,
         language: this.deps.getLanguage()
       }).commandLine
+      // The buffered pipeline actually runs two processes (encoder + publisher);
+      // this preview is the single-process equivalent, and it says so rather than
+      // pretending to be the command that is executed.
+      const note = bufferedMode(settings.output) ? `${mainT('main.engine.previewBufferedEquivalent')}\n` : ''
+      return redactText(note + command, secrets)
     } catch (err) {
       return mainT('main.engine.previewFailed', { error: String(err) })
     }
   }
 
-  getLastWarnings(): string[] {
-    return this.lastWarnings
-  }
-
   isActive(): boolean {
     return this.state !== 'idle' && this.state !== 'error'
-  }
-
-  getCurrentItemPath(): string | null {
-    const item = this.encoderItem()
-    return item ? path.resolve(item.path) : null
   }
 }
 

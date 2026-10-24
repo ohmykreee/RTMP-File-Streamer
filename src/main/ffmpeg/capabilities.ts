@@ -15,9 +15,27 @@ export interface RunResult {
 
 export function runProcess(bin: string, args: string[], timeoutMs = 20000): Promise<RunResult> {
   return new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
+    let stdoutChunks: Buffer[] = []
+    let stderrChunks: Buffer[] = []
+    let stdoutBytes = 0
+    let stderrBytes = 0
     let settled = false
+    /** Concatenates once, at the end: per-chunk `toString()` split multi-byte UTF-8. */
+    const text = (chunks: Buffer[]): string => Buffer.concat(chunks).toString('utf8')
+    const append = (chunks: Buffer[], chunk: Buffer, total: number): number => {
+      chunks.push(chunk)
+      let next = total + chunk.length
+      // Keep the tail bounded without decoding anything; ffprobe output is JSON and
+      // a truncated tail still yields a useful error, while a broken code point in
+      // the middle made JSON.parse fail for perfectly valid files.
+      if (next > 4_000_000) {
+        const merged = Buffer.concat(chunks).subarray(-2_000_000)
+        chunks.length = 0
+        chunks.push(merged)
+        next = merged.length
+      }
+      return next
+    }
     let child: ReturnType<typeof spawn>
     try {
       child = spawn(bin, args, { windowsHide: true })
@@ -33,38 +51,45 @@ export function runProcess(bin: string, args: string[], timeoutMs = 20000): Prom
         } catch {
           /* ignore */
         }
-        resolve({ code: -2, stdout, stderr: stderr + '\n[timeout]' })
+        resolve({ code: -2, stdout: text(stdoutChunks), stderr: `${text(stderrChunks)}\n[timeout]` })
       }
     }, timeoutMs)
 
     child.stdout?.on('data', (d: Buffer) => {
-      stdout += d.toString()
-      if (stdout.length > 4_000_000) stdout = stdout.slice(-2_000_000)
+      stdoutBytes = append(stdoutChunks, d, stdoutBytes)
     })
     child.stderr?.on('data', (d: Buffer) => {
-      stderr += d.toString()
-      if (stderr.length > 4_000_000) stderr = stderr.slice(-2_000_000)
+      stderrBytes = append(stderrChunks, d, stderrBytes)
     })
     child.on('error', (err) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ code: -1, stdout, stderr: stderr + '\n' + String(err) })
+      resolve({ code: -1, stdout: text(stdoutChunks), stderr: `${text(stderrChunks)}\n${String(err)}` })
     })
     child.on('close', (code) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ code, stdout, stderr })
+      resolve({ code, stdout: text(stdoutChunks), stderr: text(stderrChunks) })
     })
   })
 }
 
-const WIN_EXTS = ['.exe', '.cmd', '.bat', '']
+/**
+ * Extensions the PATH search may add.
+ *
+ * `.cmd`/`.bat` are deliberately absent: Node's `spawn` without a shell refuses
+ * them (EINVAL since the CVE-2024-27980 fix), so finding an npm shim used to look
+ * like "ffmpeg is installed" while every probe failed at start-up.
+ */
+const WIN_EXTS = process.platform === 'win32' ? ['.exe'] : ['']
 
 function isExecutable(p: string): boolean {
   try {
-    return fs.statSync(p).isFile()
+    if (!fs.statSync(p).isFile()) return false
+    if (process.platform !== 'win32') fs.accessSync(p, fs.constants.X_OK)
+    return true
   } catch {
     return false
   }
@@ -117,15 +142,14 @@ export interface BinaryResolution {
  */
 export function resolveBinaries(configuredFfmpeg: string, configuredFfprobe: string): BinaryResolution {
   const exe = process.platform === 'win32' ? '.exe' : ''
+  const explicitProbe = configuredFfprobe && isExecutable(configuredFfprobe) ? configuredFfprobe : ''
   const bundledRoots = [
     process.resourcesPath ? path.join(process.resourcesPath, 'bin') : '',
     path.join(process.cwd(), 'bin')
   ].filter(Boolean)
 
   if (configuredFfmpeg && isExecutable(configuredFfmpeg)) {
-    const probeGuess = configuredFfprobe && isExecutable(configuredFfprobe)
-      ? configuredFfprobe
-      : path.join(path.dirname(configuredFfmpeg), 'ffprobe' + exe)
+    const probeGuess = explicitProbe || path.join(path.dirname(configuredFfmpeg), 'ffprobe' + exe)
     return {
       ffmpeg: configuredFfmpeg,
       ffprobe: isExecutable(probeGuess) ? probeGuess : '',
@@ -136,7 +160,9 @@ export function resolveBinaries(configuredFfmpeg: string, configuredFfprobe: str
   for (const root of bundledRoots) {
     const ff = path.join(root, 'ffmpeg' + exe)
     if (isExecutable(ff)) {
-      let fp = path.join(root, 'ffprobe' + exe)
+      // An explicitly configured ffprobe wins over whatever sits next to the
+      // bundled ffmpeg; ignoring it made the setting silently ineffective.
+      let fp = explicitProbe || path.join(root, 'ffprobe' + exe)
       if (!isExecutable(fp)) fp = searchPath('ffprobe') ?? ''
       return { ffmpeg: ff, ffprobe: fp, source: 'bundled' }
     }
@@ -144,13 +170,13 @@ export function resolveBinaries(configuredFfmpeg: string, configuredFfprobe: str
 
   const onPath = searchPath('ffmpeg')
   if (onPath) {
-    const probe = configuredFfprobe && isExecutable(configuredFfprobe) ? configuredFfprobe : searchPath('ffprobe') ?? ''
+    const probe = explicitProbe || searchPath('ffprobe') || ''
     return { ffmpeg: onPath, ffprobe: probe, source: 'path' }
   }
 
   for (const candidate of commonLocations('ffmpeg')) {
     if (isExecutable(candidate)) {
-      const probe = commonLocations('ffprobe').find(isExecutable) ?? ''
+      const probe = explicitProbe || commonLocations('ffprobe').find(isExecutable) || ''
       return { ffmpeg: candidate, ffprobe: probe, source: 'common-location' }
     }
   }
@@ -303,6 +329,13 @@ const HW_TEST_ARGS = (encoder: string): string[] => [
 /** Actually exercises a hardware encoder: presence in `-encoders` does not guarantee a working driver. */
 async function verifyHardwareEncoder(ffmpeg: string, encoder: string): Promise<boolean> {
   const res = await runProcess(ffmpeg, HW_TEST_ARGS(encoder), 25000)
+  // `-2` is this module's timeout, not a driver verdict: a first driver init on a
+  // busy machine can exceed 25 s. One retry distinguishes "slow" from "absent"
+  // without making the start-up probe wait forever.
+  if (res.code === -2) {
+    const retry = await runProcess(ffmpeg, HW_TEST_ARGS(encoder), 15000)
+    return retry.code === 0
+  }
   return res.code === 0
 }
 
@@ -377,8 +410,9 @@ export async function getCapabilities(
   const listedFilters = new Set<string>()
   for (const line of filterText.split(/\r?\n/)) {
     // Format: ` FLAGS NAME  INPUTS->OUTPUTS  DESCRIPTION`, where FLAGS is 2-3
-    // characters from `T`, `S`, `.` (e.g. `..`, `TS`, `.S`).
-    const m = /^\s*[TS.]{2,3}\s+(\S+)\s+\S*->\S+/.exec(line)
+    // characters from `T`, `S`, `C`, `.` (e.g. `..`, `TS`, `TSC`). Some builds tag
+    // timeline-supporting filters with `C`, which the old character class omitted.
+    const m = /^\s*[TSC.]{2,3}\s+(\S+)\s+\S*->\S+/.exec(line)
     if (m) listedFilters.add(m[1])
   }
   const listedMuxers = new Set<string>()
@@ -458,7 +492,7 @@ export async function getCapabilities(
     source,
     encoders: encoders.map((e) => ({
       ...e,
-      available: e.kind === 'software' ? e.available : e.available
+      available: e.available
     })),
     audioEncoders,
     containerFormats,

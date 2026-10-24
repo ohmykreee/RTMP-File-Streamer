@@ -503,12 +503,13 @@ const RECEIVED = path.join(here, 'features_received.flv')
   const afterBitrate = await ev('window.streamer.getSettings().then(s => s.session.video.bitrateKbps)')
   record('a locked edit never reaches the settings model', afterBitrate === beforeBitrate, `${beforeBitrate} → ${afterBitrate}`)
 
-  // The stream key never appears outside the debug log, but it IS there.
+  // The key never appears in a log line, including the debug-level target line.
   const logs = JSON.parse(await ev('window.streamer.getLogs().then(l => JSON.stringify(l))'))
   record(
-    'the debug log carries the composed push target',
-    logs.some((l) => l.level === 'debug' && l.message.includes(`rtmp://127.0.0.1:${STREAM_PORT}/live/lock-test-key`)),
-    'log searched'
+    'the debug log carries the composed target with the key masked',
+    logs.some((l) => l.level === 'debug' && l.message.includes(`rtmp://127.0.0.1:${STREAM_PORT}/live/***`)) &&
+      !logs.some((l) => l.message.includes('lock-test-key')),
+    logs.find((l) => l.level === 'debug' && l.message.includes('/***'))?.message ?? 'no masked target line'
   )
 
   await delay(2500) // let some data flow

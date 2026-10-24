@@ -5,6 +5,7 @@
  *   test/i18n.bundle.mjs     - message tables + locale rules for the same harness
  *   test/rtmp.bundle.mjs     - RTMP target composition for the same harness
  *   test/byte-rate.bundle.mjs - the network send-rate meter for the same harness
+ *   test/log-redact.bundle.mjs - credential masking for the same harness
  *   out/main/test-entry.cjs   - engine + builder for the Electron integration run
  *
  * (`test/obs.bundle.mjs` is bundled by harness.mjs itself, next to the checks
@@ -73,6 +74,14 @@ const targets = [
     // over (bytes, timestamp) samples, so the harness can drive it without waiting.
     entry: 'src/main/stream/byte-rate.ts',
     out: 'test/byte-rate.bundle.mjs',
+    format: 'esm'
+  },
+  {
+    // Credential redaction for logs and connection-test results. Pure string
+    // logic, but it is the only thing standing between a stream key and a
+    // persisted log, so it gets its own direct checks.
+    entry: 'src/main/log-redact.ts',
+    out: 'test/log-redact.bundle.mjs',
     format: 'esm'
   },
   {

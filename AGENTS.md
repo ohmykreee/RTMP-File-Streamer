@@ -4,7 +4,7 @@
 
 ## 1. 概况
 
-Electron + React + TS 桌面应用：本地视频（可带字幕）经系统 FFmpeg 重编码后推到 RTMP，按播放列表连续串流。
+Electron + React + TS 桌面应用：本地视频（可带字幕）经系统 FFmpeg 重编码后，按所选协议推到 RTMP / SRT / RTSP / WHIP，按播放列表连续串流。
 **不打包 FFmpeg**（运行时探测），**不做单文件便携 exe / 安装包**（`--dir` 绿色版，状态写在自身 `Data/`）。
 
 ```
@@ -82,6 +82,7 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
   自动跳到检测出的协议，之后可手动改
 - **状态只在程序目录的 `Data/`**：`store/paths.ts` 重定向 Electron 的 userData/sessionData/cache，
   **绝不读写 `%APPDATA%`**（旧迁移代码已删，不要恢复）
+- **凭据只在日志出口脱敏**：`src/main/log-redact.ts` 在 `emitLog` 与测试结果返回处统一遮蔽完整目标、`passphrase` 与 `-authorization`。命令构建器必须拿真实 target 去 spawn，**不要**在 builder 里改写 target；新增会打印地址/密钥的日志时，确认它经过 `emitLog`。
 - **已移除的功能不要恢复**：文件内 seek、暂停、`%APPDATA%` 迁移
 - **i18n**：文案全在 `src/shared/i18n/messages.ts`（`EN` 基准 + `ZH`/`JA` 同键），`TranslationKey` 由 `EN` 推导，
   写错 key 是编译错误。
@@ -94,7 +95,7 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
     不要在模块顶层缓存翻译函数或语言值
   - 文案表的一致性由 `test:unit` 第 1 节逐键校验（三表键集、空值、占位符）＋ `pnpm typecheck`
     （`Catalog<TranslationKey>` 缺键即报错）兜底，**不需要额外的维护脚本**
-- **界面栈**：渲染层是 Tailwind v4 + shadcn/ui（style `nova`、base color `zinc`、theme `blue`、图标 `lucide`）。
+- **界面栈**：渲染层是 Tailwind v4 + shadcn/ui（style `base-nova`、base color `zinc`、theme `blue`、图标 `lucide`）。
   组件是**源码**，在 `src/renderer/src/components/ui/`，增减用 `pnpm dlx shadcn@latest add <name>`（它会覆盖本地改动）；
   设计令牌与全局层都在 `src/renderer/src/styles.css`（唯一入口），alias 由 `components.json` + tsconfig 的
   `@renderer/*` 决定。渲染层依赖装在 devDependencies —— Vite 打包渲染层，`electron-builder` 的 `files` 排除了
@@ -130,7 +131,7 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
   `每 1 秒约占 码率/8 KB 内存`、`关闭后只保留 info 及以上——排查串流问题需要它，长期挂机可以关掉`
 - 正面例子：`高度自适应` · `关闭后保持源分辨率` · `兼容 obs-websocket 5.x。已实现推流地址、开始与停止串流；
   其余请求一律返回成功`
-- - **界面文案不绑定具体协议**：除软件名与协议下拉里的协议专名外，界面不出现 RTMP 等协议字样；
+- **界面文案不绑定具体协议**：除软件名与协议下拉里的协议专名外，界面不出现 RTMP 等协议字样；
   描述用「推流 / 直播 / 流媒体服务器」等协议无关的词。
 - 被 JSX 切开的复合句按段拆成独立 key（`xxxHint1…N`），三张表都要有，这样才能按语言调整语序
 
@@ -200,14 +201,14 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
 
 `test:unit` 与 `test:e2e` 全绿是提交前提；断言数量随功能增长，以实际输出为准。
 
-- **unit**：命令构建（字幕滤镜转义、分辨率三态、CBR/VBR/CRF、像素格式与硬件编码器映射、RTMP/协议目标拼接、音画偏移）
+- **unit**：命令构建（字幕滤镜转义、分辨率三态与取偶、CBR/VBR/CRF、HEVC profile/x265 私有参数、像素格式与硬件编码器映射、协议目标/密钥拼接、音画与字幕延迟）
   + **真的执行生成的命令**再解码校验 + 字幕烧录（外挂与内嵌轨各一次，`signalstats` 验证字幕区字形像素）
   + 缺轨补轨（生成静音/黑场真的进到输出里、时长与真轨对齐、`copy`/`none` 不生成）
-  + 编码缓冲上限实测 + 本地推流 + obs-websocket 端点 + 文案表三语言键集/占位符/空值
+  + 编码缓冲上限实测 + 本地推流 + obs-websocket 端点 + 文案表三语言键集/占位符/空值（含缺键负例）
 - **e2e**（CDP 驱动）：`ui`（启动、播放列表与字幕恢复、开始/停止、跳转、语言切换落盘、日志面板）·
   `features`（拖入、串流中锁定、密钥掩码、日志留存、流选择诊断）· `presets`（保存/套用/改名/删除、
-  obs-websocket 块落盘与还原）· `layout`（切选项卡播放区不位移）· `datadir`（开发构建/打包版/移动后都写在
-  程序目录且不写 Roaming）· `engine` 与 `enginebuffered`（同一驱动器的两条管道）
+  obs-websocket 块落盘与还原）· `layout`（切选项卡播放区不位移）· `datadir`（开发构建写在程序目录且不写
+  Roaming；打包版/移动后不再自动验证）· `engine` 与 `enginebuffered`（同一驱动器的两条管道）
 - 端到端都用 `ffmpeg -listen 1` 当下游，不需要外部流媒体服务；套件带看门狗（超时杀残留进程并以 3 退出）；
   被测应用带 `STREAMER_E2E=1`（窗口移出屏幕 + 点击穿透）
 
@@ -254,7 +255,7 @@ Docs:
   路径和 `.github/workflows/checks.yml` 这种要照做的名称值得写；代码行号、内部函数名不值得
 - 不用加粗、不用嵌套列表、不写「Overview / 验证 / 提交列表 / 安装说明」这类小节 —— 只有分类与 bullet
 - 破坏性变更、需要用户手动操作的、以及已知未验证的部分，各自单独一条 bullet 并在句子里点明
-- 最终版本号只写在 `package.json`（`app.getVersion()` 会读它），release note 里不要复制一份会被忘记同步的版本号
+- 最终版本号只写在 `package.json`（`scripts/build-info.mjs` 把它写进 `build-info.json`，应用优先读后者，`app.getVersion()` 只是兜底），release note 里不要复制一份会被忘记同步的版本号
 
 ## 10. 文档只写关键信息
 

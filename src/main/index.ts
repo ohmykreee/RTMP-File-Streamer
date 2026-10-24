@@ -1,7 +1,8 @@
 import path from 'node:path'
-import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeTheme, shell } from 'electron'
 import type { AppSettings, LogEntry, PlaylistItem } from '@shared/types'
 import { IPC } from '@shared/types'
+import { detectStreamProtocol, networkForProtocol } from '@shared/protocol'
 import { resolveBinaries } from './ffmpeg/capabilities'
 import { registerIpc, type AppServices } from './ipc'
 import { ObsWebSocketServer } from './obs/websocket'
@@ -9,9 +10,11 @@ import { StreamEngine } from './stream/engine'
 import { getSettingsPath, loadSettings, saveSettings, setLanguage as persistLanguage } from './store/settings'
 import { getPresetLocation, listPresets } from './store/presets'
 import { setupDataPaths } from './store/paths'
+import { setStoreErrorHandler } from './store/errors'
 import { appendLogEntry, closeLogSession, getPersistedLogInfo, startLogSession } from './store/logger'
 import { mainT } from './i18n'
-import { EN, TRANSLATIONS, assertCatalogsComplete } from '@shared/i18n'
+import { collectSecrets, redactText } from './log-redact'
+import { EN, JA, ZH, assertCatalogsComplete } from '@shared/i18n'
 import { BUILTIN_PRESETS, LOG_HISTORY_LIMIT } from '@shared/defaults'
 import {
   attachSubtitleFile,
@@ -31,6 +34,18 @@ import {
 const dataPaths = setupDataPaths()
 
 let mainWindow: BrowserWindow | null = null
+
+/**
+ * Sends to the renderer without assuming it is still alive.
+ *
+ * A window that is closing can have `mainWindow` non-null but its `webContents`
+ * already destroyed; sending then throws from inside a log/status callback, which
+ * is the worst place to surface an exception during shutdown.
+ */
+function sendToWindow(channel: string, payload: unknown): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send(channel, payload)
+}
 
 /* ------------------------------------------------------------------ *
  * Application state
@@ -59,10 +74,20 @@ function emitLog(entry: LogEntry, context?: { itemName?: string; itemPath?: stri
    * the switch is turned off is itself in the log.
    */
   if (entry.level === 'debug' && !loadSettings().debugLogging) return
-  logs.push(entry)
+  /*
+   * Every producer (engine command lines, ffmpeg's `Output #0 ... to '<target>'`
+   * banner, the publisher's own log, the connection test) can print the push
+   * target. Redact at this single sink so the persisted file, the panel and any
+   * copy made from it are safe without each producer having to remember.
+   */
+  const safe: LogEntry = {
+    ...entry,
+    message: redactText(entry.message, collectSecrets(loadSettings().session.output))
+  }
+  logs.push(safe)
   if (logs.length > LOG_HISTORY_LIMIT) logs.splice(0, logs.length - LOG_HISTORY_LIMIT)
-  mainWindow?.webContents.send(IPC.evtLog, entry)
-  appendLogEntry(entry, context)
+  sendToWindow(IPC.evtLog, safe)
+  appendLogEntry(safe, context)
 }
 
 function pushLog(level: LogEntry['level'], message: string): void {
@@ -79,6 +104,17 @@ function schedulePersist(): void {
   }, 700)
 }
 
+/**
+ * Store writes that fail are reported into the log; the UI's log panel is the one
+ * place a background failure can be seen without a modal on every keystroke.
+ */
+setStoreErrorHandler((area, error) => {
+  pushLog('error', mainT('main.store.writeFailed', { area, error: error instanceof Error ? error.message : String(error) }))
+})
+
+/** Set once the control server exists; a settings save touches it when its block changed. */
+let onObsSettingsChanged: () => void = () => {}
+
 const engine = new StreamEngine({
   getFfmpegPath: () => resolveBinaries(loadSettings().ffmpegPath, loadSettings().ffprobePath).ffmpeg,
   getSettings: () => loadSettings().session,
@@ -94,7 +130,7 @@ const engine = new StreamEngine({
 })
 
 engine.setSink({
-  status: (status) => mainWindow?.webContents.send(IPC.evtStatus, status),
+  status: (status) => sendToWindow(IPC.evtStatus, status),
   log: (entry) => {
     // The engine tags entries with the file they belong to so a later reader can
     // tell which item a warning or failure came from.
@@ -105,7 +141,7 @@ engine.setSink({
   playlist: (items) => {
     // The engine mutates the same objects we hold, so status changes flow through.
     playlist = items
-    mainWindow?.webContents.send(IPC.evtPlaylist, items)
+    sendToWindow(IPC.evtPlaylist, items)
     schedulePersist()
   }
 })
@@ -123,6 +159,12 @@ const services: AppServices = {
     }
     // The window itself is painted in the palette this setting asks for.
     if (before.theme !== next.theme) syncWindowTheme()
+    // Every save (preset apply, obs-websocket's own write, a settings tab) goes
+    // through here. Comparing the blocks keeps the listener in step without
+    // restarting it on unrelated saves.
+    if (JSON.stringify(before.session.output.obsWebSocket) !== JSON.stringify(next.session.output.obsWebSocket)) {
+      onObsSettingsChanged()
+    }
     return next
   },
   setLanguage: (language) => persistLanguage(language),
@@ -139,7 +181,7 @@ const services: AppServices = {
     if (items.length > 0) {
       playlist = [...playlist, ...items]
       engine.setPlaylist(playlist)
-      mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+      sendToWindow(IPC.evtPlaylist, playlist)
       schedulePersist()
       const withSubs = items.filter((i) => i.subtitleTracks.length > 0).length
       pushLog(
@@ -166,7 +208,7 @@ const services: AppServices = {
     item.selectedSubtitleId = ref.id
     if (item.mode === 'off') item.mode = s.session.subtitles.mode === 'off' ? 'burn' : s.session.subtitles.mode
     engine.setPlaylist(playlist)
-    mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+    sendToWindow(IPC.evtPlaylist, playlist)
     pushLog('info', mainT('main.engine.subtitleAttached', { name: item.name, file: path.basename(filePath) }))
     schedulePersist()
     return item
@@ -174,19 +216,19 @@ const services: AppServices = {
   removeItem: (itemId: string) => {
     playlist = playlist.filter((i) => i.id !== itemId)
     engine.setPlaylist(playlist)
-    mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+    sendToWindow(IPC.evtPlaylist, playlist)
     schedulePersist()
   },
   clearPlaylist: () => {
     playlist = []
     engine.setPlaylist(playlist)
-    mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+    sendToWindow(IPC.evtPlaylist, playlist)
     schedulePersist()
   },
   reorder: (orderedIds: string[]) => {
     playlist = reorderById(playlist, orderedIds)
     engine.setPlaylist(playlist)
-    mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+    sendToWindow(IPC.evtPlaylist, playlist)
     schedulePersist()
   },
   updateItem: (itemId: string, patch: Partial<PlaylistItem>) => {
@@ -196,7 +238,7 @@ const services: AppServices = {
     if (patch.mode !== undefined) item.mode = patch.mode
     if (patch.syncOffsetSec !== undefined) item.syncOffsetSec = Number(patch.syncOffsetSec) || 0
     if (patch.subtitleDelaySec !== undefined) item.subtitleDelaySec = Number(patch.subtitleDelaySec) || 0
-    mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+    sendToWindow(IPC.evtPlaylist, playlist)
     schedulePersist()
     return item
   },
@@ -232,10 +274,20 @@ const obs = new ObsWebSocketServer({
   },
   applyStreamTarget: (patch) => {
     const current = loadSettings()
-    saveSettings({ session: { ...current.session, output: { ...current.session.output, ...patch } } })
-    // The renderer keeps its own copy of the settings, so tell it to re-read
-    // them; otherwise the RTMP tab would still show the old destination.
-    mainWindow?.webContents.send(IPC.evtSettings, saveSettings({}))
+    const output = { ...current.session.output, ...patch }
+    if (patch.server !== undefined) {
+      if (!output.server.trim()) throw new Error(mainT('main.dialog.emptyServer'))
+      // The protocol is derived from the address everywhere else; a remote client
+      // writing `srt://…` into a session still marked rtmp would otherwise reach
+      // ffmpeg as `-f flv srt://…`.
+      const protocol = detectStreamProtocol(output.server)
+      output.protocol = protocol
+      output.network = networkForProtocol(protocol, output.network)
+    }
+    // One write, not two: the second `saveSettings({})` used to rewrite the same
+    // file and broadcast the same settings again.
+    const next = saveSettings({ session: { ...current.session, output } })
+    sendToWindow(IPC.evtSettings, next)
   },
   engineState: () => engine.getStatus().state,
   startStream: () => engine.start(),
@@ -245,6 +297,10 @@ const obs = new ObsWebSocketServer({
   // the endpoint's next log line rather than at the next restart.
   t: (key, params) => mainT(key, params)
 })
+
+onObsSettingsChanged = () => {
+  obs.apply()
+}
 
 /* ------------------------------------------------------------------ *
  * Window
@@ -309,11 +365,46 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    try {
+      const scheme = new URL(url).protocol
+      // Only ordinary web links go to the system browser. A `file:`/`javascript:`
+      // target from a compromised page must not become an arbitrary handler call.
+      if (scheme === 'http:' || scheme === 'https:') void shell.openExternal(url)
+    } catch {
+      /* malformed URL: deny silently */
+    }
     return { action: 'deny' }
   })
+  // The renderer never navigates away from its own page. Chromium's default for an
+  // unhandled file drop is to navigate to the dropped file, which replaced the whole
+  // UI while the stream kept running.
+  const blockNavigation = (event: Electron.Event, url: string): void => {
+    if (mainWindow && url === mainWindow.webContents.getURL()) return
+    event.preventDefault()
+  }
+  mainWindow.webContents.on('will-navigate', blockNavigation)
+  mainWindow.webContents.on('will-redirect', blockNavigation)
+  /*
+   * The renderer's `beforeunload` cancels the close while a session is live, and
+   * without this listener Electron simply refuses to close — no prompt, no reason.
+   * Ask here, and let the unload proceed only when the user chooses to leave.
+   */
+  mainWindow.webContents.on('will-prevent-unload', (event) => {
+    if (!engine.isActive()) return
+    const choice = dialog.showMessageBoxSync(mainWindow as BrowserWindow, {
+      type: 'question',
+      buttons: [mainT('main.dialog.leaveWhileStreaming'), mainT('main.dialog.stayWhileStreaming')],
+      defaultId: 1,
+      cancelId: 1,
+      title: mainT('main.dialog.closeWhileStreamingTitle'),
+      message: mainT('main.dialog.closeWhileStreaming')
+    })
+    if (choice === 0) event.preventDefault()
+  })
 
-  const devUrl = process.env['ELECTRON_RENDERER_URL']
+  // A packaged build must ignore the dev-server variable even if the environment
+  // happens to set it, or a local page could take over the app's bridge.
+  const devUrl = app.isPackaged ? undefined : process.env['ELECTRON_RENDERER_URL']
   if (devUrl) {
     void mainWindow.loadURL(devUrl)
   } else {
@@ -337,6 +428,10 @@ if (!app.requestSingleInstanceLock()) {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
+    } else {
+      // macOS can keep the process alive with no window; a second launch should
+      // bring the app back rather than silently do nothing.
+      createWindow()
     }
   })
 
@@ -371,7 +466,7 @@ if (!app.requestSingleInstanceLock()) {
      * a bug — so the check is run here (and in the unit suite) instead of being left
      * to whoever notices a stray English sentence.
      */
-    for (const problem of assertCatalogsComplete(EN, { zh: TRANSLATIONS.zh, ja: TRANSLATIONS.ja })) {
+    for (const problem of assertCatalogsComplete(EN, { zh: ZH, ja: JA })) {
       pushLog('warn', `[i18n] ${problem}`)
     }
 
@@ -391,7 +486,7 @@ if (!app.requestSingleInstanceLock()) {
     if (persisted.length > 0) {
       playlist = persisted
       engine.setPlaylist(playlist)
-      mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+      sendToWindow(IPC.evtPlaylist, playlist)
       pushLog('info', mainT('main.engine.restoredPlaylist', { n: persisted.length }))
       // Refresh durations in the background; files may have moved or changed.
       const s = loadSettings()
@@ -407,6 +502,12 @@ if (!app.requestSingleInstanceLock()) {
             changed = true
             continue
           }
+          // The file is readable again: clear a stale "unreadable" badge.
+          if (item.broken) {
+            item.broken = false
+            delete item.error
+            changed = true
+          }
           if (info.durationSec && Math.abs(info.durationSec - item.durationSec) > 0.5) {
             item.durationSec = info.durationSec
             changed = true
@@ -420,7 +521,7 @@ if (!app.requestSingleInstanceLock()) {
         }
         if (changed) {
           engine.setPlaylist(playlist)
-          mainWindow?.webContents.send(IPC.evtPlaylist, playlist)
+          sendToWindow(IPC.evtPlaylist, playlist)
           schedulePersist()
         }
       })()
@@ -459,24 +560,46 @@ if (!app.requestSingleInstanceLock()) {
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
+      // macOS keeps the process alive after the last window closes, but
+      // `window-all-closed` stopped the control endpoint. Bring it back with the
+      // saved settings so the remote clients are not permanently orphaned.
+      onObsSettingsChanged()
     })
   })
 
   app.on('window-all-closed', () => {
     obs.stop()
-    void engine.stop().finally(() => {
+    void engine.stop().catch(() => {}).finally(() => {
       if (process.platform !== 'darwin') app.quit()
     })
   })
 
-  app.on('before-quit', () => {
+  let quitting = false
+  let quitFinished = false
+  app.on('before-quit', (event) => {
+    /*
+     * Quitting must not leave ffmpeg pushing. `window-all-closed` covers the
+     * ordinary close, but macOS Dock→Quit, a system logout and `app.quit()` do not
+     * go through it; Electron does not reap child processes on exit.
+     */
+    if (quitFinished) return
+    event.preventDefault()
+    if (quitting) return
+    quitting = true
     if (saveTimer) {
       clearTimeout(saveTimer)
       saveTimer = null
     }
     persistPlaylist(playlist)
     pushLog('info', mainT('main.engine.exiting'))
-    closeLogSession()
-    obs.stop()
+    void engine
+      .stop()
+      .catch(() => {})
+      .finally(() => {
+        obs.stop()
+        closeLogSession()
+        quitFinished = true
+        app.quit()
+      })
   })
 }

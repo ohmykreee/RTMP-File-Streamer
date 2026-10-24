@@ -3,6 +3,7 @@ import net, { type Server, type Socket } from 'node:net'
 import type { EngineState, ObsWebSocketSettings, ObsWebSocketStatus } from '@shared/types'
 import type { Translate, TranslationKey } from '@shared/i18n'
 import { EN } from '@shared/i18n'
+import { OBS_PORT_MAX, OBS_PORT_MIN } from '@shared/defaults'
 
 /**
  * A minimal obs-websocket v5 compatible control endpoint.
@@ -49,11 +50,6 @@ const OP_REQUEST_RESPONSE = 7
 
 /** obs-websocket `RequestStatus` codes. */
 const REQUEST_STATUS = { success: 100, notSupported: 204, invalidData: 400, notIdentified: 403 } as const
-
-const AVATAR = ((): string => {
-  const a = ['🟢', '⚪', '🔵', '🟣']
-  return a[Math.floor(Math.random() * a.length)]
-})()
 
 export interface ObsWebSocketDeps {
   settings: () => ObsWebSocketSettings
@@ -186,6 +182,16 @@ export class ObsWebSocketServer {
   private lastError = ''
   private boundHost = ''
   private boundPort = 0
+  /** Identity of the listener currently expected to own the port. */
+  private runningKey = ''
+  /**
+   * Monotonic identity for listener callbacks.
+   *
+   * `listen` and its error handler are asynchronous; a callback from a listener
+   * that `apply()` or `stop()` has already replaced must not write back into the
+   * new one's state.
+   */
+  private generation = 0
 
   constructor(deps: ObsWebSocketDeps) {
     this.deps = deps
@@ -200,11 +206,14 @@ export class ObsWebSocketServer {
     const configured = this.deps.settings()
     const host = this.server ? this.boundHost : configured.host || '127.0.0.1'
     const port = this.server ? this.boundPort : Number(configured.port) || 0
+    // `0.0.0.0` is a bind address, not something a client can connect to; show the
+    // loopback equivalent instead of a URL that fails for every client.
+    const connectHost = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '::1' : host
     return {
       running: this.server !== null,
       host,
       port,
-      url: `ws://${host.includes(':') ? `[${host}]` : host}:${port}`,
+      url: `ws://${connectHost.includes(':') ? `[${connectHost}]` : connectHost}:${port}`,
       clients: this.identifiedCount(),
       error: this.lastError
     }
@@ -223,20 +232,42 @@ export class ObsWebSocketServer {
 
     const host = (cfg.host || '127.0.0.1').trim()
     const port = normalizePort(cfg.port)
-    if (this.server && this.boundHost === host && this.boundPort === port) return this.status()
+    // The password is part of the identity: changing it must drop existing
+    // connections, which were authorised against the old one.
+    const key = `${host}|${port}|${cfg.password}`
+    if (this.server && this.runningKey === key) return this.status()
 
     this.stop()
-    this.start(host, port)
+    this.start(host, port, key)
     return this.status()
   }
 
-  private start(host: string, port: number): void {
+  private start(host: string, port: number, key: string): void {
     this.lastError = ''
+    this.generation += 1
+    const generation = this.generation
     const server = net.createServer((socket) => this.onConnection(socket))
+    /*
+     * Publish the listener synchronously. It used to be assigned only in the
+     * `listen` callback, while `apply()`'s de-duplication read `this.server` — two
+     * applies inside that window each started a listener, and the older one kept
+     * the port open with no handle left to close it.
+     */
+    this.server = server
+    this.runningKey = key
+    this.boundHost = host
+    this.boundPort = port
     server.on('error', (err: NodeJS.ErrnoException) => {
-      this.lastError = err.code === 'EADDRINUSE' ? `端口 ${port} 已被占用` : err.message
-      this.deps.log('error', `obs-websocket 服务启动失败（${host}:${port}）：${this.lastError}`)
-      this.server = null
+      if (generation !== this.generation) return
+      this.lastError =
+        err.code === 'EADDRINUSE'
+          ? this.t('main.engine.obsPortInUse', { port })
+          : err.message
+      this.deps.log('error', this.t('main.engine.obsStartFailed', { host, port, error: this.lastError }))
+      if (this.server === server) {
+        this.server = null
+        this.runningKey = ''
+      }
       try {
         server.close()
       } catch {
@@ -244,27 +275,35 @@ export class ObsWebSocketServer {
       }
     })
     server.listen({ host, port, exclusive: true }, () => {
-      this.server = server
-      this.boundHost = host
-      this.boundPort = port
+      if (generation !== this.generation) {
+        // A newer apply()/stop() superseded this listener while DNS/bind resolved.
+        try {
+          server.close()
+        } catch {
+          /* ignore */
+        }
+        return
+      }
       this.lastError = ''
       this.deps.log(
         'info',
         this.t('main.engine.obsStarted', {
-          url: `ws://${host}:${port}`,
+          url: this.status().url,
           auth: this.t(this.deps.settings().password ? 'main.engine.obsNeedsPassword' : 'main.engine.obsNoPassword')
         })
       )
+      const password = this.deps.settings().password
+      if (!password && !isLoopback(host)) {
+        this.deps.log('warn', this.t('main.engine.obsExposedNoPassword', { host }))
+      }
     })
-    // The listener address is only known after the async listen callback; keep
-    // the requested values so `status()` is correct even before it fires.
-    this.boundHost = host
-    this.boundPort = port
   }
 
   stop(): void {
+    this.generation += 1
     const server = this.server
     this.server = null
+    this.runningKey = ''
     for (const c of [...this.clients]) this.dropClient(c)
     if (server) {
       try {
@@ -316,7 +355,7 @@ export class ObsWebSocketServer {
     }
     const known = this.clients.delete(client)
     if (known && client.identified && !silent) {
-      this.deps.log('info', `obs-websocket 客户端已断开：${client.remote}`)
+      this.deps.log('info', this.t('main.engine.obsClientDisconnected', { remote: client.remote }))
     }
     if (graceMs > 0) {
       // Give the close frame a moment to reach the client before the socket is
@@ -370,7 +409,30 @@ export class ObsWebSocketServer {
     }
     const key = headers.get('sec-websocket-key')
     const upgrade = (headers.get('upgrade') ?? '').toLowerCase()
-    if (!/^GET\s/i.test(requestLine) || upgrade !== 'websocket' || !key) {
+    const version = headers.get('sec-websocket-version')
+    const connection = (headers.get('connection') ?? '').toLowerCase()
+    const origin = headers.get('origin')
+    /*
+     * Browsers do not apply the same-origin policy to WebSocket handshakes, so any
+     * page the user visits can reach a loopback listener. Without this check a
+     * page could call SetStreamServiceSettings (which writes the target with no
+     * further validation) and StartStream, sending the stream to the attacker.
+     * Native clients (OBS, Streamer.bot, …) omit Origin entirely; the app's own
+     * renderer is a file:// page.
+     */
+    if (origin && !isAllowedOrigin(origin)) {
+      client.socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      this.deps.log('warn', this.t('main.engine.obsOriginRejected', { origin }))
+      this.dropClient(client, true)
+      return false
+    }
+    if (
+      !/^GET\s/i.test(requestLine) ||
+      upgrade !== 'websocket' ||
+      !key ||
+      version !== '13' ||
+      !connection.includes('upgrade')
+    ) {
       client.socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n')
       this.dropClient(client, true)
       return false
@@ -427,6 +489,13 @@ export class ObsWebSocketServer {
         client.fragmentOpcode = opcode
         client.fragment = payload
       } else if (opcode === 0x0 && client.fragment) {
+        // The per-frame limit does not bound a continuation chain: a client could
+        // send 16 MB fragments forever and grow this buffer without limit. Cap the
+        // assembled message, not just one frame.
+        if (client.fragment.length + payload.length > MAX_FRAME_BYTES) {
+          this.closeWith(client, 1009, 'message too large')
+          return
+        }
         client.fragment = Buffer.concat([client.fragment, payload])
       } else {
         this.closeWith(client, 1002, 'unexpected opcode')
@@ -545,8 +614,8 @@ export class ObsWebSocketServer {
       // Without the challenge pair that was sent in the Hello there is nothing
       // to verify against, so the connection is refused rather than trusted.
       const expected = challenge ? obsAuthString(cfg.password, challenge.salt, challenge.challenge) : ''
-      if (!authentication || !expected || authentication !== expected) {
-        this.deps.log('warn', `obs-websocket 认证失败：${client.remote}`)
+      if (!authentication || !expected || !timingSafeEqual(authentication, expected)) {
+        this.deps.log('warn', this.t('main.engine.obsAuthFailed', { remote: client.remote }))
         this.closeWith(client, 4009, 'authentication failed')
         return
       }
@@ -555,7 +624,7 @@ export class ObsWebSocketServer {
     client.identified = true
     client.sessionId = `rtmp-file-streamer-${client.id}`
     this.send(client, { op: OP_IDENTIFIED, d: { negotiatedRpcVersion: OBS_WS_RPC_VERSION } })
-    this.deps.log('info', `obs-websocket 客户端已连接：${client.remote}`)
+    this.deps.log('info', this.t('main.engine.obsClientConnected', { remote: client.remote }))
   }
 
   private readonly pendingAuth = new WeakMap<Client, { salt: string; challenge: string }>()
@@ -574,7 +643,7 @@ export class ObsWebSocketServer {
       this.respond(client, requestId, status, comment, response)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
-      this.deps.log('warn', `obs-websocket 请求 ${requestType} 失败：${message}`)
+      this.deps.log('warn', this.t('main.engine.obsRequestFailed', { type: requestType, message }))
       this.respond(client, requestId, REQUEST_STATUS.invalidData, message, {})
     }
   }
@@ -609,7 +678,7 @@ export class ObsWebSocketServer {
             // A recognisable platform name keeps clients from rejecting a
             // "non-OBS" endpoint during their handshake.
             platform: process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux',
-            platformDescription: `RTMP File Streamer (${AVATAR})`
+            platformDescription: 'RTMP File Streamer'
           }
         }
 
@@ -673,7 +742,10 @@ export class ObsWebSocketServer {
         const server = typeof settings.server === 'string' ? settings.server.trim() : undefined
         const key = typeof settings.streamKey === 'string' ? settings.streamKey : undefined
         if (server === undefined && key === undefined) {
-          return { status: REQUEST_STATUS.invalidData, comment: 'streamServiceSettings 缺少 server / streamKey', response: {} }
+          return { status: REQUEST_STATUS.invalidData, comment: this.t('main.engine.obsMissingTarget'), response: {} }
+        }
+        if (server !== undefined && server === '') {
+          return { status: REQUEST_STATUS.invalidData, comment: this.t('main.dialog.emptyServer'), response: {} }
         }
         this.deps.applyStreamTarget({ ...(server !== undefined ? { server } : {}), ...(key !== undefined ? { streamKey: key } : {}) })
         this.deps.log(
@@ -712,12 +784,8 @@ export class ObsWebSocketServer {
    * ---------------------------------------------------------- */
 
   private obsVersion(): string {
-    try {
-      const v = process.versions.electron ?? '0.0.0'
-      return `${v.split('.')[0]}.0.0`
-    } catch {
-      return '30.0.0'
-    }
+    const v = process.versions.electron ?? '0.0.0'
+    return `${v.split('.')[0]}.0.0`
   }
 
   private engineBusy(): boolean {
@@ -726,10 +794,11 @@ export class ObsWebSocketServer {
   }
 
   private streamStatus(): Record<string, unknown> {
-    const active = this.deps.engineState() === 'live'
+    const state = this.deps.engineState()
+    const active = state === 'live' || state === 'draining' || state === 'reconnecting'
     return {
       outputActive: active,
-      outputReconnecting: this.deps.engineState() === 'reconnecting',
+      outputReconnecting: state === 'reconnecting',
       outputTimecode: '00:00:00.000',
       outputDuration: 0,
       outputCongestion: 0,
@@ -747,6 +816,37 @@ export class ObsWebSocketServer {
 
 function normalizePort(value: unknown): number {
   const n = Math.round(Number(value))
-  if (!Number.isFinite(n) || n < 1) return 4455
-  return Math.min(65535, n)
+  if (!Number.isFinite(n) || n < OBS_PORT_MIN) return 4455
+  return Math.min(OBS_PORT_MAX, n)
+}
+
+/** Loopback addresses either stack can report. */
+function isLoopback(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost'
+}
+
+/**
+ * Browsers send `Origin`; native obs-websocket clients do not. Only the app's own
+ * page (`file://`) and a local dev server may connect from a browser context.
+ */
+function isAllowedOrigin(origin: string): boolean {
+  if (origin === 'null' || origin === 'file://') return true
+  try {
+    const url = new URL(origin)
+    if (url.protocol === 'file:') return true
+    return (
+      (url.protocol === 'http:' || url.protocol === 'https:') &&
+      (url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '[::1]')
+    )
+  } catch {
+    return false
+  }
+}
+
+/** Constant-time comparison for the two base64 authentication strings. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8')
+  const right = Buffer.from(b, 'utf8')
+  if (left.length !== right.length) return false
+  return crypto.timingSafeEqual(left, right)
 }

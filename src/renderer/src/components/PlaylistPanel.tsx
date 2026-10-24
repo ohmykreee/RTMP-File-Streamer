@@ -10,6 +10,7 @@ import { Field, FieldLabel } from '@renderer/components/ui/field'
 import { NativeSelect, NativeSelectOption } from '@renderer/components/ui/native-select'
 import { ScrollArea } from '@renderer/components/ui/scroll-area'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@renderer/components/ui/tooltip'
+import { TooltipButton } from '@renderer/components/ui/tooltip-button'
 import NumberInput from './NumberInput'
 import { formatBytes, formatDuration, languageLabel, STATUS_KEY } from '../lib/format'
 import { useT } from '../i18n'
@@ -18,11 +19,12 @@ interface PlaylistPanelProps {
   items: PlaylistItem[]
   currentIndex: number
   active: boolean
+  /** Whether starting a session is currently possible (target + ffmpeg present). */
+  canStart: boolean
   busy: boolean
   /** True while a stream is live: mutating the queue would break the session. */
   locked: boolean
   onAddVideos: () => void
-  onAddPaths: (paths: string[]) => void
   onRemove: (itemId: string) => void
   onClear: () => void
   onReorder: (orderedIds: string[]) => void
@@ -136,6 +138,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
     <aside
       className={`playlist${fileDrag ? ' file-drag' : ''}`}
       onDragEnter={(e) => {
+        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
         if (locked) return
         if (!dragId && e.dataTransfer?.types?.includes('Files')) setFileDrag(true)
       }}
@@ -143,12 +146,15 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
         if (e.currentTarget === e.target) setFileDrag(false)
       }}
       onDragOver={(e) => {
+        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
         if (locked) return
         if (!dragId && e.dataTransfer?.types?.includes('Files')) e.preventDefault()
       }}
       onDrop={(e) => {
-        if (locked || dragId) return
+        // Always prevent Chromium's default navigation to the dropped file, even
+        // while the queue is locked; the file is simply not added.
         e.preventDefault()
+        if (locked || dragId) return
         setFileDrag(false)
         const paths = videoPathsFromDrop(e)
         if (paths.length > 0) props.onFilesDropped(paths)
@@ -170,26 +176,26 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
           </p>
         </div>
         <div className="panel-head-actions">
-          <Button
+          <TooltipButton
             size="xs"
             onClick={props.onAddVideos}
             disabled={props.busy || locked}
-            title={locked ? t('playlist.addLockedTitle') : t('playlist.addTitle')}
+            label={locked ? t('playlist.addLockedTitle') : t('playlist.addTitle')}
           >
             <Plus data-icon="inline-start" />
             {t('playlist.addVideos')}
-          </Button>
-          <Button
+          </TooltipButton>
+          <TooltipButton
             size="icon-xs"
             variant="ghost"
             data-action="clear"
             onClick={props.onClear}
             disabled={props.busy || items.length === 0 || locked}
             aria-label={t('playlist.clear')}
-            title={t('playlist.clearTitle')}
+            label={t('playlist.clearTitle')}
           >
             <Trash2 />
-          </Button>
+          </TooltipButton>
         </div>
       </header>
 
@@ -221,7 +227,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                 draggable={!locked}
                 onDragStart={handleDragStart(item.id)}
                 onDragOver={handleDragOver(item.id)}
-                onDragLeave={() => setDropTarget((t) => (t === item.id ? null : t))}
+                onDragLeave={() => setDropTarget((target) => (target === item.id ? null : target))}
                 onDrop={handleDrop(item.id)}
                 onDragEnd={() => {
                   setDragId(null)
@@ -262,7 +268,16 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                 </div>
 
                 <div className="pi-actions">
-                  {action('jump', t('playlist.startFromHereTitle'), <Play />, () => props.onJump(item.id))}
+                  {action(
+                    'jump',
+                    props.active ? t('playlist.jumpToHereTitle') : t('playlist.startFromHereTitle'),
+                    <Play />,
+                    () => props.onJump(item.id),
+                    // Starting from a row while the target is empty only reaches
+                    // ffmpeg as an empty URL; the footer button is already disabled
+                    // for the same reason.
+                    { disabled: !props.active && !props.canStart }
+                  )}
                   {/* The captions icon is the row's way into its subtitle settings; the
                       external-file picker lives inside that panel, next to the track
                       list it adds to. */}
@@ -316,7 +331,17 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
                         wrapperClassName="w-full"
                         value={item.selectedSubtitleId ?? ''}
                         disabled={locked}
-                        onChange={(e) => props.onUpdateItem(item.id, { selectedSubtitleId: e.target.value || null })}
+                        onChange={(e) => {
+                          const selectedSubtitleId = e.target.value || null
+                          // "No subtitle" must also turn the processing mode off;
+                          // leaving it on `burn` made the builder fall back to the
+                          // first track, so the UI said "none" and the output still
+                          // carried subtitles.
+                          props.onUpdateItem(item.id, {
+                            selectedSubtitleId,
+                            ...(selectedSubtitleId === null ? { mode: 'off' } : item.mode === 'off' ? { mode: 'burn' } : {})
+                          })
+                        }}
                       >
                         <NativeSelectOption value="">{t('playlist.noSubtitle')}</NativeSelectOption>
                         {item.subtitleTracks.map((track) => (

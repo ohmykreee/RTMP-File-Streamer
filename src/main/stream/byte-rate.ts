@@ -55,8 +55,21 @@ export class ByteRateMeter {
    */
   add(totalBytes: number, nowMs: number): void {
     if (!Number.isFinite(totalBytes) || totalBytes <= 0) return
-    if (this.last < 0) this.startedAt = nowMs
-    else if (totalBytes <= this.last) return
+    if (this.last < 0) {
+      this.startedAt = nowMs
+    } else if (totalBytes < this.last) {
+      /*
+       * A cumulative counter does not go backwards: a lower value means a new
+       * process (the next file in the single-process pipeline, or a republished
+       * session) started counting from zero. Carrying the old baseline forward
+       * made every sample of that process look like a duplicate and the network
+       * readout stayed blank until it exceeded the previous file's total.
+       */
+      this.reset()
+      this.startedAt = nowMs
+    } else if (totalBytes === this.last) {
+      return
+    }
     this.last = totalBytes
     this.bytes.push(totalBytes)
     this.stamps.push(nowMs)
@@ -79,6 +92,12 @@ export class ByteRateMeter {
     if (nowMs - this.startedAt < MIN_ELAPSED_MS) return 0
     const oldest = this.stamps[0]
     const newest = this.stamps[this.stamps.length - 1]
+    /*
+     * No sample inside the window means the counter stopped moving. Returning the
+     * last window's rate painted a dead publisher as healthy and kept the status
+     * line green after a stall; "no figure" is the honest answer.
+     */
+    if (nowMs - newest > WINDOW_MS) return 0
     const spanMs = newest - oldest
     if (spanMs < MIN_SPAN_MS) return 0
     const bytes = this.bytes[this.bytes.length - 1] - this.bytes[0]
