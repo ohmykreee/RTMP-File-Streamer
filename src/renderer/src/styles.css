@@ -726,7 +726,7 @@ input[type='number'] {
    */
   .drop-overlay {
     position: fixed;
-    inset: 8px;
+    inset: 4px;
     z-index: 50;
     display: grid;
     place-items: center;
