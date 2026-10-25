@@ -37,14 +37,20 @@ export const PROTOCOL_CONTAINER: Record<StreamProtocol, ContainerName | null> = 
 }
 
 /**
- * Network transports each protocol can use. SRT is UDP-only, WHIP rides HTTP(S)
- * over TCP, and RTMP is TCP-only; RTSP is the one protocol with a real choice.
+ * Network transports each protocol's media actually travels over. SRT is
+ * UDP-only and RTMP is TCP-only; RTSP is the one protocol with a real choice.
+ *
+ * WHIP is the easy one to get wrong: only its HTTP(S) signalling (the SDP
+ * POST/PATCH and the DELETE) goes over TCP. The media itself is WebRTC — ICE,
+ * DTLS and SRTP datagrams — so it rides UDP. ffmpeg's `whip` muxer has no
+ * transport option and keeps the first UDP ICE candidate only, so there is
+ * nothing to choose here: do not "restore" TCP because the endpoint is http(s).
  */
 export const PROTOCOL_NETWORKS: Record<StreamProtocol, StreamNetwork[]> = {
   rtmp: ['tcp'],
   srt: ['udp'],
   rtsp: ['tcp', 'udp'],
-  whip: ['tcp']
+  whip: ['udp']
 }
 
 export const DEFAULT_STREAM_PROTOCOL: StreamProtocol = 'rtmp'
