@@ -118,7 +118,7 @@
 | 依赖 | 说明 |
 | --- | --- |
 | **FFmpeg + FFprobe** | 必需。自动按以下顺序查找：设置中手动指定 → 程序目录 `bin/`（打包版为 `resources/bin/`）→ `PATH` → 常见安装路径。**建议使用带字幕滤镜支持的完整版构建**，否则无法烧录文本字幕 |
-| 操作系统 | Windows 10/11 x64（已验证）；macOS / Linux 同样支持 |
+| 操作系统 | Windows 10/11 x64（已验证）；macOS / Linux 同样支持；另提供 Windows / Linux / macOS 的 arm64（Apple 芯片）版本 |
 
 ---
 

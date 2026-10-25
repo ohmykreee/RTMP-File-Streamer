@@ -1,13 +1,14 @@
-# Publishing a release: build the portable archives for all three platforms and
-# attach them to that release.
+# Publishing a release: build the portable archives and attach them to that
+# release.
 #
 # Triggered by `release: created` — publishing a release is the act that says
 # "these artifacts are the release". `build.yml` covers the push-to-main case and
 # stops at the artifact; this one is the only place that writes to a release.
 #
-# Same build layout as `build.yml`: Windows and Linux in one Ubuntu job, each as a
-# self-contained package→archive→upload step, and macOS on its own runner because
-# electron-builder will not build for darwin anywhere else.
+# Same build layout as `build.yml`: every Windows/Linux architecture is its own
+# Ubuntu job, cross-built (see the matrix there), and macOS on its own runner
+# with both archs (`macos-latest` is Apple silicon, so the Apple-silicon leg is
+# native there and the Intel leg is cross-compiled).
 #
 # The gate is the same file `build.yml` uses (`checks.yml`: typecheck + backend
 # tests, Ubuntu only). Only the last job differs — this workflow attaches the
@@ -29,9 +30,32 @@ jobs:
     name: checks
     uses: ./.github/workflows/checks.yml
 
-  portable-linux-host:
-    name: portable (Windows + Linux, x86_64)
+  # Same matrix as `build.yml`'s packaging job; the two must stay in sync, and
+  # `build.yml`'s header explains the shape (one self-contained job per
+  # architecture, cross-built on Ubuntu).
+  portable:
+    name: portable (${{ matrix.platform }}-${{ matrix.arch }})
     needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win
+            arch: amd64
+            builder-arch: x64
+            outdir: win-unpacked
+          - platform: win
+            arch: arm64
+            builder-arch: arm64
+            outdir: win-arm64-unpacked
+          - platform: linux
+            arch: amd64
+            builder-arch: x64
+            outdir: linux-unpacked
+          - platform: linux
+            arch: arm64
+            builder-arch: arm64
+            outdir: linux-arm64-unpacked
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -49,62 +73,56 @@ jobs:
           version: 12.8.1
 
       # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
-      # which build scripts run, and `electron`'s is required — electron-builder
-      # packages the runtime that postinstall puts in node_modules.
+      # which build scripts run, and esbuild's is required — the vite bundle step
+      # dies without its platform binary.
       - name: Prepare workspace
         run: pnpm ci
 
       - name: Build the app bundles
         run: pnpm run build
 
-      # --- Windows -------------------------------------------------------------
-      # One self-contained step per target: package, archive, upload.
-
-      - name: Package Windows (x86_64)
-        run: pnpm exec electron-builder --win --x64 --dir --config electron-builder.config.cjs
+      - name: Package (${{ matrix.platform }} ${{ matrix.builder-arch }})
+        run: pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
 
       # The runner's own `zip`, run from inside `release/` so the archive's single
-      # top-level entry is the folder itself (`win-unpacked/…`).
-      - name: Archive Windows
+      # top-level entry is the unpacked folder itself (`win-unpacked/…`).
+      - name: Archive (${{ matrix.platform }}-${{ matrix.arch }})
         run: |
           mkdir -p dist
-          (cd release && zip -r -q ../dist/rtmp-file-streamer-win-x86_64.zip win-unpacked)
-          unzip -l dist/rtmp-file-streamer-win-x86_64.zip | head -3
-          ls -lh dist/rtmp-file-streamer-win-x86_64.zip
+          name="rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}"
+          (cd release && zip -r -q "../dist/${name}.zip" "${{ matrix.outdir }}")
+          unzip -l "dist/${name}.zip" | head -3
+          case "${{ matrix.platform }}" in
+            win)   unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|RTMPFileStreamer\.exe)' || exit 1 ;;
+            linux) unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|rtmp-file-streamer$|chrome-sandbox)' || exit 1 ;;
+          esac
+          ls -lh "dist/${name}.zip"
 
-      - name: Upload the Windows build
+      - name: Upload the build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-win-x86_64
-          path: dist/rtmp-file-streamer-win-x86_64.zip
+          name: rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
-      # --- Linux ---------------------------------------------------------------
-      - name: Package Linux (x86_64)
-        run: |
-          rm -rf release/win-unpacked
-          pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.cjs
-
-      - name: Archive Linux
-        run: |
-          (cd release && zip -r -q ../dist/rtmp-file-streamer-linux-x86_64.zip linux-unpacked)
-          unzip -l dist/rtmp-file-streamer-linux-x86_64.zip | head -3
-          ls -lh dist/rtmp-file-streamer-linux-x86_64.zip
-
-      - name: Upload the Linux build
-        uses: actions/upload-artifact@v7
-        with:
-          name: rtmp-file-streamer-linux-x86_64
-          path: dist/rtmp-file-streamer-linux-x86_64.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 7
-
+  # Same matrix as `build.yml`'s macOS job (`mac-intel` and a bare `mac` for the
+  # Apple-silicon build; `macos-latest` is arm64 hardware, so that leg is native
+  # and the Intel leg is cross-compiled on it).
   portable-macos:
-    name: portable (macOS)
+    name: portable (macOS${{ matrix.suffix }})
     needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: '-intel'
+            builder-arch: x64
+            outdir: mac
+          - suffix: ''
+            builder-arch: arm64
+            outdir: mac-arm64
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -122,7 +140,7 @@ jobs:
           version: 12.8.1
 
       # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
-      # which build scripts run. macOS needs `electron`'s, and pays for
+      # which build scripts run. macOS needs esbuild's, and pays for
       # `electron-winstaller`'s 30 MB 7z download, which only serves the Squirrel/NSIS
       # installers this project does not build — dropping that entry from the allowlist
       # is the way to get rid of it.
@@ -132,43 +150,43 @@ jobs:
       - name: Build the app bundles
         run: pnpm run build
 
-      - name: Package macOS
-        run: pnpm exec electron-builder --mac --x64 --dir --config electron-builder.config.cjs
+      - name: Package macOS (${{ matrix.builder-arch }})
+        run: pnpm exec electron-builder --mac --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
 
       - name: Ad-hoc sign the bundle
         run: |
-          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
+          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
           echo "signing ${app}"
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
 
-      - name: Archive macOS
+      - name: Archive macOS (${{ matrix.builder-arch }})
         run: |
           mkdir -p dist
-          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
-          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac.zip
+          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
+          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac${{ matrix.suffix }}.zip
           ls -lh dist/
 
       - name: Upload the macOS build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-mac
-          path: dist/rtmp-file-streamer-mac.zip
+          name: rtmp-file-streamer-mac${{ matrix.suffix }}
+          path: dist/rtmp-file-streamer-mac${{ matrix.suffix }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
 
   # The one job that makes this workflow different from `build.yml`. It runs on
-  # both triggers so a manual run still proves all three archives were produced
+  # both triggers so a manual run still proves all six archives were produced
   # and collected; only the upload itself is reserved for a real release event,
   # because a dispatch carries no release to attach to.
   attach:
     name: attach to release
-    needs: [portable-linux-host, portable-macos]
+    needs: [portable, portable-macos]
     runs-on: ubuntu-latest
     steps:
-      # One download step for all three archives, so they are attached in a single
-      # release update instead of three racing ones.
+      # One download step for all six archives, so they are attached in a single
+      # release update instead of six racing ones.
       - name: Download the portable artifacts
         uses: actions/download-artifact@v8
         with:
@@ -185,5 +203,5 @@ jobs:
         with:
           files: dist/*.zip
           # A missing archive means a platform silently produced nothing: fail rather
-          # than publish a release that is missing one of the three.
+          # than publish a release that is missing one of the six.
           fail_on_unmatched_files: true

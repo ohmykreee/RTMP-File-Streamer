@@ -42,13 +42,19 @@ pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.
 pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.cjs
 ```
 
+注意非 x64 架构的输出目录带架构后缀（`win-arm64-unpacked` / `linux-arm64-unpacked` /
+`mac-arm64`），x64 仍是 `win-unpacked` / `linux-unpacked` / `mac`（mac 无 `-unpacked` 后缀）。
+electron-builder 会自行按目标平台/架构下载 Electron dist，不使用 node_modules 里的那份。
+
 工具链：Node `26.7.0` / pnpm `12.8.1`（`package.json` 的 `engines`，CI 同样钉住）。
 `test:unit` 现场打包被测模块，**不需要先 build**；`test:e2e` 需要 `out/`。
 个别阈值贴着实测值（缓冲领先量）会偶发波动：失败先单独重跑一次再判断是不是回归。
 
-CI：`checks.yml`（门禁，唯一实现，另两个 `uses:` 它）→ `build.yml`（push main：打三平台 zip → artifact，
+CI：`checks.yml`（门禁，唯一实现，另两个 `uses:` 它）→ `build.yml`（push main：打 zip → artifact，
 **不碰 release**）/ `release.yml`（release created：同上 → `softprops/action-gh-release` 附上去）。
-artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS 单独 runner。
+artifact **只放最终 zip**；Windows/Linux 每个架构一个 Ubuntu leg 交叉编译（win/linux 各 amd64、arm64，
+产物名用 amd64，electron-builder 参数是 x64），macOS 单独 runner 上两个 leg（产物 mac-intel 与不带架构名的 mac，Apple 芯片版即裸 mac；
+`macos-latest` 是 Apple 芯片，Intel 版由它交叉编译）。两个打包 job 的矩阵必须同步改。
 
 ## 3. 不能动的约束
 

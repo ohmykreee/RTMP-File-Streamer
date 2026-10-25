@@ -5,21 +5,31 @@
 # folder IS the installation — the whole thing can be moved or copied anywhere and
 # keeps working. Each job then wraps that folder in a zip.
 #
-# Two runners, not three: Windows and Linux are both built in ONE Ubuntu job,
+# Every Windows and Linux leg is its own job on the same Ubuntu runner image,
 # because electron-builder cross-compiles `win` and `linux` from Linux and the
-# target is a directory (so no Wine). Inside that job each target is its own
-# self-contained step — package, archive, upload — so either can be re-run or
-# debugged without the other, and neither can pick up the other's leftovers.
-# macOS cannot join them: electron-builder refuses to build for darwin anywhere but
-# macOS ("Build for macOS is supported only on macOS" — verified locally).
+# target is a directory (so no Wine). One job per architecture — package, archive,
+# upload — means any single architecture can be re-run or debugged without the
+# others, and no leg can pick up another's leftovers (packaging rewrites
+# `release/`, which used to force the x64 legs to clear stale output between
+# targets; separate workspaces remove that whole class of problem). macOS cannot
+# join them: electron-builder refuses to build for darwin anywhere but macOS
+# ("Build for macOS is supported only on macOS" — verified locally), so it runs on
+# its own runner. And because `macos-latest` is Apple silicon (the Intel macos-13
+# image is retired), the `arm` leg builds natively there and the `amd64` leg is
+# cross-compiled on the same box — electron-builder fetches the matching darwin
+# dist, a `--dir` target runs nothing native, and ad-hoc codesign handles both.
+#
+# Architectures: electron-builder's `x64`/`arm64` are published under the names
+# `amd64`/`arm64`, except macOS, where the Intel build is `mac-intel` and the
+# Apple-silicon build keeps the bare `mac` name.
 #
 # It stops at the artifact on purpose. A merge to `main` is a build, not a
 # publication; attaching to a release is `release.yml`'s job.
 #
-# Three jobs, and only the first one is shared: the gate (`checks.yml` — typecheck
-# plus the backend test suite, on Ubuntu) and then one packaging job per runner.
-# Both packaging jobs `needs: checks`, so a red test stops the build before either
-# runner is spent on it.
+# Jobs: the shared gate (`checks.yml` — typecheck plus the backend test suite, on
+# Ubuntu), then one packaging job per Windows/Linux architecture plus the macOS
+# job (amd64 + arm). Every packaging job `needs: checks`, so a red test stops the
+# build before any runner is spent on it.
 name: Build
 
 on:
@@ -42,9 +52,36 @@ jobs:
     name: checks
     uses: ./.github/workflows/checks.yml
 
-  portable-linux-host:
-    name: portable (Windows + Linux, x86_64)
+  # One job per Windows/Linux architecture, all cross-built on Ubuntu. `arch` is
+  # the published name, `builder-arch` is what electron-builder's CLI takes, and
+  # `outdir` is the unpacked folder it writes — x64 keeps the historical
+  # `win-unpacked` / `linux-unpacked`, every other arch gets the arch appended
+  # (`win-arm64-unpacked`, verified locally).
+  portable:
+    name: portable (${{ matrix.platform }}-${{ matrix.arch }})
     needs: checks
+    strategy:
+      # One broken architecture must not cancel the others: each zip is an
+      # independently published artifact.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win
+            arch: amd64
+            builder-arch: x64
+            outdir: win-unpacked
+          - platform: win
+            arch: arm64
+            builder-arch: arm64
+            outdir: win-arm64-unpacked
+          - platform: linux
+            arch: amd64
+            builder-arch: x64
+            outdir: linux-unpacked
+          - platform: linux
+            arch: arm64
+            builder-arch: arm64
+            outdir: linux-arm64-unpacked
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -54,6 +91,8 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
+          # Exact version, matching local development: a floating `26` would let the
+          # compiler (and its lib types) drift between CI and a local run.
           node-version: 26.7.0
 
       - name: Setup pnpm
@@ -67,10 +106,14 @@ jobs:
       #
       # `--ignore-scripts` used to be here on the theory that electron-builder fetches
       # the Electron binary itself, so skipping `electron`'s own download avoided
-      # fetching it twice. That theory is wrong: electron-builder packages the runtime
-      # that `electron`'s postinstall already put in node_modules, so with the flag the
-      # binary is simply absent. It also does not fetch per-target runtimes — the
-      # packaging targets are directories, not installers.
+      # fetching it twice. What actually broke was esbuild: its postinstall is what
+      # puts the platform binary in place, and the vite bundle step dies without it
+      # (same reason the gate in `checks.yml` runs scripts). Electron's runtime is not
+      # the reason either way — electron-builder never touches the copy in
+      # node_modules; it downloads the TARGET platform/arch electron zip itself
+      # (verified in app-builder-lib's ElectronFramework and by packaging
+      # `--win --arm64` / `--linux --arm64` on a different host and checking the
+      # binary headers), which is exactly what makes these cross builds work.
       - name: Prepare workspace
         run: pnpm ci
 
@@ -85,63 +128,60 @@ jobs:
       - name: Build the app bundles
         run: pnpm run build
 
-      # --- Windows -------------------------------------------------------------
-      # One self-contained step per target: package, archive, upload. Each can be
-      # re-run or debugged on its own, and neither depends on the other's leftovers.
-
-      - name: Package Windows (x86_64)
-        run: pnpm exec electron-builder --win --x64 --dir --config electron-builder.config.cjs
+      - name: Package (${{ matrix.platform }} ${{ matrix.builder-arch }})
+        run: pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
 
       # `zip` is the runner's own; no pwsh and no Node helper. Run from inside
-      # `release/` so the archive's single top-level entry is the folder itself
-      # (`win-unpacked/…`), which is what the user ends up with after extracting.
-      - name: Archive Windows
+      # `release/` so the archive's single top-level entry is the unpacked folder
+      # itself (`win-unpacked/…`), which is what the user ends up with after
+      # extracting. The listing is grepped for the platform executable and the
+      # Data/ placeholder as a smoke check that the archive is not empty or from
+      # the wrong target. (zip stores the executable bit, which the Linux launcher
+      # and `chrome-sandbox` need after extraction; tar.gz was measured on this
+      # payload and is slightly LARGER — 153.8 MB vs 151 MB — so zip wins on size
+      # as well as on "what can the receiver open".)
+      - name: Archive (${{ matrix.platform }}-${{ matrix.arch }})
         run: |
           mkdir -p dist
-          (cd release && zip -r -q ../dist/rtmp-file-streamer-win-x86_64.zip win-unpacked)
-          unzip -l dist/rtmp-file-streamer-win-x86_64.zip | head -3
-          unzip -l dist/rtmp-file-streamer-win-x86_64.zip | grep -E 'unpacked/(Data/|RTMPFileStreamer\.exe)' | head -3
-          ls -lh dist/rtmp-file-streamer-win-x86_64.zip
+          name="rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}"
+          (cd release && zip -r -q "../dist/${name}.zip" "${{ matrix.outdir }}")
+          unzip -l "dist/${name}.zip" | head -3
+          case "${{ matrix.platform }}" in
+            win)   unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|RTMPFileStreamer\.exe)' || exit 1 ;;
+            linux) unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|rtmp-file-streamer$|chrome-sandbox)' || exit 1 ;;
+          esac
+          ls -lh "dist/${name}.zip"
 
-      - name: Upload the Windows build
+      - name: Upload the build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-win-x86_64
-          path: dist/rtmp-file-streamer-win-x86_64.zip
+          name: rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}
+          path: dist/rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-      # --- Linux ---------------------------------------------------------------
-      # The Windows output is cleared first: packaging rewrites `release/`, so the
-      # Linux archive must not be able to pick up a stale `win-unpacked`.
-      - name: Package Linux (x86_64)
-        run: |
-          rm -rf release/win-unpacked
-          pnpm exec electron-builder --linux --x64 --dir --config electron-builder.config.cjs
-
-      # `zip` stores the executable bit, which the launcher and `chrome-sandbox`
-      # need after extraction. tar.gz was measured on this payload and is slightly
-      # LARGER (153.8 MB vs 151 MB), so zip wins on size as well as on "what can the
-      # receiver open".
-      - name: Archive Linux
-        run: |
-          (cd release && zip -r -q ../dist/rtmp-file-streamer-linux-x86_64.zip linux-unpacked)
-          unzip -l dist/rtmp-file-streamer-linux-x86_64.zip | head -3
-          ls -lh dist/rtmp-file-streamer-linux-x86_64.zip
-
-      - name: Upload the Linux build
-        uses: actions/upload-artifact@v7
-        with:
-          name: rtmp-file-streamer-linux-x86_64
-          path: dist/rtmp-file-streamer-linux-x86_64.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
+  # macOS publishes two archives: `mac-intel` and a bare `mac` — the absence of a
+  # suffix marks the Apple-silicon build (the electron-builder flag is still
+  # `--arm64`). The matrix `suffix` is composed into the artifact name
+  # (`rtmp-file-streamer-mac${suffix}`), so the arm leg ends up with exactly
+  # `rtmp-file-streamer-mac`. `macos-latest` is arm64 hardware, so the
+  # Apple-silicon leg is native and the Intel leg is cross-compiled on it. Output
+  # dirs carry the arch suffix for non-x64 and macOS never gets the "-unpacked"
+  # suffix: `mac` for x64, `mac-arm64` for arm64.
   portable-macos:
-    name: portable (macOS)
+    name: portable (macOS${{ matrix.suffix }})
     needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: '-intel'
+            builder-arch: x64
+            outdir: mac
+          - suffix: ''
+            builder-arch: arm64
+            outdir: mac-arm64
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
@@ -159,22 +199,22 @@ jobs:
           version: 12.8.1
 
       # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
-      # which build scripts run. See the Windows/Linux job above.
+      # which build scripts run. See the packaging job above.
       - name: Prepare workspace
         run: pnpm ci
 
       - name: Build the app bundles
         run: pnpm run build
 
-      - name: Package macOS
-        run: pnpm exec electron-builder --mac --x64 --dir --config electron-builder.config.cjs
+      - name: Package macOS (${{ matrix.builder-arch }})
+        run: pnpm exec electron-builder --mac --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
 
       # There is no signing identity for this app on a runner, and an unsigned
       # bundle is what CI can legitimately produce. An ad-hoc signature at least
       # keeps macOS from refusing to launch the extracted app outright.
       - name: Ad-hoc sign the bundle
         run: |
-          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
+          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
           echo "signing ${app}"
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
@@ -184,18 +224,18 @@ jobs:
       # own folder so extracting yields one directory. `--norsrc` keeps extended
       # attributes out of an archive meant to be portable. tar.gz was measured on
       # this payload and is slightly LARGER than zip (153.8 MB vs 151 MB).
-      - name: Archive macOS
+      - name: Archive macOS (${{ matrix.builder-arch }})
         run: |
           mkdir -p dist
-          app="$(find release/mac -maxdepth 1 -name '*.app' -print -quit)"
-          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac.zip
+          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
+          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac${{ matrix.suffix }}.zip
           ls -lh dist/
 
       - name: Upload the macOS build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-mac
-          path: dist/rtmp-file-streamer-mac.zip
+          name: rtmp-file-streamer-mac${{ matrix.suffix }}
+          path: dist/rtmp-file-streamer-mac${{ matrix.suffix }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
