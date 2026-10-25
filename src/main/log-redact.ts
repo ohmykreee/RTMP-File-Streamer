@@ -1,96 +1,69 @@
-import type { OutputSettings } from '@shared/types'
+import type { OutputSettings, StreamProtocol } from '@shared/types'
 import { buildPushTarget } from '@shared/protocol'
 
 /**
- * Removes stream credentials from anything that is shown or persisted.
+ * The stream key never reaches the screen or the log.
  *
- * The engine, ffmpeg and the publisher all print the push target in their own
- * diagnostics, and a target carries the stream key (RTMP/RTSP), the SRT
- * passphrase, or the WHIP authorization token. Logs are persisted and the log
- * panel can be copied, so a single unredacted line would leave a working
- * credential on disk. Redaction happens at the log sink and at the IPC boundary
- * that returns test results — never in the command builders, because the command
- * that runs must keep the real target.
+ * Every display form is built from the parts, never parsed out of the composed
+ * string: the masked target is simply the real target rebuilt with `*****` in
+ * the key's place, and `redactText` is plain literal replacement of the known
+ * secret values. Nothing pattern-matches the text — a regex heuristic can only
+ * ever half-know where a credential sits (path segment, query parameter, Bearer
+ * header), and each guess it misses is a working credential on disk.
+ *
+ * The credential boundary is the stream-key field, whose meaning follows the
+ * protocol (RTMP/RTSP append it to the address, SRT makes it the `passphrase`
+ * query parameter, WHIP sends it as `-authorization`). The address field is
+ * deliberately NOT part of that boundary: the settings panel shows it in
+ * plaintext at all times, so anything typed into it is already on screen by
+ * design — credentials belong in the key field.
+ *
+ * Redaction happens at the log sink and at the IPC boundary that returns test
+ * results — never in the command builders, because the command that runs must
+ * keep the real target.
  */
 
+const MASK = '*****'
+
 export interface RedactionSecrets {
-  /** Complete push targets (address + key/passphrase) currently configured. */
-  targets: string[]
-  /** The raw stream key, for diagnostics that print it without the address. */
+  /** The composed push target (address + key) and its display form. */
+  targets: Array<{ raw: string; masked: string }>
+  /** The raw key, for diagnostics that print it outside the target (WHIP's `-authorization`, ffmpeg echoes). */
   keys: string[]
+}
+
+/**
+ * The display form of a push target: the address with the key replaced whole by
+ * `*****`. `buildPushTarget` already knows where each protocol puts the key, so
+ * rebuilding with `*****` needs no parsing of the composed string.
+ */
+export function maskTarget(address: string, streamKey: string, protocol: StreamProtocol | undefined): string {
+  return buildPushTarget(address, (streamKey ?? '').trim() ? MASK : '', protocol)
 }
 
 /** Collects the values that must never appear in a log line or result message. */
 export function collectSecrets(output: OutputSettings | undefined): RedactionSecrets {
   if (!output) return { targets: [], keys: [] }
+  const server = output.server ?? ''
   const key = (output.streamKey ?? '').trim()
-  const target = buildPushTarget(output.server ?? '', key, output.protocol)
+  const target = buildPushTarget(server, key, output.protocol)
   return {
-    targets: target ? [target] : [],
-    // A very short key would match ordinary words and mangle the log; the full
-    // target (which contains it) is redacted separately.
+    targets: target && key ? [{ raw: target, masked: maskTarget(server, key, output.protocol) }] : [],
+    // A very short key would match ordinary words and mangle the log; inside the
+    // target it is still hidden, because the whole target is replaced at once.
     keys: key.length >= 4 ? [key] : []
   }
 }
 
-/**
- * Query parameters that carry credentials on real ingest URLs.
- *
- * Some providers put the username/password or a signature in the URL itself
- * (`?user=…&pass=…`, `?token=…`). Masking only the path segment left exactly those
- * values visible in the connection-test result and the log.
- */
-const SECRET_QUERY_RE =
-  /([?&])(pass|password|pwd|passphrase|key|apikey|api_key|streamkey|stream_key|token|access_token|secret|auth|authorization|user|username|signature|sig|sign)=([^&#\s'"]*)/gi
-
-function maskQuery(query: string): string {
-  return query.replace(SECRET_QUERY_RE, (_whole, separator: string, name: string) => `${separator}${name}=***`)
-}
-
-/**
- * Keeps the server address visible while hiding the part that authorises the
- * push: the last path segment is the key for RTMP/RTSP, and credential-shaped
- * query parameters (passphrase, token, user/pass, signature) are masked too.
- */
-export function maskTarget(target: string): string {
-  if (!target) return target
-  const queryAt = target.indexOf('?')
-  const base = queryAt >= 0 ? target.slice(0, queryAt) : target
-  const query = queryAt >= 0 ? target.slice(queryAt) : ''
-  const schemeEnd = base.indexOf('://')
-  const slash = base.lastIndexOf('/')
-  // A credential in the query means the key is not appended to the authority
-  // (SRT passphrase, token-style URLs); do not invent a `/***` path segment.
-  const credentialInQuery = /[?&](?:pass|password|pwd|passphrase|key|apikey|api_key|streamkey|stream_key|token|access_token|secret|auth|authorization|user|username|signature|sig|sign)=/i.test(
-    query
-  )
-  let masked = base
-  if (schemeEnd >= 0 && slash > schemeEnd + 2) {
-    const tail = base.slice(slash + 1)
-    if (tail) masked = `${base.slice(0, slash + 1)}***`
-  } else if (schemeEnd >= 0 && !credentialInQuery) {
-    // No path at all: the key was appended to the authority (`rtmp://host` + key).
-    masked = `${base}/***`
-  }
-  return `${masked}${maskQuery(query)}`
-}
-
-/** Replaces every occurrence of the configured credentials with a masked form. */
+/** Replaces every occurrence of the configured credentials with `*****`. */
 export function redactText(text: string, secrets: RedactionSecrets): string {
   if (!text) return text
   let out = text
-  // Longest first: a target that contains its key must be replaced as a whole,
-  // otherwise the masked target would keep the raw key inside it.
-  for (const target of [...secrets.targets].sort((a, b) => b.length - a.length)) {
-    if (target) out = out.split(target).join(maskTarget(target))
+  for (const { raw, masked } of secrets.targets) {
+    if (raw) out = out.split(raw).join(masked)
   }
-  for (const key of [...secrets.keys].sort((a, b) => b.length - a.length)) {
-    if (key) out = out.split(key).join('***')
+  for (const key of secrets.keys) {
+    if (key) out = out.split(key).join(MASK)
   }
-  out = out.replace(/((?:^|\s)-authorization\s+)\S+/gi, '$1***')
-  out = out.replace(/(Authorization:\s*Bearer\s+)\S+/gi, '$1***')
-  // A target printed component by component (or an address edited since the
-  // secret set was built) still exposes credentials in its query string.
-  out = out.replace(SECRET_QUERY_RE, (_whole, separator: string, name: string) => `${separator}${name}=***`)
   return out
 }

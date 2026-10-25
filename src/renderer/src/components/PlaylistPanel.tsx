@@ -1,7 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { PlaylistItem, SubtitleMode } from '@shared/types'
-import { SUPPORTED_VIDEO_EXT } from '@shared/types'
-import { Captions, CircleAlert, FilePlus2, Film, FolderOpen, Info, ListVideo, Play, Plus, RotateCcw, Trash2 } from 'lucide-react'
+import { Captions, CircleAlert, FilePlus2, Film, FolderOpen, ListVideo, Play, Plus, RotateCcw, Trash2 } from 'lucide-react'
 import { cn } from 'cn'
 import { Badge } from '@renderer/components/ui/badge'
 import { Button } from '@renderer/components/ui/button'
@@ -35,9 +34,6 @@ interface PlaylistPanelProps {
     patch: Partial<Pick<PlaylistItem, 'selectedSubtitleId' | 'mode' | 'syncOffsetSec' | 'subtitleDelaySec'>>
   ) => void
   onReveal: (filePath: string) => void
-  /** Resolves dropped `File` objects to disk paths through the preload bridge. */
-  onResolveDroppedPaths: (files: FileList | File[]) => string[]
-  onFilesDropped: (paths: string[]) => void
 }
 
 /**
@@ -56,18 +52,9 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<string | null>(null)
-  const [fileDrag, setFileDrag] = useState(false)
 
   const totalDuration = useMemo(() => items.reduce((s, i) => s + (i.durationSec || 0), 0), [items])
   const totalSize = useMemo(() => items.reduce((s, i) => s + (i.size || 0), 0), [items])
-
-  /** Turns a drop event into video paths, resolving `File` → path via the bridge. */
-  const videoPathsFromDrop = (e: React.DragEvent): string[] => {
-    const files = e.dataTransfer?.files
-    if (!files || files.length === 0) return []
-    const resolved = props.onResolveDroppedPaths(files)
-    return resolved.filter((p) => SUPPORTED_VIDEO_EXT.includes(p.slice(p.lastIndexOf('.')).toLowerCase()))
-  }
 
   const handleDragStart = (itemId: string) => (e: React.DragEvent): void => {
     if (locked) {
@@ -135,31 +122,7 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
   )
 
   return (
-    <aside
-      className={`playlist${fileDrag ? ' file-drag' : ''}`}
-      onDragEnter={(e) => {
-        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
-        if (locked) return
-        if (!dragId && e.dataTransfer?.types?.includes('Files')) setFileDrag(true)
-      }}
-      onDragLeave={(e) => {
-        if (e.currentTarget === e.target) setFileDrag(false)
-      }}
-      onDragOver={(e) => {
-        if (e.dataTransfer?.types?.includes('Files')) e.preventDefault()
-        if (locked) return
-        if (!dragId && e.dataTransfer?.types?.includes('Files')) e.preventDefault()
-      }}
-      onDrop={(e) => {
-        // Always prevent Chromium's default navigation to the dropped file, even
-        // while the queue is locked; the file is simply not added.
-        e.preventDefault()
-        if (locked || dragId) return
-        setFileDrag(false)
-        const paths = videoPathsFromDrop(e)
-        if (paths.length > 0) props.onFilesDropped(paths)
-      }}
-    >
+    <aside className="playlist">
       <header className="panel-head">
         <div className="flex min-w-0 flex-col">
           <h2 className="flex items-center gap-1.5">
@@ -417,14 +380,6 @@ export default function PlaylistPanel(props: PlaylistPanelProps): React.JSX.Elem
           })}
           </ol>
         </ScrollArea>
-      )}
-      {fileDrag && !locked && (
-        <div className="drop-overlay">
-          <span className="flex items-center gap-2">
-            <Info className="size-4" />
-            {t('playlist.dropToAdd')}
-          </span>
-        </div>
       )}
     </aside>
   )

@@ -676,11 +676,10 @@ export class StreamEngine {
     this.moveViewerTo(firstIndex, 0, this.items[firstIndex]?.durationSec || 0)
     this.emitPlaylist()
 
-    const target = buildPushTarget(settings.output.server, settings.output.streamKey, settings.output.protocol)
     this.log('info', mainT('main.engine.sessionStarting'))
-    // Even debug output only names the server: the log is persisted and the panel
-    // is copyable, so the key never belongs in it.
-    this.log('debug', `${mainT('main.engine.streamTarget')}: ${maskTarget(target)}`)
+    // The log is persisted and the panel is copyable: the target's key portion is
+    // replaced with `*****`, only the server stays readable.
+    this.log('debug', `${mainT('main.engine.streamTarget')}: ${maskTarget(settings.output.server, settings.output.streamKey, settings.output.protocol)}`)
     this.log('info', mainT('main.engine.playlistReady', { n: this.items.length, duration: formatDuration(this.items.reduce((s, i) => s + (i.durationSec || 0), 0)) }))
 
     await this.launchCurrent(firstIndex, 'session-start').catch((err) => this.failLaunch(err))

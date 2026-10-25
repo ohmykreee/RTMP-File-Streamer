@@ -718,10 +718,16 @@ input[type='number'] {
     }
   }
 
+  /*
+   * The "release to add" hint. It covers the WHOLE window: the drop zone is the
+   * app, not one panel, so the hint is drawn where the drop lands. It must keep
+   * `pointer-events: none` — the drop has to reach the elements underneath and
+   * bubble up to the window handlers.
+   */
   .drop-overlay {
-    position: absolute;
-    inset: 6px;
-    z-index: 5;
+    position: fixed;
+    inset: 8px;
+    z-index: 50;
     display: grid;
     place-items: center;
     border: 1px dashed var(--primary);

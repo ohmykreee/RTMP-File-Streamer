@@ -82,7 +82,11 @@ artifact **只放最终 zip**；Windows/Linux 同一 Ubuntu job 分 step，macOS
   自动跳到检测出的协议，之后可手动改
 - **状态只在程序目录的 `Data/`**：`store/paths.ts` 重定向 Electron 的 userData/sessionData/cache，
   **绝不读写 `%APPDATA%`**（旧迁移代码已删，不要恢复）
-- **凭据只在日志出口脱敏**：`src/main/log-redact.ts` 在 `emitLog` 与测试结果返回处统一遮蔽完整目标、`passphrase` 与 `-authorization`。命令构建器必须拿真实 target 去 spawn，**不要**在 builder 里改写 target；新增会打印地址/密钥的日志时，确认它经过 `emitLog`。
+- **凭据只在日志出口脱敏**：`src/main/log-redact.ts` 在 `emitLog` 与测试结果返回处统一把密钥部分整体替换成
+  `*****`——`maskTarget(server, key, protocol)` 用 `buildPushTarget` 重建显示形式，`redactText` 只做字面替换，
+  **不要**用正则去猜目标串里哪一段是密钥。脱敏边界是「串流密钥」字段；地址字段在界面明文显示，写进地址里的
+  凭据不在保护范围。命令构建器必须拿真实 target 去 spawn，**不要**在 builder 里改写 target；新增会打印
+  地址/密钥的日志时，确认它经过 `emitLog`（用未保存的地址/密钥做测试连接时，还要用本次测试的 `secrets` 先行脱敏）。
 - **已移除的功能不要恢复**：文件内 seek、暂停、`%APPDATA%` 迁移
 - **i18n**：文案全在 `src/shared/i18n/messages.ts`（`EN` 基准 + `ZH`/`JA` 同键），`TranslationKey` 由 `EN` 推导，
   写错 key 是编译错误。

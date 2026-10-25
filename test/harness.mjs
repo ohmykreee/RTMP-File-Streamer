@@ -271,29 +271,33 @@ console.log('\n=== 1b. credential redaction ===')
     pathToFileURL(bundle('src/main/log-redact.ts', path.join(here, 'log-redact.bundle.mjs'))).href
   )
   record(
-    'credential-bearing query parameters are masked with the path key',
-    maskTarget('rtmp://relay.example:1935/live/vrochat?user=kyree&pass=secret') ===
-      'rtmp://relay.example:1935/live/***?user=***&pass=***',
-    maskTarget('rtmp://relay.example:1935/live/vrochat?user=kyree&pass=secret')
+    'the RTMP key is replaced whole with ***** in the masked target',
+    maskTarget('rtmp://relay.example:1935/live/', 'vrochat', 'rtmp') === 'rtmp://relay.example:1935/live/*****',
+    maskTarget('rtmp://relay.example:1935/live/', 'vrochat', 'rtmp')
   )
   record(
-    'SRT passphrase is masked without inventing a path segment',
-    maskTarget('srt://relay.example:9000?passphrase=secret123') === 'srt://relay.example:9000?passphrase=***',
-    maskTarget('srt://relay.example:9000?passphrase=secret123')
+    'the SRT passphrase becomes ***** as a query parameter',
+    maskTarget('srt://relay.example:9000', 'secret123', 'srt') === 'srt://relay.example:9000?passphrase=*****',
+    maskTarget('srt://relay.example:9000', 'secret123', 'srt')
+  )
+  record(
+    'WHIP keeps the key out of the address entirely',
+    maskTarget('https://relay.example/whip', 'jwt-token', 'whip') === 'https://relay.example/whip',
+    maskTarget('https://relay.example/whip', 'jwt-token', 'whip')
   )
   const secrets = collectSecrets({ server: 'rtmp://relay.example/live/', streamKey: 'streamkey', protocol: 'rtmp' })
-  const output = redactText(
-    "Output #0, flv, to 'rtmp://relay.example/live/streamkey?user=kyree&pass=secret': auth -authorization JWT.X.Y",
-    secrets
-  )
+  const output = redactText("Output #0, flv, to 'rtmp://relay.example/live/streamkey'", secrets)
   record(
-    'redaction removes the key, query credentials and authorization token',
-    !output.includes('streamkey') &&
-      !output.includes('kyree') &&
-      !output.includes('secret') &&
-      !output.includes('JWT.X.Y') &&
-      output.includes('***'),
+    'redaction replaces the composed target with the ***** form',
+    output === "Output #0, flv, to 'rtmp://relay.example/live/*****'",
     output
+  )
+  const whip = collectSecrets({ server: 'https://relay.example/whip', streamKey: 'JWT.X.Y', protocol: 'whip' })
+  const whipOutput = redactText('handshake failed for -authorization JWT.X.Y', whip)
+  record(
+    'the WHIP authorization token is redacted wherever it is printed',
+    whipOutput === 'handshake failed for -authorization *****',
+    whipOutput
   )
 }
 

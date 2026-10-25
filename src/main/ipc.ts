@@ -20,7 +20,6 @@ import { IPC, SUPPORTED_SUBTITLE_EXT, SUPPORTED_VIDEO_EXT } from '@shared/types'
 import type { Language, StreamProtocol } from '@shared/types'
 import {
   addressMatchesProtocol,
-  buildPushTarget,
   detectStreamProtocol,
   PROTOCOL_SCHEMES
 } from '@shared/protocol'
@@ -326,7 +325,6 @@ export function registerIpc(services: AppServices): void {
       return { ok: false, message: mainT('main.dialog.badUrlProtocol', { schemes: PROTOCOL_SCHEMES[protocol] }), detail: '', elapsedMs: 0 }
     }
     // The stream key is optional: some servers take the whole path in the address.
-    const target = buildPushTarget(url, key, protocol)
     // Redact against the values THIS test used, not only the persisted session:
     // a caller may pass an address/key that has not been saved yet.
     const secrets = collectSecrets({ ...session.output, server: url, streamKey: key })
@@ -335,12 +333,15 @@ export function registerIpc(services: AppServices): void {
     const test = buildTestCommand(session, url, key, settings.language)
     const args = test.args
     const timeoutMs = Math.max(5, Math.min(60, Number(req?.timeoutSec) || 20)) * 1000
-    services.pushLog('debug', mainT('main.dialog.testTarget', { target: maskTarget(target) }))
+    services.pushLog('debug', mainT('main.dialog.testTarget', { target: maskTarget(url, key, protocol) }))
     // The summary is what makes "the test used different settings than the stream"
     // a visible fact instead of something the user has to infer from ffmpeg output.
     services.pushLog('debug', mainT('main.dialog.testParams', { params: test.summary.join(' · ') }))
     for (const note of test.notes) services.pushLog('info', mainT('main.dialog.testNote', { note }))
-    services.pushLog('debug', mainT('main.dialog.testCommand', { command: buildCommandLine(resolved.ffmpeg, args) }))
+    // The log sink redacts against the PERSISTED settings; the values being tested
+    // may not be saved yet, so the command line (which carries the target and the
+    // key) is redacted against this test's own secrets here.
+    services.pushLog('debug', mainT('main.dialog.testCommand', { command: redactText(buildCommandLine(resolved.ffmpeg, args), secrets) }))
 
     const started = Date.now()
     // The ffmpeg run has its own timeout; this guard only covers a hang below
@@ -376,7 +377,7 @@ export function registerIpc(services: AppServices): void {
 
     let message: string
     if (ok) {
-      message = mainT('main.dialog.testOk', { target: maskTarget(target), sec: (elapsedMs / 1000).toFixed(1) })
+      message = mainT('main.dialog.testOk', { target: maskTarget(url, key, protocol), sec: (elapsedMs / 1000).toFixed(1) })
     } else if (timeoutResult.code === -3) {
       message = mainT('main.dialog.testStuck')
     } else if (timedOut) {
@@ -386,7 +387,10 @@ export function registerIpc(services: AppServices): void {
         .split(/\r?\n/)
         .reverse()
         .find((l) => failedPattern.test(l))
-      message = errLine ? errLine.trim() : mainT('main.dialog.testFailed', { code: timeoutResult.code ?? mainT('main.engine.unknown') })
+      // The failure line is ffmpeg's own text and can echo the push target; it is
+      // shown in the result alert, so it goes through the same redaction as the
+      // detail block.
+      message = errLine ? redactText(errLine.trim(), secrets) : mainT('main.dialog.testFailed', { code: timeoutResult.code ?? mainT('main.engine.unknown') })
     }
     services.pushLog(ok ? 'info' : 'error', mainT('main.dialog.result', { message }))
     return { ok, message, detail, elapsedMs, summary: test.summary, notes: test.notes }

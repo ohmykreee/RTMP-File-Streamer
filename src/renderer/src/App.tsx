@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { EngineState, Language, NetworkState, PersistedLogInfo, PlaylistItem, Preset, RtmpTestResult } from '@shared/types'
+import { SUPPORTED_VIDEO_EXT } from '@shared/types'
 import type { TranslationKey } from '@shared/i18n'
 import { translatorFor } from '@shared/i18n'
-import { CircleAlert, Play, SkipForward, Square, X } from 'lucide-react'
+import { CircleAlert, Info, Play, SkipForward, Square, X } from 'lucide-react'
 import { cn } from 'cn'
 import { Alert, AlertAction, AlertDescription } from '@renderer/components/ui/alert'
 import { Badge } from '@renderer/components/ui/badge'
@@ -92,9 +93,22 @@ const PLAYLIST_MIN_PX = 210
 const PLAYLIST_MAX_PERCENT = '55'
 const PLAYLIST_PANEL_ID = 'playlist'
 
+/**
+ * Turns a drop event into video paths, resolving `File` → path via the preload
+ * bridge. Non-video files in the same drop are ignored here; the main process
+ * mentions them in the log when they arrive through another path.
+ */
+const videoPathsFromDrop = (e: React.DragEvent, resolve: (files: FileList | File[]) => string[]): string[] => {
+  const files = e.dataTransfer?.files
+  if (!files || files.length === 0) return []
+  return resolve(files).filter((p) => SUPPORTED_VIDEO_EXT.includes(p.slice(p.lastIndexOf('.')).toLowerCase()))
+}
+
 export default function App(): React.JSX.Element {
   const st = useStreamer()
   const [logsOpen, setLogsOpen] = useState(false)
+  /** True while a file from outside the app is dragged anywhere over the window. */
+  const [fileDrag, setFileDrag] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
   const [actionPending, setActionPending] = useState(false)
   /**
@@ -392,7 +406,36 @@ export default function App(): React.JSX.Element {
     }
 
     return (
-      <div className="app">
+      <div
+        className="app"
+        onDragEnter={(e) => {
+          if (!e.dataTransfer?.types?.includes('Files')) return
+          e.preventDefault()
+          if (!locked) setFileDrag(true)
+        }}
+        onDragOver={(e) => {
+          // Allowing the drop is what makes the whole window the drop zone.
+          if (e.dataTransfer?.types?.includes('Files')) {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'copy'
+          }
+        }}
+        onDragLeave={(e) => {
+          // Only when the pointer left the WINDOW: moving between children fires
+          // dragleave with the entered child as relatedTarget, and clearing on
+          // that would flicker the hint. Leaving the app carries no relatedTarget.
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFileDrag(false)
+        }}
+        onDrop={(e) => {
+          // Always prevent Chromium's default navigation to the dropped file, even
+          // while the queue is locked; the file is simply not added.
+          e.preventDefault()
+          setFileDrag(false)
+          if (locked || !e.dataTransfer?.types?.includes('Files')) return
+          const paths = videoPathsFromDrop(e, st.resolveDroppedPaths)
+          if (paths.length > 0) void run(() => st.addPaths(paths))
+        }}
+      >
         <header className="topbar">
           <div className="brand">
             <BrandMark size={30} className="brand-mark" />
@@ -491,8 +534,6 @@ export default function App(): React.JSX.Element {
               onAttachSubtitle={(id) => void run(() => st.attachSubtitle(id))}
               onUpdateItem={(id, patch) => void run(() => st.updateItem(id, patch))}
               onReveal={(p) => void st.showItemInFolder(p)}
-              onResolveDroppedPaths={st.resolveDroppedPaths}
-              onFilesDropped={(paths) => void run(() => st.addPaths(paths))}
             />
           </ResizablePanel>
 
@@ -638,6 +679,15 @@ export default function App(): React.JSX.Element {
           onToggle={() => setLogsOpen((v) => !v)}
           onOpenLogsDir={() => void st.openLogsDir()}
         />
+
+        {fileDrag && !locked && (
+          <div className="drop-overlay">
+            <span className="flex items-center gap-2">
+              <Info className="size-4" />
+              {t('app.dropToAdd')}
+            </span>
+          </div>
+        )}
       </div>
     )
   })()

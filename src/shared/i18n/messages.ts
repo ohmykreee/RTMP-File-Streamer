@@ -35,6 +35,7 @@ import type { Catalog } from './core'
 export const EN = {
   'app.title': 'RTMP File Streamer',
   'app.tagline': 'Push local files live with FFmpeg; stream multiple files in sequence and burn in subtitles',
+  'app.dropToAdd': 'Release to add files',
   'app.ffmpegMissing': 'FFmpeg not found',
   'app.ffmpegMissingHint': 'FFmpeg was not found. Install it, or set the path in the "Advanced" tab.',
   'app.chooseFfmpeg': 'Choose FFmpeg',
@@ -113,7 +114,6 @@ export const EN = {
   'playlist.reveal': 'Show in folder',
   'playlist.resetDelay': 'Reset delays',
   'playlist.bitmapBurnHint': 'Embedded PGS/DVD bitmap subtitles cannot be burned in; use a text subtitle file.',
-  'playlist.dropToAdd': 'Release to add files',
   'timeline.emptyTitle': 'The playlist is empty',
   'timeline.dragHint': 'Drag to jump to this file',
   'timeline.progressAria': 'Stream progress',
@@ -639,6 +639,7 @@ export const REFERENCE_CATALOG: Catalog<TranslationKey> = EN
 export const ZH: Catalog<TranslationKey> = {
   'app.title': 'RTMP 文件串流',
   'app.tagline': 'FFmpeg 本地文件直播推送 · 支持多文件顺序串流与字幕烧录',
+  'app.dropToAdd': '松开以添加文件',
   'app.ffmpegMissing': '未找到 FFmpeg',
   'app.ffmpegMissingHint': '未检测到 FFmpeg。请先安装，或在「高级」中手动指定路径。',
   'app.chooseFfmpeg': '选择 FFmpeg',
@@ -714,7 +715,6 @@ export const ZH: Catalog<TranslationKey> = {
   'playlist.reveal': '打开文件夹',
   'playlist.resetDelay': '重置延迟',
   'playlist.bitmapBurnHint': '内挂 PGS/DVD 位图字幕无法烧录，请改用文本字幕。',
-  'playlist.dropToAdd': '松开以添加文件',
   'timeline.emptyTitle': '播放列表为空',
   'timeline.dragHint': '拖动可跳转到该文件',
   'timeline.progressAria': '串流进度',
@@ -1236,6 +1236,7 @@ export const ZH: Catalog<TranslationKey> = {
 export const JA: Catalog<TranslationKey> = {
   'app.title': 'RTMP ファイルストリーマー',
   'app.tagline': 'FFmpeg でローカルファイルをライブ配信・複数ファイルの連続配信と字幕の焼き込みに対応',
+  'app.dropToAdd': 'ドロップしてファイルを追加',
   'app.ffmpegMissing': 'FFmpeg が見つかりません',
   'app.ffmpegMissingHint': 'FFmpeg が見つかりません。インストールするか、「詳細」タブでパスを指定してください。',
   'app.chooseFfmpeg': 'FFmpeg を選択',
@@ -1311,7 +1312,6 @@ export const JA: Catalog<TranslationKey> = {
   'playlist.reveal': '場所を開く',
   'playlist.resetDelay': '遅延をリセット',
   'playlist.bitmapBurnHint': '内蔵の PGS/DVD ビットマップ字幕は焼き込めません。テキスト字幕を使用してください。',
-  'playlist.dropToAdd': 'ドロップしてファイルを追加',
   'timeline.emptyTitle': 'プレイリストが空です',
   'timeline.dragHint': 'ドラッグしてこのファイルへ移動できます',
   'timeline.progressAria': '配信の進行状況',
