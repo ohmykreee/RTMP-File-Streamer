@@ -14,19 +14,20 @@ pub const WINDOW_LABEL: &str = "main";
 /// been synced with the current theme, so no wrong-palette frame is visible.
 pub fn create_window(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let title = main_t("app.title");
-    let mut builder = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::default())
+    let builder = WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::default())
         .title(title)
         .inner_size(1440.0, 940.0)
         .min_inner_size(1080.0, 720.0)
         .visible(false);
+    // Shadow the builder on Windows instead of starting with `let mut`: CI denies
+    // warnings, and `unused_mut` fires on Linux/macOS where this block is absent.
     #[cfg(windows)]
-    {
+    let builder = {
         // The webview's own profile storage (cache, session) follows the same
         // portable contract as every other state file: Data/Cache, never the
         // user profile.
         let webview_data = crate::store::paths::cache_dir().join("webview");
         let _ = std::fs::create_dir_all(&webview_data);
-        builder = builder.data_directory(webview_data);
         // Additional WebView2 browser arguments. The test harness injects CDP
         // and throttling switches through WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS;
         // setting our own here would override that variable, so merge both.
@@ -37,8 +38,8 @@ pub fn create_window(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 args.push_str(&extra);
             }
         }
-        builder = builder.additional_browser_args(&args);
-    }
+        builder.data_directory(webview_data).additional_browser_args(&args)
+    };
     let window = builder.build()?;
 
     // The window background must match the palette the renderer is about to
