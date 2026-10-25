@@ -65,10 +65,11 @@ electron-builder 会自行按目标平台/架构下载 Electron dist，不使用
 
 CI：`checks.yml`（门禁，唯一实现，另两个 `uses:` 它）→ `build.yml`（push main：打 zip → artifact，
 **不碰 release**）/ `release.yml`（release created：同上 → `softprops/action-gh-release` 附上去）。
-artifact **只放最终 zip**；Windows/Linux 每个架构一个 Ubuntu leg 交叉编译（win/linux 各 amd64、arm64，
-导出名用 amd64。Windows 腿经 `cargo-xwin` 打 MSVC 目标，需 `clang`/`lld`/`llvm-rc`；win-arm64 必须用
-arm64 的 Ubuntu 镜像，因为 `llvm-rc` 把宿主架构写进资源对象，与目标不一致时 lld-link 会拒绝），macOS 单独 runner 上两个 leg（产物 mac-intel 与不带架构名的 mac，Apple 芯片版即裸 mac；
-`macos-latest` 是 Apple 芯片，Intel 版由它交叉编译）。两个打包 job 的矩阵必须同步改。
+artifact **只放最终 zip**；Windows 腿跑 Windows runner（win-amd64 `windows-latest`、win-arm64 `windows-11-arm`，
+MSVC 与 Windows SDK 自带，不下载交叉工具链）；Linux 腿各跑自己的架构（amd64 `ubuntu-latest`、arm64
+`ubuntu-24.04-arm`，GTK/WebKit 用原生包，不维护 multiarch sysroot）。macOS 单独 runner 上两个 leg
+（产物 mac-intel 与不带架构名的 mac，Apple 芯片版即裸 mac；`macos-latest` 是 Apple 芯片，Intel 版由它
+交叉编译）。两个打包 job 的矩阵必须同步改。
 
 ## 3. 不能动的约束
 

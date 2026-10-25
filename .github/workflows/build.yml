@@ -12,19 +12,13 @@
 # means any single target can be re-run or debugged without the others.
 #
 # Runner placement:
-#   * Every Windows and Linux leg is one Ubuntu job — no Windows runner. The
-#     Windows binaries are MSVC builds cross-compiled with `cargo-xwin`: xwin
-#     downloads the MSVC CRT and Windows SDK, and rustc then uses clang-cl +
-#     lld-link instead of the Windows-only link.exe. `llvm-rc` (Ubuntu's `llvm`
-#     package) compiles the icon/manifest resource tauri-build embeds.
-#   * The win-arm64 leg uses the arm64 Ubuntu image, not `ubuntu-latest`: llvm-rc
-#     stamps the BUILD HOST's architecture into the resource COFF object and
-#     lld-link rejects a machine type that differs from the target. On an arm64
-#     host the stamp already matches the ARM64 target (Windows runs nothing
-#     either way — the deliverable is a portable folder).
-#   * The Linux amd64 leg is native on Ubuntu; the arm64 leg cross-compiles
-#     there too, which needs the GTK/webkit dev headers FOR THE TARGET
-#     architecture (dpkg multiarch — see the install step).
+#   * Windows legs run on Windows runners, which ship the MSVC linker and the
+#     Windows SDK: nothing extra to download, and tauri-build's `rc.exe` handles
+#     the icon/manifest resource natively. win-amd64 is native on
+#     `windows-latest`; win-arm64 is native on `windows-11-arm`.
+#   * Linux legs run on their own architecture: linux-amd64 on `ubuntu-latest`,
+#     linux-arm64 on `ubuntu-24.04-arm`, so both link the NATIVE GTK/WebKit dev
+#     packages instead of maintaining a multiarch sysroot.
 #   * macOS cannot cross from Linux: both macOS legs run on `macos-latest`
 #     (Apple silicon), where the arm leg is native and the Intel leg is a
 #     cross-compile to `x86_64-apple-darwin`. Tauri links the system WKWebView,
@@ -71,32 +65,26 @@ jobs:
       matrix:
         include:
           - name: win-amd64
-            os: ubuntu-latest
+            os: windows-latest
             target: x86_64-pc-windows-msvc
-            windows-cross: true
           - name: win-arm64
-            # See the runner-placement note above: the resource compiler must
-            # run on the target architecture.
-            os: ubuntu-24.04-arm
+            # Native ARM64 Windows: MSVC/SDK are preinstalled, so this is not a
+            # cross build and downloads no separate toolchain.
+            os: windows-11-arm
             target: aarch64-pc-windows-msvc
-            windows-cross: true
           - name: linux-amd64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             linux-native: true
           - name: linux-arm64
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            linux-cross: true
+            linux-native: true
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     defaults:
       run:
         shell: bash
-    env:
-      # cargo-xwin downloads the MSVC CRT + Windows SDK into this directory; the
-      # cache step below keeps the ~1 GB from being fetched on every run.
-      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -137,16 +125,17 @@ jobs:
           cache: false
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
 
-      # Linux amd64: the webkit2gtk stack Tauri renders with. The runner image
-      # ships the runtime libraries but LINKING needs the dev headers.
-      - name: Install Linux amd64 dependencies
+      # Linux: the webkit2gtk stack Tauri renders with. Each Linux leg runs on
+      # its own architecture, so the native packages already match the target;
+      # only LINKING needs the dev headers.
+      - name: Install Linux dependencies
         if: matrix.linux-native == true
         run: |
           set -euxo pipefail
@@ -154,66 +143,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
             patchelf libssl-dev
-
-      # Linux arm64 cross build: the GTK/webkit dev headers must be the TARGET
-      # architecture's, through dpkg multiarch, plus the GNU cross toolchain
-      # for the C code those -sys crates link, and a pkg-config that looks in
-      # the arm64 sysroot.
-      - name: Install Linux arm64 cross dependencies
-        if: matrix.linux-cross == true
-        run: |
-          set -euxo pipefail
-          sudo dpkg --add-architecture arm64
-          sudo sed -i 's|^deb |deb [arch=amd64,i386] |' /etc/apt/sources.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config \
-            libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 librsvg2-dev:arm64 \
-            libssl-dev:arm64
-          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-
-      # Windows cross build: cargo-xwin supplies the MSVC CRT/SDK and points
-      # rustc at clang-cl + lld-link; tauri-build compiles the icon/manifest
-      # resource with llvm-rc. All three tools come from the Ubuntu archive.
-      - name: Install Windows cross dependencies
-        if: matrix.windows-cross == true
-        run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld llvm
-          # The metapackages normally install unversioned tools on PATH; link the
-          # versioned binaries if this image does not.
-          for tool in clang-cl llvm-rc; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              src="$(find /usr/lib/llvm-* -maxdepth 2 \( -type f -o -type l \) -name "$tool" | sort -V | tail -1)"
-              test -n "$src"
-              sudo ln -sf "$src" "/usr/local/bin/$tool"
-            fi
-          done
-          mkdir -p "$XWIN_CACHE_DIR"
-          clang-cl --version
-          lld-link --version
-          # llvm-rc has no --version option; /? prints the banner and exits 0.
-          llvm-rc /? | head -1
-
-      - name: Install cargo-xwin
-        if: matrix.windows-cross == true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-xwin
-
-      # The CRT/SDK download is ~1 GB; caching it avoids fetching it again on
-      # every run of this leg (the two Windows legs keep separate caches).
-      - name: Cache the Windows CRT/SDK
-        if: matrix.windows-cross == true
-        uses: actions/cache@v4
-        with:
-          path: .xwin-cache
-          key: xwin-${{ runner.os }}-${{ runner.arch }}-v1
 
       # The message tables the Rust side embeds are dumped from the TypeScript
       # source of truth before every build; they are gitignored generated files.
@@ -225,40 +154,41 @@ jobs:
 
       - name: Build release binary (${{ matrix.target }})
         working-directory: src-tauri
-        run: |
-          set -euxo pipefail
-          if [ "${{ matrix.windows-cross }}" = "true" ]; then
-            # cargo xwin == cargo + xwin's CRT/SDK paths and the LLVM linker.
-            cargo xwin build --release --target ${{ matrix.target }} --features custom-protocol
-          else
-            cargo build --release --target ${{ matrix.target }} --features custom-protocol
-          fi
+        run: cargo build --release --target ${{ matrix.target }} --features custom-protocol
 
       - name: Assemble portable directory
         run: node scripts/assemble-tauri-dist.mjs --target ${{ matrix.target }}
 
-      # Run from inside `release/` so the zip's single top-level entry is the
-      # portable folder itself, and smoke-check the listing for the executable
-      # and the Data/ placeholder so an empty or wrong-target archive fails here.
+      # Linux: run from inside `release/` so the zip's single top-level entry is
+      # the portable folder itself, and smoke-check the executable and the Data/
+      # placeholder so an empty or wrong-target archive fails here.
       - name: Archive (${{ matrix.name }})
+        if: runner.os != 'Windows'
         run: |
           set -euxo pipefail
           name="rtmp-file-streamer-${{ matrix.name }}"
           mkdir -p dist
           (cd release && zip -r -q "../dist/${name}.zip" "${name}")
           unzip -l "dist/${name}.zip" | head -3
-          case "${{ matrix.name }}" in
-            win-*)
-              # A cross build must produce a Windows PE, not a Linux binary that
-              # merely carries the .exe name.
-              file "release/${name}/RTMPFileStreamer.exe" | grep -qi 'MS Windows' || exit 1
-              unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|RTMPFileStreamer\.exe)" || exit 1
-              ;;
-            linux-*)
-              unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|rtmp-file-streamer)" || exit 1
-              ;;
-          esac
+          unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|rtmp-file-streamer)" || exit 1
           ls -lh "dist/${name}.zip"
+
+      # Windows: `tar.exe` is bsdtar and writes a zip with forward-slash entries;
+      # Compress-Archive stores backslashes, which non-Windows unzip would treat
+      # as literal filename characters. `-C release` keeps the portable folder as
+      # the single top-level entry.
+      - name: Archive Windows (${{ matrix.name }})
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "rtmp-file-streamer-${{ matrix.name }}"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          tar -a -c -f "dist/${name}.zip" -C release $name
+          $entries = tar -tf "dist/${name}.zip"
+          $entries | Select-Object -First 3
+          if (-not ($entries -contains "$name/RTMPFileStreamer.exe")) { throw "missing $name/RTMPFileStreamer.exe" }
+          if (-not ($entries -contains "$name/Data/")) { throw "missing $name/Data/" }
+          Get-Item "dist/${name}.zip" | Select-Object Name, Length
 
       - name: Upload the build
         uses: actions/upload-artifact@v7
@@ -323,7 +253,7 @@ jobs:
           cache: false
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
