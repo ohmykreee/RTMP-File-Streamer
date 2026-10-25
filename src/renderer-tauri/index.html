@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  The static lang/title below are only what shows before the renderer boots.
+  `App.tsx` overwrites both from the resolved language on the first render, and
+  the window title itself comes from the Rust shell, so neither of these is a
+  second source of truth.
+
+  No palette class is set here: `main.tsx` puts `.dark` on <html> from the OS
+  setting before the first paint, and `App.tsx` corrects it once the saved
+  appearance preference arrives.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost"
+    />
+    <title>RTMP File Streamer</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

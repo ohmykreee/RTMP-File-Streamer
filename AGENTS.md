@@ -8,27 +8,40 @@ Electron + React + TS 桌面应用：本地视频（可带字幕）经系统 FFm
 **不打包 FFmpeg**（运行时探测），**不做单文件便携 exe / 安装包**（`--dir` 绿色版，状态写在自身 `Data/`）。
 
 ```
-src/shared/     类型契约 · 默认值 · i18n 文案表 · 推流目标/协议拼接
-scripts/        build-info.mjs（编译前写 build-info.json，进 .gitignore、随 asar 打包）
-src/main/       入口 · IPC · FFmpeg 探测/命令构建 · 串流引擎 · 存储 · obs-websocket
-src/preload/    window.streamer
-src/renderer/   React 界面
-test/           自动化验证（unit / e2e 两个入口）—— **只放测试**，见 §8
+src/shared/     类型契约 · 默认值 · i18n 文案表 · 推流目标/协议拼接（Electron 与 Tauri 两端共用）
+scripts/        build-info.mjs（编译前写 build-info.json，进 .gitignore、随包分发）· generate-i18n.mjs · assemble-tauri-dist.mjs
+src/main/       [Electron] 入口 · IPC · FFmpeg 探测/命令构建 · 串流引擎 · 存储 · obs-websocket
+src/preload/    [Electron] window.streamer
+src/renderer/   [Electron] React 界面
+src-tauri/      [Tauri] src/main 的 Rust 全量移植（模块一一对应）+ app/window/ipc 壳层 + cargo 测试
+src/renderer-tauri/  [Tauri] src/renderer 的拷贝 + src/bridge.ts（window.streamer 改走 Tauri IPC）
+test/           [Electron] 自动化验证（unit / e2e 两个入口）—— **只放测试**，见 §8
+test/tauri/     [Tauri] WebView2 CDP 端到端套件
 build/          图标 · data-placeholder（打包成程序目录的 Data/）
-.github/workflows/  checks.yml（门禁）· build.yml（产物）· release.yml（附 release）
+.github/workflows/  checks.yml（双后端门禁）· build.yml（产物）· release.yml（附 release）
 ```
+
+两套后端**共存**：Electron 侧原样保留（main 分支持续 merge 进来，其测试套件仍是行为契约），
+Tauri 侧是新增文件；shared/ 与 Data/ 的文件格式两端通用。见 §11。
 
 ## 2. 命令
 
 ```bash
 pnpm install        # 不要加 --ignore-scripts（§5）
-pnpm dev            # 开发模式      pnpm typecheck   # 两个 project
-pnpm build          # 编译到 out/   pnpm test        # = test:unit
-pnpm run test:unit  # 非 Electron：命令构建 + 真实转码/字幕 + 本地推流 + obs-websocket + 文案表
-pnpm run test:e2e   # Electron；可只跑指定套件：pnpm run test:e2e ui presets
-pnpm run test:ci    # typecheck → build → unit → e2e
-pnpm dist           # Windows 绿色版
+pnpm dev            # [Electron] 开发模式    pnpm typecheck   # 三个 project（node/web/tauri）
+pnpm build          # [Electron] 编译到 out/ pnpm test        # = test:unit
+pnpm run test:unit  # [Electron] 命令构建 + 真实转码/字幕 + 本地推流 + obs-websocket + 文案表
+pnpm run test:e2e   # [Electron] 可只跑指定套件：pnpm run test:e2e ui presets
+
+pnpm dev:tauri      # [Tauri] 开发模式（vite + Rust 壳）
+pnpm build:tauri    # [Tauri] release 二进制（--no-bundle）
+pnpm dist:tauri     # [Tauri] 构建 + 组装便携目录（release/rtmp-file-streamer-<平台>/）
+pnpm test:cargo     # [Tauri] Rust 后端测试（命令向量/真实转码/RTMP 接收/obs 端点/引擎场景）
+pnpm test:tauri     # [Tauri] WebView2 CDP 端到端（可只跑指定套件：pnpm test:tauri ui datadir）
 ```
+
+两条流水线各自独立可跑；CI 的门禁两条都查（见 checks.yml）。工具链：Node `26.7.0` / pnpm `12.8.1`
+/ Rust stable（本机经 vfox 安装；Windows 需 VS Build Tools 的 C++ 工作负载提供 MSVC 链接器）。
 
 `dev`/`build`/`dist` 都先跑 `scripts/build-info.mjs`：把 package.json 版本、commit 前 10 位、
 是否 nightly（编译 commit 无 tag 即 nightly）、构建时间写进 `build-info.json`，应用从它读版本
@@ -53,7 +66,8 @@ electron-builder 会自行按目标平台/架构下载 Electron dist，不使用
 CI：`checks.yml`（门禁，唯一实现，另两个 `uses:` 它）→ `build.yml`（push main：打 zip → artifact，
 **不碰 release**）/ `release.yml`（release created：同上 → `softprops/action-gh-release` 附上去）。
 artifact **只放最终 zip**；Windows/Linux 每个架构一个 Ubuntu leg 交叉编译（win/linux 各 amd64、arm64，
-产物名用 amd64，electron-builder 参数是 x64），macOS 单独 runner 上两个 leg（产物 mac-intel 与不带架构名的 mac，Apple 芯片版即裸 mac；
+导出名用 amd64。Windows 腿经 `cargo-xwin` 打 MSVC 目标，需 `clang`/`lld`/`llvm-rc`；win-arm64 必须用
+arm64 的 Ubuntu 镜像，因为 `llvm-rc` 把宿主架构写进资源对象，与目标不一致时 lld-link 会拒绝），macOS 单独 runner 上两个 leg（产物 mac-intel 与不带架构名的 mac，Apple 芯片版即裸 mac；
 `macos-latest` 是 Apple 芯片，Intel 版由它交叉编译）。两个打包 job 的矩阵必须同步改。
 
 ## 3. 不能动的约束
@@ -282,3 +296,37 @@ Docs:
   每种方案实测多少秒的表格删掉
 - 同一件事只在一处写：重复告警只会让真正的约束被稀释
 - 目标规模：AGENTS.md 一百多行量级；超出就说明混进了过程
+
+## 11. Tauri 后端（Rust 移植）
+
+`src-tauri/` 是 `src/main` 的全量移植，模块一一对应；改 TS 侧逻辑时**两边都要改**，Rust 侧行为由
+`pnpm test:cargo` 的移植套件（原 harness.mjs + engine-run.cjs 的场景）约束。
+
+```
+src-tauri/src/shared/     types/defaults/protocol/i18n 的 Rust 端口（serde 字段名与 TS 完全一致）
+src-tauri/src/app.rs      App 状态 + 引导序列（对应 index.ts 的服务装配）+ 关闭流程
+src-tauri/src/window.rs   窗口创建/主题/关闭确认/STREAMER_E2E 离屏
+src-tauri/src/ipc.rs      35 个 Tauri command（对应 ipc.ts 的 ipcMain.handle，事件名沿用 evt:*）
+src-tauri/resources/i18n/ 由 scripts/generate-i18n.mjs 从 TS 生成的 JSON（文案与默认值的唯一源仍是 TS；
+                          已 gitignore，build/test 前自动生成，漏生成则 cargo 编译报缺文件）
+```
+
+- **文案与默认值的唯一源仍是 TS**：改 `messages.ts` / `defaults.ts` 后构建脚本自动重生成
+  `resources/i18n/*.json`（include_str! 内嵌）；cargo test 断言三表键集一致
+- **行为对等的移植差异**（有意为之，勿「修回」）：playout 的 `-progress pipe:3` 在 Rust 里是
+  `-progress tcp://127.0.0.1:<临时端口>`（Windows 无法挂 fd3；数据与节奏相同）；单进程管道仍是
+  `-progress pipe:1`；libuv 写队列 → writer task + pending 队列；stdout pause() → hold 标志轮询；
+  ChildProcess → supervisor task（kill 走 channel，exit 经 watch 报告）
+- **Rust 侧的坑**：Tauri 同步 command 跑在主线程，`blocking_pick_file` 等必须放 async command；
+  bootstrap 期间无 tokio 上下文，spawn 一律走 `tauri::async_runtime::spawn` 或 `std::thread`；
+  std Mutex 不可重入（logger 的 rotate 曾自锁死锁）；Windows 下 PATH 分隔符是 `;` 不是 `MAIN_SEPARATOR`；
+  launch_current_from 与 advance_to 互相递归，必须经 `launch_from_boxed`/`advance_to_boxed` 的
+  dyn 装箱打断异步类型环
+- **merge 自 main 后**：src/main 或 src/shared 有改动 → 同步移植到 src-tauri 对应模块 +
+  重跑生成脚本；src/renderer 有改动 → 同步到 src/renderer-tauri（`window.streamer` 接口在
+  shared/types.ts，可选方法 `onDropFiles?` 是 Tauri 独有的拖拽路径通知）
+- **打包**：`pnpm dist:tauri` → `release/rtmp-file-streamer-<平台>-<架构>/`（exe + build-info.json +
+  Data/ 占位 + 可选 bin/）；CI 的六条腿与 electron 时代的产物命名一一对应
+  （win/linux amd64+arm64、mac 与 mac-intel）
+- Rust stable；本机经 vfox 安装（`~/.version-fox/sdks/rust`），MSVC 链接器来自 VS Build Tools
+  的 C++ 工作负载

@@ -1,35 +1,47 @@
 # Portable builds for a push to `main` (or a manual run).
 #
-# Every platform is packaged as an unpacked directory (`--dir`), which is the only
+# Every platform is packaged as an unpacked directory, which is the only
 # target this app has: it writes its state into its own `Data/` folder, so the
 # folder IS the installation — the whole thing can be moved or copied anywhere and
 # keeps working. Each job then wraps that folder in a zip.
 #
-# Every Windows and Linux leg is its own job on the same Ubuntu runner image,
-# because electron-builder cross-compiles `win` and `linux` from Linux and the
-# target is a directory (so no Wine). One job per architecture — package, archive,
-# upload — means any single architecture can be re-run or debugged without the
-# others, and no leg can pick up another's leftovers (packaging rewrites
-# `release/`, which used to force the x64 legs to clear stale output between
-# targets; separate workspaces remove that whole class of problem). macOS cannot
-# join them: electron-builder refuses to build for darwin anywhere but macOS
-# ("Build for macOS is supported only on macOS" — verified locally), so it runs on
-# its own runner. And because `macos-latest` is Apple silicon (the Intel macos-13
-# image is retired), the `arm` leg builds natively there and the `amd64` leg is
-# cross-compiled on the same box — electron-builder fetches the matching darwin
-# dist, a `--dir` target runs nothing native, and ad-hoc codesign handles both.
+# The Tauri build pipeline: `cargo build --release` produces the binary, and
+# `scripts/assemble-tauri-dist.mjs` assembles the portable directory next to it
+# (binary + `build-info.json` + the `Data/` placeholder + the optional `bin/`
+# ffmpeg drop-in). One job per target — build, assemble, archive, upload —
+# means any single target can be re-run or debugged without the others.
 #
-# Architectures: electron-builder's `x64`/`arm64` are published under the names
-# `amd64`/`arm64`, except macOS, where the Intel build is `mac-intel` and the
-# Apple-silicon build keeps the bare `mac` name.
+# Runner placement:
+#   * Every Windows and Linux leg is one Ubuntu job — no Windows runner. The
+#     Windows binaries are MSVC builds cross-compiled with `cargo-xwin`: xwin
+#     downloads the MSVC CRT and Windows SDK, and rustc then uses clang-cl +
+#     lld-link instead of the Windows-only link.exe. `llvm-rc` (Ubuntu's `llvm`
+#     package) compiles the icon/manifest resource tauri-build embeds.
+#   * The win-arm64 leg uses the arm64 Ubuntu image, not `ubuntu-latest`: llvm-rc
+#     stamps the BUILD HOST's architecture into the resource COFF object and
+#     lld-link rejects a machine type that differs from the target. On an arm64
+#     host the stamp already matches the ARM64 target (Windows runs nothing
+#     either way — the deliverable is a portable folder).
+#   * The Linux amd64 leg is native on Ubuntu; the arm64 leg cross-compiles
+#     there too, which needs the GTK/webkit dev headers FOR THE TARGET
+#     architecture (dpkg multiarch — see the install step).
+#   * macOS cannot cross from Linux: both macOS legs run on `macos-latest`
+#     (Apple silicon), where the arm leg is native and the Intel leg is a
+#     cross-compile to `x86_64-apple-darwin`. Tauri links the system WKWebView,
+#     which ships with the OS for both architectures.
+#
+# Artifacts keep the historical names: `rtmp-file-streamer-{platform}-{arch}`
+# with `amd64`/`arm64` (not x64), and macOS publishing `mac-intel` plus the
+# bare `mac` for Apple silicon. The zip carries the same name as its single
+# top-level folder, which is the portable directory itself.
 #
 # It stops at the artifact on purpose. A merge to `main` is a build, not a
 # publication; attaching to a release is `release.yml`'s job.
 #
-# Jobs: the shared gate (`checks.yml` — typecheck plus the backend test suite, on
-# Ubuntu), then one packaging job per Windows/Linux architecture plus the macOS
-# job (amd64 + arm). Every packaging job `needs: checks`, so a red test stops the
-# build before any runner is spent on it.
+# Jobs: the shared gate (`checks.yml` — the TS + Rust backend suites and both
+# typechecks, on Ubuntu), then one packaging job per target. Every packaging
+# job `needs: checks`, so a red test stops the build before any runner is
+# spent on it.
 name: Build
 
 on:
@@ -45,20 +57,12 @@ permissions:
   contents: read
 
 jobs:
-  # The gate: typecheck plus the backend test suite. It lives in `checks.yml` and is
-  # shared with `release.yml`, so the two cannot drift; it runs on Ubuntu only and
-  # never builds, uploads, or launches Electron.
   checks:
     name: checks
     uses: ./.github/workflows/checks.yml
 
-  # One job per Windows/Linux architecture, all cross-built on Ubuntu. `arch` is
-  # the published name, `builder-arch` is what electron-builder's CLI takes, and
-  # `outdir` is the unpacked folder it writes — x64 keeps the historical
-  # `win-unpacked` / `linux-unpacked`, every other arch gets the arch appended
-  # (`win-arm64-unpacked`, verified locally).
   portable:
-    name: portable (${{ matrix.platform }}-${{ matrix.arch }})
+    name: portable (${{ matrix.name }})
     needs: checks
     strategy:
       # One broken architecture must not cancel the others: each zip is an
@@ -66,27 +70,36 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: win
-            arch: amd64
-            builder-arch: x64
-            outdir: win-unpacked
-          - platform: win
-            arch: arm64
-            builder-arch: arm64
-            outdir: win-arm64-unpacked
-          - platform: linux
-            arch: amd64
-            builder-arch: x64
-            outdir: linux-unpacked
-          - platform: linux
-            arch: arm64
-            builder-arch: arm64
-            outdir: linux-arm64-unpacked
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+          - name: win-amd64
+            os: ubuntu-latest
+            target: x86_64-pc-windows-msvc
+            windows-cross: true
+          - name: win-arm64
+            # See the runner-placement note above: the resource compiler must
+            # run on the target architecture.
+            os: ubuntu-24.04-arm
+            target: aarch64-pc-windows-msvc
+            windows-cross: true
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            linux-native: true
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            linux-cross: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # cargo-xwin downloads the MSVC CRT + Windows SDK into this directory; the
+      # cache step below keeps the ~1 GB from being fetched on every run.
+      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
     steps:
       - name: Checkout repo
-        uses: actions/checkout@master
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -100,75 +113,169 @@ jobs:
         with:
           version: 12.8.1
 
-      # Build scripts RUN here, and `pnpm-workspace.yaml` decides which: its
-      # `allowBuilds` allowlist covers electron, esbuild and electron-winstaller, and
-      # everything else stays blocked.
-      #
-      # `--ignore-scripts` used to be here on the theory that electron-builder fetches
-      # the Electron binary itself, so skipping `electron`'s own download avoided
-      # fetching it twice. What actually broke was esbuild: its postinstall is what
-      # puts the platform binary in place, and the vite bundle step dies without it
-      # (same reason the gate in `checks.yml` runs scripts). Electron's runtime is not
-      # the reason either way — electron-builder never touches the copy in
-      # node_modules; it downloads the TARGET platform/arch electron zip itself
-      # (verified in app-builder-lib's ElectronFramework and by packaging
-      # `--win --arm64` / `--linux --arm64` on a different host and checking the
-      # binary headers), which is exactly what makes these cross builds work.
+      # Build scripts RUN here (esbuild's postinstall places its platform
+      # binary; see checks.yml). The Electron download this pays for is never
+      # launched by the Tauri pipeline — one dependency-resolution rule for all
+      # workflows is worth it.
       - name: Prepare workspace
         run: pnpm ci
 
-      - name: Report the toolchain
+      # The About panel's version/commit/nightly come from this file, which is
+      # generated rather than committed (`pnpm build:tauri` does the same).
+      - name: Write the build identity
+        run: node scripts/build-info.mjs
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+        with:
+          # Exact version, matching local development (vfox-installed toolchain).
+          toolchain: 1.99.1
+          # This action's cross-target input is `target` (dtolnay's was `targets`).
+          target: ${{ matrix.target }}
+          # The explicit cargo-registry cache steps below stay the only cache
+          # layer; the action's built-in rust-cache would double them up.
+          cache: false
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      # Linux amd64: the webkit2gtk stack Tauri renders with. The runner image
+      # ships the runtime libraries but LINKING needs the dev headers.
+      - name: Install Linux amd64 dependencies
+        if: matrix.linux-native == true
         run: |
-          node --version
-          pnpm --version
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            patchelf libssl-dev
 
-      # `electron-builder --dir` does not run a build step, so the main / preload /
-      # renderer bundles come first. They are platform-independent; only the Electron
-      # runtime and the packager differ per target.
-      - name: Build the app bundles
-        run: pnpm run build
-
-      - name: Package (${{ matrix.platform }} ${{ matrix.builder-arch }})
-        run: pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
-
-      # `zip` is the runner's own; no pwsh and no Node helper. Run from inside
-      # `release/` so the archive's single top-level entry is the unpacked folder
-      # itself (`win-unpacked/…`), which is what the user ends up with after
-      # extracting. The listing is grepped for the platform executable and the
-      # Data/ placeholder as a smoke check that the archive is not empty or from
-      # the wrong target. (zip stores the executable bit, which the Linux launcher
-      # and `chrome-sandbox` need after extraction; tar.gz was measured on this
-      # payload and is slightly LARGER — 153.8 MB vs 151 MB — so zip wins on size
-      # as well as on "what can the receiver open".)
-      - name: Archive (${{ matrix.platform }}-${{ matrix.arch }})
+      # Linux arm64 cross build: the GTK/webkit dev headers must be the TARGET
+      # architecture's, through dpkg multiarch, plus the GNU cross toolchain
+      # for the C code those -sys crates link, and a pkg-config that looks in
+      # the arm64 sysroot.
+      - name: Install Linux arm64 cross dependencies
+        if: matrix.linux-cross == true
         run: |
+          set -euxo pipefail
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's|^deb |deb [arch=amd64,i386] |' /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config \
+            libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 librsvg2-dev:arm64 \
+            libssl-dev:arm64
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      # Windows cross build: cargo-xwin supplies the MSVC CRT/SDK and points
+      # rustc at clang-cl + lld-link; tauri-build compiles the icon/manifest
+      # resource with llvm-rc. All three tools come from the Ubuntu archive.
+      - name: Install Windows cross dependencies
+        if: matrix.windows-cross == true
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm
+          # The metapackages normally install unversioned tools on PATH; link the
+          # versioned binaries if this image does not.
+          for tool in clang-cl llvm-rc; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              src="$(find /usr/lib/llvm-* -maxdepth 2 \( -type f -o -type l \) -name "$tool" | sort -V | tail -1)"
+              test -n "$src"
+              sudo ln -sf "$src" "/usr/local/bin/$tool"
+            fi
+          done
+          mkdir -p "$XWIN_CACHE_DIR"
+          clang-cl --version
+          lld-link --version
+          # llvm-rc has no --version option; /? prints the banner and exits 0.
+          llvm-rc /? | head -1
+
+      - name: Install cargo-xwin
+        if: matrix.windows-cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+
+      # The CRT/SDK download is ~1 GB; caching it avoids fetching it again on
+      # every run of this leg (the two Windows legs keep separate caches).
+      - name: Cache the Windows CRT/SDK
+        if: matrix.windows-cross == true
+        uses: actions/cache@v4
+        with:
+          path: .xwin-cache
+          key: xwin-${{ runner.os }}-${{ runner.arch }}-v1
+
+      # The message tables the Rust side embeds are dumped from the TypeScript
+      # source of truth before every build; they are gitignored generated files.
+      - name: Generate embedded i18n/defaults JSON
+        run: node scripts/generate-i18n.mjs
+
+      - name: Tauri renderer build
+        run: pnpm run build:renderer
+
+      - name: Build release binary (${{ matrix.target }})
+        working-directory: src-tauri
+        run: |
+          set -euxo pipefail
+          if [ "${{ matrix.windows-cross }}" = "true" ]; then
+            # cargo xwin == cargo + xwin's CRT/SDK paths and the LLVM linker.
+            cargo xwin build --release --target ${{ matrix.target }} --features custom-protocol
+          else
+            cargo build --release --target ${{ matrix.target }} --features custom-protocol
+          fi
+
+      - name: Assemble portable directory
+        run: node scripts/assemble-tauri-dist.mjs --target ${{ matrix.target }}
+
+      # Run from inside `release/` so the zip's single top-level entry is the
+      # portable folder itself, and smoke-check the listing for the executable
+      # and the Data/ placeholder so an empty or wrong-target archive fails here.
+      - name: Archive (${{ matrix.name }})
+        run: |
+          set -euxo pipefail
+          name="rtmp-file-streamer-${{ matrix.name }}"
           mkdir -p dist
-          name="rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}"
-          (cd release && zip -r -q "../dist/${name}.zip" "${{ matrix.outdir }}")
+          (cd release && zip -r -q "../dist/${name}.zip" "${name}")
           unzip -l "dist/${name}.zip" | head -3
-          case "${{ matrix.platform }}" in
-            win)   unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|RTMPFileStreamer\.exe)' || exit 1 ;;
-            linux) unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|rtmp-file-streamer$|chrome-sandbox)' || exit 1 ;;
+          case "${{ matrix.name }}" in
+            win-*)
+              # A cross build must produce a Windows PE, not a Linux binary that
+              # merely carries the .exe name.
+              file "release/${name}/RTMPFileStreamer.exe" | grep -qi 'MS Windows' || exit 1
+              unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|RTMPFileStreamer\.exe)" || exit 1
+              ;;
+            linux-*)
+              unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|rtmp-file-streamer)" || exit 1
+              ;;
           esac
           ls -lh "dist/${name}.zip"
 
       - name: Upload the build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}
-          path: dist/rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          name: rtmp-file-streamer-${{ matrix.name }}
+          path: dist/rtmp-file-streamer-${{ matrix.name }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-  # macOS publishes two archives: `mac-intel` and a bare `mac` — the absence of a
-  # suffix marks the Apple-silicon build (the electron-builder flag is still
-  # `--arm64`). The matrix `suffix` is composed into the artifact name
-  # (`rtmp-file-streamer-mac${suffix}`), so the arm leg ends up with exactly
-  # `rtmp-file-streamer-mac`. `macos-latest` is arm64 hardware, so the
-  # Apple-silicon leg is native and the Intel leg is cross-compiled on it. Output
-  # dirs carry the arch suffix for non-x64 and macOS never gets the "-unpacked"
-  # suffix: `mac` for x64, `mac-arm64` for arm64.
+  # macOS publishes two archives: `mac-intel` and a bare `mac` — the absence of
+  # a suffix marks the Apple-silicon build. `macos-latest` is arm64 hardware, so
+  # the Apple-silicon leg is native and the Intel leg is cross-compiled on it.
+  # Tauri links the system WKWebView, which ships with macOS for both archs.
+  # The portable folder keeps a bare binary (no .app wrapper), which is
+  # ad-hoc signed so it at least passes Gatekeeper's code-signature check the
+  # same way the electron build did.
   portable-macos:
     name: portable (macOS${{ matrix.suffix }})
     needs: checks
@@ -177,16 +284,14 @@ jobs:
       matrix:
         include:
           - suffix: '-intel'
-            builder-arch: x64
-            outdir: mac
+            target: x86_64-apple-darwin
           - suffix: ''
-            builder-arch: arm64
-            outdir: mac-arm64
+            target: aarch64-apple-darwin
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout repo
-        uses: actions/checkout@master
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -198,37 +303,61 @@ jobs:
         with:
           version: 12.8.1
 
-      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
-      # which build scripts run. See the packaging job above.
       - name: Prepare workspace
         run: pnpm ci
 
-      - name: Build the app bundles
-        run: pnpm run build
+      # The About panel's version/commit/nightly come from this file, which is
+      # generated rather than committed (`pnpm build:tauri` does the same).
+      - name: Write the build identity
+        run: node scripts/build-info.mjs
 
-      - name: Package macOS (${{ matrix.builder-arch }})
-        run: pnpm exec electron-builder --mac --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+        with:
+          # Exact version, matching local development (vfox-installed toolchain).
+          toolchain: 1.99.1
+          # This action's cross-target input is `target` (dtolnay's was `targets`).
+          target: ${{ matrix.target }}
+          # The explicit cargo-registry cache steps below stay the only cache
+          # layer; the action's built-in rust-cache would double them up.
+          cache: false
 
-      # There is no signing identity for this app on a runner, and an unsigned
-      # bundle is what CI can legitimately produce. An ad-hoc signature at least
-      # keeps macOS from refusing to launch the extracted app outright.
-      - name: Ad-hoc sign the bundle
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Generate embedded i18n/defaults JSON
+        run: node scripts/generate-i18n.mjs
+
+      - name: Tauri renderer build
+        run: pnpm run build:renderer
+
+      - name: Build release binary (${{ matrix.target }})
+        working-directory: src-tauri
+        run: cargo build --release --target ${{ matrix.target }} --features custom-protocol
+
+      - name: Assemble portable directory
+        run: node scripts/assemble-tauri-dist.mjs --target ${{ matrix.target }}
+
+      - name: Ad-hoc sign the binary
         run: |
-          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
-          echo "signing ${app}"
-          codesign --force --deep --sign - "$app"
-          codesign --verify --deep --strict "$app"
+          suffix="${{ matrix.suffix }}"
+          if [ "$suffix" = "-intel" ]; then dir="rtmp-file-streamer-mac-intel"; else dir="rtmp-file-streamer-mac"; fi
+          codesign --force --sign - "release/$dir/RTMPFileStreamer"
+          codesign --verify --strict "release/$dir/RTMPFileStreamer"
 
-      # `ditto` rather than `zip`: it is what preserves the symlinks and the code
-      # signature inside the `.app` bundle, and `--keepParent` puts the bundle in its
-      # own folder so extracting yields one directory. `--norsrc` keeps extended
-      # attributes out of an archive meant to be portable. tar.gz was measured on
-      # this payload and is slightly LARGER than zip (153.8 MB vs 151 MB).
-      - name: Archive macOS (${{ matrix.builder-arch }})
+      - name: Archive macOS${{ matrix.suffix }}
         run: |
+          set -euxo pipefail
+          suffix="${{ matrix.suffix }}"
+          if [ "$suffix" = "-intel" ]; then dir="rtmp-file-streamer-mac-intel"; else dir="rtmp-file-streamer-mac"; fi
           mkdir -p dist
-          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
-          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac${{ matrix.suffix }}.zip
+          (cd release && ditto -c -k --sequesterRsrc --keepParent "$dir" "../dist/rtmp-file-streamer-mac${suffix}.zip")
+          unzip -l "dist/rtmp-file-streamer-mac${suffix}.zip" | head -3
           ls -lh dist/
 
       - name: Upload the macOS build

@@ -24,7 +24,15 @@
     "test:unit": "node test/unit.mjs",
     "test:e2e": "node test/e2e.mjs",
     "test:ci": "pnpm run typecheck && pnpm run build && pnpm run test:unit && pnpm run test:e2e",
-    "test": "pnpm run test:unit"
+    "test": "pnpm run test:unit",
+    "dev:renderer": "vite --config vite.config.tauri.ts",
+    "build:renderer": "vite build --config vite.config.tauri.ts",
+    "dev:tauri": "node scripts/build-info.mjs && tauri dev",
+    "build:tauri": "node scripts/build-info.mjs && node scripts/generate-i18n.mjs && tauri build --no-bundle",
+    "dist:tauri": "pnpm run build:tauri && node scripts/assemble-tauri-dist.mjs",
+    "typecheck:tauri": "tsc --noEmit -p tsconfig.tauri.json",
+    "test:cargo": "node scripts/generate-i18n.mjs && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:tauri": "node test/tauri/e2e.mjs"
   },
   "dependencies": {},
   "//esbuild": "Direct, not just transitive (vite and electron-vite each pull one in): the test entry points bundle the modules under test with this exact package, so it is declared here and not left to resolution. CI proved that matters — with esbuild only transitive, its platform binary (@esbuild/<platform>-<arch>, an optionalDependency) was never installed on Linux and the whole non-Electron suite died at the bundling step.",
@@ -53,6 +61,8 @@
     "tailwindcss": "^4.3.3",
     "tw-animate-css": "^1.4.0",
     "typescript": "^5.9.3",
-    "vite": "^7.3.6"
+    "vite": "^7.3.6",
+    "@tauri-apps/api": "^2.9.3",
+    "@tauri-apps/cli": "^2.9.6"
   }
 }

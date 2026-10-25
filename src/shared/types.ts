@@ -673,6 +673,12 @@ export interface StreamerApi {
    * (`webUtils.getPathForFile`) must happen in the preload world.
    */
   getPathsForFiles(files: File[]): string[]
+  /**
+   * Tauri only: real drag-drop notifications from the host (the webview's
+   * drag-drop handler suppresses the DOM drop event on Windows). Optional so
+   * the Electron preload keeps satisfying this interface unchanged.
+   */
+  onDropFiles?(cb: (paths: string[]) => void): () => void
   onStatus(cb: (status: EngineStatus) => void): () => void
   onLog(cb: (entry: LogEntry) => void): () => void
   onPlaylist(cb: (items: PlaylistItem[]) => void): () => void

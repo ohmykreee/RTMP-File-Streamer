@@ -6,22 +6,21 @@
 # happens AFTER the gate: build.yml stops at the artifact, release.yml attaches it
 # to the release. Nothing here builds or uploads — it is pass/fail only.
 #
-# Two gates, in this order:
-#   1. typecheck  — `pnpm typecheck` (node + web projects)
-#   2. backend tests — `pnpm run test:unit`: ffmpeg command vectors executed for
-#      real, subtitle burn-in, encoder-lead bounding, a local RTMP push, and the
-#      obs-websocket endpoint over a real socket. This is the whole
-#      non-Electron suite; the Electron suites stay out of CI on purpose.
+# The branch carries TWO backends, and the gate checks both:
+#   1. the Electron trees (kept for merges from main): `pnpm typecheck` for the
+#      node + web projects and `pnpm run test:unit` — the TypeScript suite that
+#      remains the behavioural contract the Rust port is held against,
+#   2. the Rust backend (`src-tauri/`): `pnpm run typecheck:tauri` for the Tauri
+#      renderer and `cargo test --release` — the ported suite runs the ffmpeg
+#      command vectors, real transcodes with subtitle burn-in verification, the
+#      missing-track generation, a local RTMP ingest, the obs-websocket endpoint
+#      and the engine scenarios, plus the pure unit tests.
 #
 # Ubuntu only, on purpose:
 #   * the tests need a real ffmpeg/ffprobe on PATH, and the static Linux build
 #     installed below is how CI gets one without packaging ffmpeg into the app
-#   * the checks say nothing about a platform — the app code under test is
-#     platform-independent JS/TS, and the three packaged builds are compiled on
-#     their own runners afterwards. Running this gate again on macOS or Windows
-#     would only make every build twice as slow
-#   * `runs-on: ubuntu-latest` is a job-level key, so this reusable workflow
-#     cannot be pointed at another runner by a caller
+#   * the Rust tests spawn real ffmpeg/ingest processes; one gate runner is the
+#     cheap place to run them
 name: Checks
 
 on:
@@ -29,14 +28,15 @@ on:
 
 jobs:
   checks:
-    name: typecheck + backend tests
+    name: typecheck + backend tests (ts + rust)
     runs-on: ubuntu-latest
-    # Well above the 10-minute watchdog inside the harness: the watchdog is what
-    # reports a stuck ffmpeg, this is only the backstop for a stuck runner.
-    timeout-minutes: 30
+    # Well above the watchdogs inside the harnesses (10 min TS; per-test timeouts
+    # in Rust): the watchdogs report a stuck ffmpeg, this is only the backstop
+    # for a stuck runner.
+    timeout-minutes: 60
     steps:
       - name: Checkout repo
-        uses: actions/checkout@master
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -56,15 +56,30 @@ jobs:
       # install — `--ignore-scripts` was tried and it broke the gate, because esbuild's
       # postinstall is what puts the native binary in place, and `test:unit` bundles
       # its modules with esbuild.
-      #
-      # The cost is Electron's ~368 MB binary, which this job never launches. Paying it
-      # is the deliberate trade: one dependency-resolution rule for all three workflows
-      # instead of a flag that silently changes what "install" means.
       - name: Prepare workspace
         run: pnpm ci
 
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+        with:
+          # Exact version, matching local development (vfox-installed toolchain).
+          toolchain: 1.99.1
+          # The explicit cargo-registry cache steps below stay the only cache
+          # layer; the action's built-in rust-cache would double them up.
+          cache: false
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
       - name: Typecheck
-        run: pnpm run typecheck
+        run: |
+          pnpm run typecheck
+          pnpm run typecheck:tauri
 
       # --- FFmpeg --------------------------------------------------------------
       # The app deliberately does not bundle ffmpeg/ffprobe (GPL, and large), and the
@@ -75,9 +90,9 @@ jobs:
       # `libavcodec-extra` is NOT optional here. Ubuntu splits the GPL/patent-encumbered
       # encoders out of the base library: plain `ffmpeg` depends on the plain
       # `libavcodec<NN>`, while the `-extra` build is the one that links libx264,
-      # libx265, libmp3lame and libopus. The suite really encodes with libx264 (fixture
+      # libx265, libmp3lame and libopus. Both suites really encode with libx264 (fixture
       # generation, the burn-in transcode, the "copy falls back to software" case) and
-      # asserts on libx265, so without it a batch of checks fail with "Unknown encoder".
+      # assert on libx265, so without it a batch of checks fail with "Unknown encoder".
       # The extra package installs the same shared object the base one would, so
       # `ffmpeg` itself needs no swap — it just gains the encoders.
       #
@@ -111,14 +126,29 @@ jobs:
           ffmpeg -hide_banner -version | head -1
           # `which`, not a hardcoded path: this is what proves the install landed on PATH.
           which ffmpeg ffprobe
-          ffmpeg -hide_banner -filters | grep -E ' (subtitles|signalstats|metadata) ' \
-            || { echo "::error::this ffmpeg is missing subtitles/signalstats/metadata"; exit 1; }
+          ffmpeg -hide_banner -filters | grep -E ' (subtitles|signalstats|metadata) '             || { echo "::error::this ffmpeg is missing subtitles/signalstats/metadata"; exit 1; }
           # The suite asserts on rendered subtitle pixels, so "libass can draw text"
           # gets its own line instead of surfacing as a mystery YMAX=0 later.
-          printf '1\n00:00:00,000 --> 00:00:01,000\nfont probe\n' > "$RUNNER_TEMP/probe.srt"
-          ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=black:s=320x240:d=1 \
-            -vf "subtitles=$RUNNER_TEMP/probe.srt" -frames:v 1 -f null - \
-            || { echo "::error::the subtitles filter cannot render text — the burn-in checks will fail"; exit 1; }
+          printf '1
+          00:00:00,000 --> 00:00:01,000
+          font probe
+          ' > "$RUNNER_TEMP/probe.srt"
+          ffmpeg -hide_banner -loglevel error -y -f lavfi -i color=c=black:s=320x240:d=1             -vf "subtitles=$RUNNER_TEMP/probe.srt" -frames:v 1 -f null -             || { echo "::error::the subtitles filter cannot render text — the burn-in checks will fail"; exit 1; }
 
-      - name: Backend tests
+      # The message tables and default settings the Rust side embeds are dumped from
+      # the TypeScript source of truth before every build; they are gitignored
+      # generated files.
+      - name: Generate embedded i18n/defaults JSON
+        run: node scripts/generate-i18n.mjs
+
+      - name: Tauri renderer build
+        run: pnpm run build:renderer
+
+      # Single-threaded on purpose: the engine scenarios bind RTMP ports and spawn
+      # many ffmpeg processes; parallel test binaries would fight over both.
+      - name: Rust backend tests
+        working-directory: src-tauri
+        run: cargo test --release -- --test-threads=1
+
+      - name: TypeScript backend tests
         run: pnpm run test:unit

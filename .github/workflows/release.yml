@@ -5,14 +5,12 @@
 # "these artifacts are the release". `build.yml` covers the push-to-main case and
 # stops at the artifact; this one is the only place that writes to a release.
 #
-# Same build layout as `build.yml`: every Windows/Linux architecture is its own
-# Ubuntu job, cross-built (see the matrix there), and macOS on its own runner
-# with both archs (`macos-latest` is Apple silicon, so the Apple-silicon leg is
-# native there and the Intel leg is cross-compiled).
-#
-# The gate is the same file `build.yml` uses (`checks.yml`: typecheck + backend
-# tests, Ubuntu only). Only the last job differs — this workflow attaches the
-# archives to the release, `build.yml` stops at the artifacts.
+# Same build layout as `build.yml` (Tauri: one self-contained job per target —
+# see the matrix and the runner-placement notes there), and the two packaging
+# jobs must stay in sync. The gate is the same file `build.yml` uses
+# (`checks.yml`: both typechecks + the TS and Rust backend suites). Only the
+# last job differs — this workflow attaches the archives to the release,
+# `build.yml` stops at the artifacts.
 name: Release
 
 on:
@@ -30,37 +28,44 @@ jobs:
     name: checks
     uses: ./.github/workflows/checks.yml
 
-  # Same matrix as `build.yml`'s packaging job; the two must stay in sync, and
-  # `build.yml`'s header explains the shape (one self-contained job per
-  # architecture, cross-built on Ubuntu).
   portable:
-    name: portable (${{ matrix.platform }}-${{ matrix.arch }})
+    name: portable (${{ matrix.name }})
     needs: checks
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: win
-            arch: amd64
-            builder-arch: x64
-            outdir: win-unpacked
-          - platform: win
-            arch: arm64
-            builder-arch: arm64
-            outdir: win-arm64-unpacked
-          - platform: linux
-            arch: amd64
-            builder-arch: x64
-            outdir: linux-unpacked
-          - platform: linux
-            arch: arm64
-            builder-arch: arm64
-            outdir: linux-arm64-unpacked
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+          - name: win-amd64
+            os: ubuntu-latest
+            target: x86_64-pc-windows-msvc
+            windows-cross: true
+          - name: win-arm64
+            # Must run on an arm64 host: llvm-rc stamps the host architecture
+            # into the resource COFF object and lld-link rejects a mismatch
+            # (see the runner-placement notes in build.yml).
+            os: ubuntu-24.04-arm
+            target: aarch64-pc-windows-msvc
+            windows-cross: true
+          - name: linux-amd64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            linux-native: true
+          - name: linux-arm64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            linux-cross: true
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      # cargo-xwin downloads the MSVC CRT + Windows SDK into this directory; the
+      # cache step below keeps the ~1 GB from being fetched on every run.
+      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
     steps:
       - name: Checkout repo
-        uses: actions/checkout@master
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -72,37 +77,148 @@ jobs:
         with:
           version: 12.8.1
 
-      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
-      # which build scripts run, and esbuild's is required — the vite bundle step
-      # dies without its platform binary.
+      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` decides
+      # which build scripts run, and esbuild's is required (see checks.yml).
       - name: Prepare workspace
         run: pnpm ci
 
-      - name: Build the app bundles
-        run: pnpm run build
+      # The About panel's version/commit/nightly come from this file, which is
+      # generated rather than committed (`pnpm build:tauri` does the same).
+      - name: Write the build identity
+        run: node scripts/build-info.mjs
 
-      - name: Package (${{ matrix.platform }} ${{ matrix.builder-arch }})
-        run: pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+        with:
+          # Exact version, matching local development (vfox-installed toolchain).
+          toolchain: 1.99.1
+          # This action's cross-target input is `target` (dtolnay's was `targets`).
+          target: ${{ matrix.target }}
+          # The explicit cargo-registry cache steps below stay the only cache
+          # layer; the action's built-in rust-cache would double them up.
+          cache: false
 
-      # The runner's own `zip`, run from inside `release/` so the archive's single
-      # top-level entry is the unpacked folder itself (`win-unpacked/…`).
-      - name: Archive (${{ matrix.platform }}-${{ matrix.arch }})
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Install Linux amd64 dependencies
+        if: matrix.linux-native == true
         run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            patchelf libssl-dev
+
+      - name: Install Linux arm64 cross dependencies
+        if: matrix.linux-cross == true
+        run: |
+          set -euxo pipefail
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's|^deb |deb [arch=amd64,i386] |' /etc/apt/sources.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config \
+            libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 librsvg2-dev:arm64 \
+            libssl-dev:arm64
+          echo "PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      # Windows cross build: cargo-xwin supplies the MSVC CRT/SDK and points
+      # rustc at clang-cl + lld-link; tauri-build compiles the icon/manifest
+      # resource with llvm-rc. All three tools come from the Ubuntu archive.
+      - name: Install Windows cross dependencies
+        if: matrix.windows-cross == true
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm
+          # The metapackages normally install unversioned tools on PATH; link the
+          # versioned binaries if this image does not.
+          for tool in clang-cl llvm-rc; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              src="$(find /usr/lib/llvm-* -maxdepth 2 \( -type f -o -type l \) -name "$tool" | sort -V | tail -1)"
+              test -n "$src"
+              sudo ln -sf "$src" "/usr/local/bin/$tool"
+            fi
+          done
+          mkdir -p "$XWIN_CACHE_DIR"
+          clang-cl --version
+          lld-link --version
+          # llvm-rc has no --version option; /? prints the banner and exits 0.
+          llvm-rc /? | head -1
+
+      - name: Install cargo-xwin
+        if: matrix.windows-cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin
+
+      # The CRT/SDK download is ~1 GB; caching it avoids fetching it again on
+      # every run of this leg (the two Windows legs keep separate caches).
+      - name: Cache the Windows CRT/SDK
+        if: matrix.windows-cross == true
+        uses: actions/cache@v4
+        with:
+          path: .xwin-cache
+          key: xwin-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Generate embedded i18n/defaults JSON
+        run: node scripts/generate-i18n.mjs
+
+      - name: Tauri renderer build
+        run: pnpm run build:renderer
+
+      - name: Build release binary (${{ matrix.target }})
+        working-directory: src-tauri
+        run: |
+          set -euxo pipefail
+          if [ "${{ matrix.windows-cross }}" = "true" ]; then
+            # cargo xwin == cargo + xwin's CRT/SDK paths and the LLVM linker.
+            cargo xwin build --release --target ${{ matrix.target }} --features custom-protocol
+          else
+            cargo build --release --target ${{ matrix.target }} --features custom-protocol
+          fi
+
+      - name: Assemble portable directory
+        run: node scripts/assemble-tauri-dist.mjs --target ${{ matrix.target }}
+
+      # Run from inside `release/` so the zip's single top-level entry is the
+      # portable folder itself, and smoke-check the listing for the executable
+      # and the Data/ placeholder so an empty or wrong-target archive fails here.
+      - name: Archive (${{ matrix.name }})
+        run: |
+          set -euxo pipefail
+          name="rtmp-file-streamer-${{ matrix.name }}"
           mkdir -p dist
-          name="rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}"
-          (cd release && zip -r -q "../dist/${name}.zip" "${{ matrix.outdir }}")
+          (cd release && zip -r -q "../dist/${name}.zip" "${name}")
           unzip -l "dist/${name}.zip" | head -3
-          case "${{ matrix.platform }}" in
-            win)   unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|RTMPFileStreamer\.exe)' || exit 1 ;;
-            linux) unzip -l "dist/${name}.zip" | grep -E 'unpacked/(Data/|rtmp-file-streamer$|chrome-sandbox)' || exit 1 ;;
+          case "${{ matrix.name }}" in
+            win-*)
+              # A cross build must produce a Windows PE, not a Linux binary that
+              # merely carries the .exe name.
+              file "release/${name}/RTMPFileStreamer.exe" | grep -qi 'MS Windows' || exit 1
+              unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|RTMPFileStreamer\.exe)" || exit 1
+              ;;
+            linux-*)
+              unzip -l "dist/${name}.zip" | grep -E "${name}/(Data/|rtmp-file-streamer)" || exit 1
+              ;;
           esac
           ls -lh "dist/${name}.zip"
 
       - name: Upload the build
         uses: actions/upload-artifact@v7
         with:
-          name: rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}
-          path: dist/rtmp-file-streamer-${{ matrix.platform }}-${{ matrix.arch }}.zip
+          name: rtmp-file-streamer-${{ matrix.name }}
+          path: dist/rtmp-file-streamer-${{ matrix.name }}.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -118,16 +234,14 @@ jobs:
       matrix:
         include:
           - suffix: '-intel'
-            builder-arch: x64
-            outdir: mac
+            target: x86_64-apple-darwin
           - suffix: ''
-            builder-arch: arm64
-            outdir: mac-arm64
+            target: aarch64-apple-darwin
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Checkout repo
-        uses: actions/checkout@master
+        uses: actions/checkout@v7
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -139,32 +253,61 @@ jobs:
         with:
           version: 12.8.1
 
-      # No `--ignore-scripts`: the allowlist in `pnpm-workspace.yaml` is what decides
-      # which build scripts run. macOS needs esbuild's, and pays for
-      # `electron-winstaller`'s 30 MB 7z download, which only serves the Squirrel/NSIS
-      # installers this project does not build — dropping that entry from the allowlist
-      # is the way to get rid of it.
       - name: Prepare workspace
         run: pnpm ci
 
-      - name: Build the app bundles
-        run: pnpm run build
+      # The About panel's version/commit/nightly come from this file, which is
+      # generated rather than committed (`pnpm build:tauri` does the same).
+      - name: Write the build identity
+        run: node scripts/build-info.mjs
 
-      - name: Package macOS (${{ matrix.builder-arch }})
-        run: pnpm exec electron-builder --mac --${{ matrix.builder-arch }} --dir --config electron-builder.config.cjs
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2.0.0
+        with:
+          # Exact version, matching local development (vfox-installed toolchain).
+          toolchain: 1.99.1
+          # This action's cross-target input is `target` (dtolnay's was `targets`).
+          target: ${{ matrix.target }}
+          # The explicit cargo-registry cache steps below stay the only cache
+          # layer; the action's built-in rust-cache would double them up.
+          cache: false
 
-      - name: Ad-hoc sign the bundle
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Generate embedded i18n/defaults JSON
+        run: node scripts/generate-i18n.mjs
+
+      - name: Tauri renderer build
+        run: pnpm run build:renderer
+
+      - name: Build release binary (${{ matrix.target }})
+        working-directory: src-tauri
+        run: cargo build --release --target ${{ matrix.target }} --features custom-protocol
+
+      - name: Assemble portable directory
+        run: node scripts/assemble-tauri-dist.mjs --target ${{ matrix.target }}
+
+      - name: Ad-hoc sign the binary
         run: |
-          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
-          echo "signing ${app}"
-          codesign --force --deep --sign - "$app"
-          codesign --verify --deep --strict "$app"
+          suffix="${{ matrix.suffix }}"
+          if [ "$suffix" = "-intel" ]; then dir="rtmp-file-streamer-mac-intel"; else dir="rtmp-file-streamer-mac"; fi
+          codesign --force --sign - "release/$dir/RTMPFileStreamer"
+          codesign --verify --strict "release/$dir/RTMPFileStreamer"
 
-      - name: Archive macOS (${{ matrix.builder-arch }})
+      - name: Archive macOS${{ matrix.suffix }}
         run: |
+          set -euxo pipefail
+          suffix="${{ matrix.suffix }}"
+          if [ "$suffix" = "-intel" ]; then dir="rtmp-file-streamer-mac-intel"; else dir="rtmp-file-streamer-mac"; fi
           mkdir -p dist
-          app="$(find "release/${{ matrix.outdir }}" -maxdepth 1 -name '*.app' -print -quit)"
-          ditto -c -k --sequesterRsrc --keepParent --norsrc "$app" dist/rtmp-file-streamer-mac${{ matrix.suffix }}.zip
+          (cd release && ditto -c -k --sequesterRsrc --keepParent "$dir" "../dist/rtmp-file-streamer-mac${suffix}.zip")
+          unzip -l "dist/rtmp-file-streamer-mac${suffix}.zip" | head -3
           ls -lh dist/
 
       - name: Upload the macOS build

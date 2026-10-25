@@ -50,3 +50,12 @@ skills-lock.json
 .agents
 .claude
 agent
+
+# --------------------------------------------------------- tauri build output
+# The Rust backend's target dir (its test fixtures live under it too, generated
+# on demand by the cargo tests), and the embedded i18n/defaults JSON the Rust
+# side compiles in — dumped from the TypeScript source of truth by
+# `node scripts/generate-i18n.mjs` before every build (see scripts and CI).
+src-tauri/target/
+src-tauri/resources/i18n/
+src-tauri/gen/

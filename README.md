@@ -117,8 +117,9 @@
 
 | 依赖 | 说明 |
 | --- | --- |
-| **FFmpeg + FFprobe** | 必需。自动按以下顺序查找：设置中手动指定 → 程序目录 `bin/`（打包版为 `resources/bin/`）→ `PATH` → 常见安装路径。**建议使用带字幕滤镜支持的完整版构建**，否则无法烧录文本字幕 |
+| **FFmpeg + FFprobe** | 必需。自动按以下顺序查找：设置中手动指定 → 程序目录 `bin/` → `PATH` → 常见安装路径。**建议使用带字幕滤镜支持的完整版构建**，否则无法烧录文本字幕 |
 | 操作系统 | Windows 10/11 x64（已验证）；macOS / Linux 同样支持；另提供 Windows / Linux / macOS 的 arm64（Apple 芯片）版本 |
+| **WebView 2 运行时** | Tauri 版（见 §6）的 Windows 渲染依赖；Windows 10/11 一般自带，缺失时由系统自动安装 |
 
 ---
 
@@ -186,3 +187,23 @@
 - **不导入任何外部状态**：首次启动不会从系统其它位置搬设置，一切都是新的
 - **换机器继续用**：把整个程序文件夹一起复制过去
 - **恢复出厂设置**：删掉 `Data/` 文件夹，下次启动会重建
+
+---
+
+## 6. 关于 Tauri 版本
+
+除 Electron 版本外，本仓库还提供基于 Tauri 的版本：界面相同、功能一致，Windows 渲染使用系统自带的 WebView 2（不再打包 Chromium），后端逻辑为 Rust 实现。两个版本的数据目录同为程序目录下的 `Data/`，配置文件结构不变，可直接互换使用。
+
+FFmpeg 的查找顺序与 Electron 版一致（设置中手动指定 → 程序目录 `bin/` → `PATH` → 常见安装路径），同样不随应用打包。
+
+面向开发的构建与测试命令（工具链：Node 26.7.0 + pnpm 12.8.1 + Rust stable；Windows 需要 Visual Studio Build Tools 的 C++ 工作负载）：
+
+```bash
+pnpm dev:tauri          # 开发模式（先起 vite，再起 Rust 壳）
+pnpm build:tauri        # 构建 release 二进制
+pnpm dist:tauri         # 构建 + 组装便携目录（release/rtmp-file-streamer-<平台>/）
+pnpm test:cargo         # Rust 后端测试（命令向量 / 真实转码 / RTMP 接收 / obs-websocket 端点 / 引擎场景）
+pnpm test:tauri         # Tauri 端到端测试（WebView2 CDP 驱动）
+```
+
+Rust 建议经 [vfox](https://github.com/version-fox/version-fox) 安装：`vfox add rust && vfox install rust@<版本> && vfox use --global rust@<版本>`。开发细节见 [AGENTS.md](AGENTS.md)。
