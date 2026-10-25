@@ -115,6 +115,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg libavcodec-extra
 
+      # `cargo test` compiles the Tauri Linux backend, so the GTK/WebKit stack
+      # has to be linkable even though the tests never open a window: without the
+      # dev headers gobject-sys / glib-sys / gio-sys die in their build scripts
+      # with the generic "system library not found" error. Same package set the
+      # linux-amd64 packaging leg installs.
+      - name: Install Tauri Linux dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev \
+            patchelf libssl-dev
+
       # Verified rather than assumed, because everything below is real transcoding:
       # a build without the encoders, or without a font for libass to draw with, would
       # otherwise fail deep inside a black-box encode where the cause is invisible.
