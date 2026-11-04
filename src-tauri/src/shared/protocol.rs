@@ -1,6 +1,15 @@
 //! Stream protocol support: detection from the address, the ffmpeg muxer each
 //! protocol needs, and how the stream key is carried per protocol.
 //! Port of `src/shared/protocol.ts` + `src/shared/rtmp.ts`.
+//!
+//! One address field, one key field — no extra UI per protocol. The key field's
+//! MEANING follows the protocol:
+//!  - RTMP/RTMPS: appended directly to the address (see `rtmp.rs`)
+//!  - SRT: appended directly to the address too — no `passphrase` parameter is
+//!    built for it, so an encryption passphrase belongs in the address itself
+//!  - RTSP: appended directly to the address path; full user:pass authentication
+//!    can be written into the address itself
+//!  - WHIP: sent as the muxer's Bearer token (`-authorization`, a JWT)
 
 use crate::shared::types::{ContainerName, StreamNetwork, StreamProtocol};
 
@@ -26,12 +35,19 @@ pub fn protocol_container(protocol: &str) -> Option<&'static str> {
     }
 }
 
-/// Network transports each protocol can use.
+/// Network transports each protocol's media actually travels over. SRT is
+/// UDP-only and RTMP is TCP-only; RTSP is the one protocol with a real choice.
+///
+/// WHIP is the easy one to get wrong: only its HTTP(S) signalling (the SDP
+/// POST/PATCH and the DELETE) goes over TCP. The media itself is WebRTC — ICE,
+/// DTLS and SRTP datagrams — so it rides UDP. ffmpeg's `whip` muxer has no
+/// transport option and keeps the first UDP ICE candidate only, so there is
+/// nothing to choose here: do not "restore" TCP because the endpoint is http(s).
 fn protocol_networks(protocol: &str) -> &'static [&'static str] {
     match protocol {
         "srt" => &["udp"],
         "rtsp" => &["tcp", "udp"],
-        "whip" => &["tcp"],
+        "whip" => &["udp"],
         _ => &["tcp"], // rtmp
     }
 }
@@ -108,10 +124,11 @@ pub fn container_for_protocol(protocol: Option<&str>) -> Option<ContainerName> {
 
 /// Builds the ffmpeg push target for a protocol.
 ///
-/// RTMP/RTMPS and RTSP carry the key IN the address (appended directly, see
-/// `build_rtmp_target`); SRT takes it as a `passphrase` query parameter
-/// (percent-encoded, and skipped when the address already carries one); WHIP
-/// does not carry it in the address at all.
+/// RTMP/RTMPS, SRT and RTSP carry the key IN the address — appended directly, the
+/// rule `build_rtmp_target` implements, with no separator and no query parameter
+/// of its own (an SRT passphrase, if one is needed, has to be written into the
+/// address). WHIP does not carry it in the address at all: the key rides in the
+/// muxer's own `-authorization` option (see `protocol_key_args`).
 pub fn build_push_target(address: &str, stream_key: &str, protocol: Option<&str>) -> String {
     let base = address.trim();
     let key = stream_key.trim();
@@ -122,31 +139,7 @@ pub fn build_push_target(address: &str, stream_key: &str, protocol: Option<&str>
     if p == "whip" {
         return base.to_string();
     }
-    if p == "srt" {
-        if key.is_empty() || base.contains("?passphrase=") || base.contains("&passphrase=") {
-            return base.to_string();
-        }
-        let encoded: String = urlencode_component(key);
-        let sep = if base.contains('?') { '&' } else { '?' };
-        return format!("{base}{sep}passphrase={encoded}");
-    }
     build_rtmp_target(base, key)
-}
-
-/// `encodeURIComponent` for the characters that matter in an SRT passphrase:
-/// everything outside the RFC 3986 unreserved set is percent-encoded (UTF-8).
-pub fn urlencode_component(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for byte in input.as_bytes() {
-        let b = *byte;
-        let unreserved = b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~' | b'!' | b'\'' | b'(' | b')' | b'*');
-        if unreserved {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
 }
 
 /// RTMP target composition: the stream key is appended **directly** to the
@@ -198,9 +191,8 @@ mod tests {
     #[test]
     fn push_target_per_protocol() {
         assert_eq!(build_push_target("rtmp://h/live/", "k", Some("rtmp")), "rtmp://h/live/k");
-        assert_eq!(build_push_target("srt://h:9000", "k", Some("srt")), "srt://h:9000?passphrase=k");
-        assert_eq!(build_push_target("srt://h:9000?a=b", "k", Some("srt")), "srt://h:9000?a=b&passphrase=k");
-        assert_eq!(build_push_target("srt://h:9000?passphrase=x", "k", Some("srt")), "srt://h:9000?passphrase=x");
+        assert_eq!(build_push_target("srt://h:9000", "k", Some("srt")), "srt://h:9000k");
+        assert_eq!(build_push_target("srt://h:9000/live/", "k", Some("srt")), "srt://h:9000/live/k");
         assert_eq!(build_push_target("https://w/h", "k", Some("whip")), "https://w/h");
         assert_eq!(build_push_target("rtsp://h/live", "k", Some("rtsp")), "rtsp://h/livek");
     }
@@ -221,6 +213,7 @@ mod tests {
         assert_eq!(network_for_protocol(Some("rtmp"), Some("udp")), "tcp");
         assert_eq!(network_for_protocol(Some("rtsp"), Some("udp")), "udp");
         assert_eq!(network_for_protocol(Some("srt"), Some("tcp")), "udp");
+        assert_eq!(network_for_protocol(Some("whip"), Some("udp")), "udp");
         assert_eq!(network_for_protocol(None, None), "tcp");
     }
 

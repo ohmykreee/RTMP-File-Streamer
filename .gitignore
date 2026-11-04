@@ -5,7 +5,8 @@ dist/
 *.tsbuildinfo
 
 # ------------------------------------------------------- build identity (generated)
-# Written by scripts/build-info.mjs before every compile; read back by src/main/buildInfo.ts.
+# Written by scripts/build-info.mjs before every compile; read back by src/main/buildInfo.ts and embedded
+# into the Tauri binary by src-tauri/src/build_info.rs (include_str! needs it to exist before the build).
 build-info.json
 
 # ---------------------------------------------------------------- dependencies

@@ -7,8 +7,9 @@
 #
 # The Tauri build pipeline: `cargo build --release` produces the binary, and
 # `scripts/assemble-tauri-dist.mjs` assembles the portable directory next to it
-# (binary + `build-info.json` + the `Data/` placeholder + the optional `bin/`
-# ffmpeg drop-in). One job per target — build, assemble, archive, upload —
+# (binary + the `Data/` placeholder + the optional `bin/`
+# ffmpeg drop-in; the build identity is compiled into the binary). One job per
+# target — build, assemble, archive, upload —
 # means any single target can be re-run or debugged without the others.
 #
 # Runner placement:

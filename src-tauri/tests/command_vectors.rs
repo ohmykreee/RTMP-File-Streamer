@@ -145,10 +145,10 @@ fn the_rtmp_key_is_replaced_whole_with_stars_in_the_masked_target() {
 }
 
 #[test]
-fn the_srt_passphrase_becomes_stars_as_a_query_parameter() {
+fn the_srt_key_is_masked_where_it_sits_appended_like_rtmp() {
     assert_eq!(
-        mask_target("srt://relay.example:9000", "secret123", Some("srt")),
-        "srt://relay.example:9000?passphrase=*****"
+        mask_target("srt://relay.example:9000/live", "secret123", Some("srt")),
+        "srt://relay.example:9000/live*****"
     );
 }
 
@@ -673,22 +673,35 @@ fn webrtc_is_not_accepted_as_a_whip_target() {
 }
 
 #[test]
-fn srt_key_rides_as_a_passphrase_query_parameter() {
-    assert_eq!(build_push_target("srt://h:9000", "secret123", Some("srt")), "srt://h:9000?passphrase=secret123");
+fn srt_key_is_appended_directly_with_no_separator_and_no_passphrase_parameter() {
+    let built = build_push_target("srt://h:9000", "secret123", Some("srt"));
+    assert_eq!(built, "srt://h:9000secret123");
+    assert!(!built.contains("passphrase="), "{built}");
 }
 
 #[test]
-fn srt_passphrase_joins_with_ampersand_when_the_address_already_has_a_query() {
+fn srt_keeps_the_path_the_address_carries_trailing_slash_included() {
     assert_eq!(
-        build_push_target("srt://h:9000?mode=caller", "secret123", Some("srt")),
-        "srt://h:9000?mode=caller&passphrase=secret123"
+        build_push_target("srt://h:9000/live/", "secret123", Some("srt")),
+        "srt://h:9000/live/secret123"
+    );
+    assert_eq!(
+        build_push_target("srt://h:9000/live", "secret123", Some("srt")),
+        "srt://h:9000/livesecret123"
     );
 }
 
 #[test]
-fn srt_passphrase_is_percent_encoded_and_never_duplicated() {
-    assert_eq!(build_push_target("srt://h:9000", "a&b=c", Some("srt")), "srt://h:9000?passphrase=a%26b%3Dc");
-    assert_eq!(build_push_target("srt://h:9000?passphrase=x", "y", Some("srt")), "srt://h:9000?passphrase=x");
+fn srt_key_is_not_encoded_a_doubled_slash_collapses_and_no_key_means_the_address_alone() {
+    assert_eq!(
+        build_push_target("srt://h:9000/live/", "a&b=c", Some("srt")),
+        "srt://h:9000/live/a&b=c"
+    );
+    assert_eq!(
+        build_push_target("srt://h:9000/live/", "/key", Some("srt")),
+        "srt://h:9000/live/key"
+    );
+    assert_eq!(build_push_target("srt://h:9000", "", Some("srt")), "srt://h:9000");
 }
 
 #[test]
@@ -726,7 +739,8 @@ fn scheme_validation_matches_its_protocol_only() {
 fn network_clamps_to_what_the_protocol_runs_over() {
     assert_eq!(network_for_protocol(Some("rtmp"), Some("udp")), "tcp");
     assert_eq!(network_for_protocol(Some("srt"), Some("tcp")), "udp");
-    assert_eq!(network_for_protocol(Some("whip"), Some("udp")), "tcp");
+    assert_eq!(network_for_protocol(Some("whip"), Some("tcp")), "udp");
+    assert_eq!(network_for_protocol(Some("whip"), Some("udp")), "udp");
     assert_eq!(network_for_protocol(Some("rtsp"), Some("udp")), "udp");
 }
 
@@ -759,14 +773,14 @@ fn protocol_stream_command(tweak: impl FnOnce(&mut rtmp_file_streamer::shared::t
 }
 
 #[test]
-fn srt_stream_uses_mpegts_muxer_passphrase_target_and_no_flv_flags() {
+fn srt_stream_uses_mpegts_muxer_key_appended_to_the_address_and_no_flv_flags() {
     let built = protocol_stream_command(|o| {
         o.protocol = "srt".into();
         o.network = "udp".into();
-        o.server = "srt://a.example.com:9000".into();
-        o.stream_key = "pass12345".into();
+        o.server = "srt://a.example.com:9000/live/".into();
+        o.stream_key = "key12345".into();
     });
-    assert_eq!(built.args.last().map(|s| s.as_str()), Some("srt://a.example.com:9000?passphrase=pass12345"));
+    assert_eq!(built.args.last().map(|s| s.as_str()), Some("srt://a.example.com:9000/live/key12345"));
     assert_eq!(arg_after(&built.args, "-f"), Some("mpegts"));
     assert!(!built.args.iter().any(|a| a == "-flvflags") && !built.args.iter().any(|a| a == "-reconnect"));
 }
@@ -795,7 +809,7 @@ fn rtsp_stream_uses_rtsp_muxer_and_chosen_transport() {
 fn whip_stream_uses_whip_muxer_and_bearer_token_via_authorization() {
     let built = protocol_stream_command(|o| {
         o.protocol = "whip".into();
-        o.network = "tcp".into();
+        o.network = "udp".into();
         o.server = "https://a.example.com/whip/endpoint".into();
         o.stream_key = "jwt-token".into();
     });
@@ -832,10 +846,10 @@ fn connection_test_follows_the_protocol_srt() {
     let _guard = builder_lock();
     let mut session = base_session();
     session.output.protocol = "srt".into();
-    session.output.server = "srt://127.0.0.1:9000".into();
-    session.output.stream_key = "pass12345".into();
-    let built = build_test_command(&session, "srt://127.0.0.1:9000", "pass12345", "zh");
-    assert_eq!(built.args.last().map(|s| s.as_str()), Some("srt://127.0.0.1:9000?passphrase=pass12345"));
+    session.output.server = "srt://127.0.0.1:9000/live/".into();
+    session.output.stream_key = "key12345".into();
+    let built = build_test_command(&session, "srt://127.0.0.1:9000/live/", "key12345", "zh");
+    assert_eq!(built.args.last().map(|s| s.as_str()), Some("srt://127.0.0.1:9000/live/key12345"));
     assert_eq!(last_arg_after(&built.args, "-f"), Some("mpegts"));
 }
 
@@ -1544,15 +1558,15 @@ fn test_applies_the_always_on_flv_flag_by_default() {
 
 #[test]
 fn test_follows_the_protocol_derived_container() {
-    let built = test_cmd_at("srt://127.0.0.1:9000/live", "key123", |s| {
+    let built = test_cmd_at("srt://127.0.0.1:9000/live/", "key123", |s| {
         s.output.protocol = "srt".into();
         s.output.network = "udp".into();
-        s.output.server = "srt://127.0.0.1:9000/live".into();
+        s.output.server = "srt://127.0.0.1:9000/live/".into();
         s.output.extra_output_args = "".into();
     });
     assert_eq!(last_arg_after(&built.args, "-f"), Some("mpegts"));
     assert!(!built.args.iter().any(|a| a == "-flvflags"));
-    assert_eq!(built.args.last().map(|s| s.as_str()), Some("srt://127.0.0.1:9000/live?passphrase=key123"));
+    assert_eq!(built.args.last().map(|s| s.as_str()), Some("srt://127.0.0.1:9000/live/key123"));
 }
 
 #[test]

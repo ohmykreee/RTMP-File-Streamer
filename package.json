@@ -31,7 +31,7 @@
     "build:tauri": "node scripts/build-info.mjs && node scripts/generate-i18n.mjs && tauri build --no-bundle",
     "dist:tauri": "pnpm run build:tauri && node scripts/assemble-tauri-dist.mjs",
     "typecheck:tauri": "tsc --noEmit -p tsconfig.tauri.json",
-    "test:cargo": "node scripts/generate-i18n.mjs && cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:cargo": "node scripts/build-info.mjs && node scripts/generate-i18n.mjs && cargo test --manifest-path src-tauri/Cargo.toml",
     "test:tauri": "node test/tauri/e2e.mjs"
   },
   "dependencies": {},

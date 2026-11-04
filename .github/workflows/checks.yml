@@ -150,9 +150,12 @@ jobs:
 
       # The message tables and default settings the Rust side embeds are dumped from
       # the TypeScript source of truth before every build; they are gitignored
-      # generated files.
-      - name: Generate embedded i18n/defaults JSON
-        run: node scripts/generate-i18n.mjs
+      # generated files. So is `build-info.json`, which `src-tauri/src/build_info.rs`
+      # embeds at compile time to label the About panel.
+      - name: Generate embedded i18n/defaults JSON + build identity
+        run: |
+          node scripts/generate-i18n.mjs
+          node scripts/build-info.mjs
 
       - name: Tauri renderer build
         run: pnpm run build:renderer

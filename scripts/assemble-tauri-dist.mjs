@@ -3,7 +3,7 @@
 // (`pnpm run build:tauri`). Replicates the electron-builder `--dir` layout the
 // project has always shipped: the executable, a `Data/` placeholder next to it
 // (the app writes all of its state there), and the optional `bin/` drop-in for
-// a bundled ffmpeg.
+// a bundled ffmpeg. The build identity is compiled into the binary
 //
 //   node scripts/assemble-tauri-dist.mjs [--target <triple>]
 //
@@ -104,13 +104,6 @@ const shippedName = platform === 'win' ? 'RTMPFileStreamer.exe' : platform === '
 fs.rmSync(distDir, { recursive: true, force: true })
 fs.mkdirSync(distDir, { recursive: true })
 fs.copyFileSync(exePath, path.join(distDir, shippedName))
-
-// The build identity file sits next to the executable; the app reads it for
-// the About panel (version/commit/nightly/builtAt).
-const buildInfo = path.join(root, 'build-info.json')
-if (fs.existsSync(buildInfo)) {
-  fs.copyFileSync(buildInfo, path.join(distDir, 'build-info.json'))
-}
 
 // The Data placeholder documents the portable layout; the app creates its own
 // files inside on first run.

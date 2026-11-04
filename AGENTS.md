@@ -327,8 +327,9 @@ src-tauri/resources/i18n/ 由 scripts/generate-i18n.mjs 从 TS 生成的 JSON（
 - **merge 自 main 后**：src/main 或 src/shared 有改动 → 同步移植到 src-tauri 对应模块 +
   重跑生成脚本；src/renderer 有改动 → 同步到 src/renderer-tauri（`window.streamer` 接口在
   shared/types.ts，可选方法 `onDropFiles?` 是 Tauri 独有的拖拽路径通知）
-- **打包**：`pnpm dist:tauri` → `release/rtmp-file-streamer-<平台>-<架构>/`（exe + build-info.json +
-  Data/ 占位 + 可选 bin/）；CI 的六条腿与 electron 时代的产物命名一一对应
-  （win/linux amd64+arm64、mac 与 mac-intel）
+- **打包**：`pnpm dist:tauri` → `release/rtmp-file-streamer-<平台>-<架构>/`（exe + Data/ 占位 + 可选 bin/；
+  build-info.json 已由 `src-tauri/src/build_info.rs` 用 include_str! 编进二进制，不再随目录分发，
+  与 resources/i18n 一样构建/测试前必须已生成，`test:cargo` 脚本负责）；CI 的六条腿与 electron 时代的
+  产物命名一一对应（win/linux amd64+arm64、mac 与 mac-intel）
 - Rust stable；本机经 vfox 安装（`~/.version-fox/sdks/rust`），MSVC 链接器来自 VS Build Tools
   的 C++ 工作负载

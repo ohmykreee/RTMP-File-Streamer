@@ -2,6 +2,13 @@
 //! `src/main/log-redact.ts`: every display form is built from the parts, never
 //! parsed out of the composed string, and `redact_text` is plain literal
 //! replacement of the known secret values.
+//!
+//! The credential boundary is the stream-key field, whose meaning follows the
+//! protocol (RTMP/SRT/RTSP append it to the address, WHIP sends it as
+//! `-authorization`). The address field is deliberately NOT part of that
+//! boundary: the settings panel shows it in plaintext at all times, so anything
+//! typed into it is already on screen by design — credentials belong in the key
+//! field.
 
 use crate::shared::protocol::build_push_target;
 use crate::shared::types::OutputSettings;
