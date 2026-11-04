@@ -1,6 +1,6 @@
 [package]
 name = "rtmp-file-streamer"
-version = "1.1.6"
+version = "1.1.7"
 description = "Local file to RTMP live streaming desktop app powered by FFmpeg"
 authors = ["TurboKre"]
 license = "MIT"

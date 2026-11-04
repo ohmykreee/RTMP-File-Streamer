@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "rtmp-file-streamer"
-version = "1.1.6"
+version = "1.1.7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
