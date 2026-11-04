@@ -57,7 +57,7 @@
   | 协议 | 地址示例 | 串流密钥的用途 |
   | --- | --- | --- |
   | RTMP / RTMPS | `rtmp://live.example.com/app/` | 直接追加到地址末尾 |
-  | SRT | `srt://live.example.com:9000` | 作为 `passphrase` 参数发送 |
+  | SRT | `srt://live.example.com:9000` | 直接追加到地址末尾（加密口令写进地址，此时密钥留空） |
   | RTSP | `rtsp://live.example.com:8554/live` | 直接追加到地址路径 |
   | WebRTC / WHIP | `https://live.example.com/whip/endpoint` | 作为 Bearer 令牌发送 |
 

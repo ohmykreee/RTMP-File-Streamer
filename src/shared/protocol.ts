@@ -5,7 +5,8 @@
  * One address field, one key field — no extra UI per protocol. The key field's
  * MEANING follows the protocol:
  *  - RTMP/RTMPS: appended directly to the address (see `rtmp.ts`)
- *  - SRT: appended as the `passphrase` query parameter (SRT's shared secret)
+ *  - SRT: appended directly to the address too — no `passphrase` parameter is
+ *    built for it, so an encryption passphrase belongs in the address itself
  *  - RTSP: appended directly to the address path; full user:pass authentication
  *    can be written into the address itself
  *  - WHIP: sent as the muxer's Bearer token (`-authorization`, a JWT)
@@ -120,11 +121,11 @@ export function containerForProtocol(protocol: StreamProtocol | undefined): Cont
 /**
  * Builds the ffmpeg push target for a protocol.
  *
- * RTMP/RTMPS and RTSP carry the key IN the address (appended directly, the rule
- * `buildRtmpTarget` implements); SRT takes it as a `passphrase` query parameter
- * (percent-encoded, and skipped when the address already carries one); WHIP does
- * not carry it in the address at all — the key rides in the muxer's own
- * `-authorization` option (see `whipAuthArgs`).
+ * RTMP/RTMPS, SRT and RTSP carry the key IN the address — appended directly, the
+ * rule `buildRtmpTarget` implements, with no separator and no query parameter of
+ * its own (an SRT passphrase, if one is needed, has to be written into the
+ * address). WHIP does not carry it in the address at all: the key rides in the
+ * muxer's own `-authorization` option (see `protocolKeyArgs`).
  */
 export function buildPushTarget(address: string, streamKey: string, protocol: StreamProtocol | undefined): string {
   const base = (address ?? '').trim()
@@ -132,10 +133,6 @@ export function buildPushTarget(address: string, streamKey: string, protocol: St
   if (!base) return ''
   const p = protocol ?? DEFAULT_STREAM_PROTOCOL
   if (p === 'whip') return base
-  if (p === 'srt') {
-    if (!key || /[?&]passphrase=/.test(base)) return base
-    return `${base}${base.includes('?') ? '&' : '?'}passphrase=${encodeURIComponent(key)}`
-  }
   return buildRtmpTarget(base, key)
 }
 

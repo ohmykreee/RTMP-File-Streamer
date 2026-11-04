@@ -12,11 +12,11 @@ import { buildPushTarget } from '@shared/protocol'
  * header), and each guess it misses is a working credential on disk.
  *
  * The credential boundary is the stream-key field, whose meaning follows the
- * protocol (RTMP/RTSP append it to the address, SRT makes it the `passphrase`
- * query parameter, WHIP sends it as `-authorization`). The address field is
- * deliberately NOT part of that boundary: the settings panel shows it in
- * plaintext at all times, so anything typed into it is already on screen by
- * design — credentials belong in the key field.
+ * protocol (RTMP/SRT/RTSP append it to the address, WHIP sends it as
+ * `-authorization`). The address field is deliberately NOT part of that
+ * boundary: the settings panel shows it in plaintext at all times, so anything
+ * typed into it is already on screen by design — credentials belong in the key
+ * field.
  *
  * Redaction happens at the log sink and at the IPC boundary that returns test
  * results — never in the command builders, because the command that runs must
