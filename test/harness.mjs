@@ -276,9 +276,9 @@ console.log('\n=== 1b. credential redaction ===')
     maskTarget('rtmp://relay.example:1935/live/', 'vrochat', 'rtmp')
   )
   record(
-    'the SRT passphrase becomes ***** as a query parameter',
-    maskTarget('srt://relay.example:9000', 'secret123', 'srt') === 'srt://relay.example:9000?passphrase=*****',
-    maskTarget('srt://relay.example:9000', 'secret123', 'srt')
+    'the SRT key is masked where it sits, appended like RTMP',
+    maskTarget('srt://relay.example:9000/live', 'secret123', 'srt') === 'srt://relay.example:9000/live*****',
+    maskTarget('srt://relay.example:9000/live', 'secret123', 'srt')
   )
   record(
     'WHIP keeps the key out of the address entirely',
@@ -600,27 +600,27 @@ const {
 record('detection: rtmp/rtmps/srt/rtsp/whip schemes', detectStreamProtocol('rtmp://h/live') === 'rtmp' && detectStreamProtocol('rtmps://h/live') === 'rtmp' && detectStreamProtocol('srt://h:9000') === 'srt' && detectStreamProtocol('rtsp://h:554/a') === 'rtsp' && detectStreamProtocol('rtsps://h/a') === 'rtsp' && detectStreamProtocol('https://h/whip') === 'whip')
 record('detection: unknown or bare addresses fall back to rtmp', detectStreamProtocol('h/live') === 'rtmp' && detectStreamProtocol('') === 'rtmp' && detectStreamProtocol('webrtc://h/x') === 'rtmp', `${detectStreamProtocol('h/live')}`)
 record('webrtc:// is not accepted as a WHIP target', !addressMatchesProtocol('webrtc://h/x', 'whip') && addressMatchesProtocol('https://h/whip', 'whip'))
-record('srt key rides as a passphrase query parameter', buildPushTarget('srt://h:9000', 'secret123', 'srt') === 'srt://h:9000?passphrase=secret123', buildPushTarget('srt://h:9000', 'secret123', 'srt'))
-record('srt passphrase joins with & when the address already has a query', buildPushTarget('srt://h:9000?mode=caller', 'secret123', 'srt') === 'srt://h:9000?mode=caller&passphrase=secret123')
-record('srt passphrase is percent-encoded and never duplicated', buildPushTarget('srt://h:9000', 'a&b=c', 'srt') === 'srt://h:9000?passphrase=a%26b%3Dc' && buildPushTarget('srt://h:9000?passphrase=x', 'y', 'srt') === 'srt://h:9000?passphrase=x')
+record('srt key is appended directly, with no separator and no passphrase parameter', buildPushTarget('srt://h:9000', 'secret123', 'srt') === 'srt://h:9000secret123' && !buildPushTarget('srt://h:9000', 'secret123', 'srt').includes('passphrase='), buildPushTarget('srt://h:9000', 'secret123', 'srt'))
+record('srt keeps the path the address carries, trailing slash included', buildPushTarget('srt://h:9000/live/', 'secret123', 'srt') === 'srt://h:9000/live/secret123' && buildPushTarget('srt://h:9000/live', 'secret123', 'srt') === 'srt://h:9000/livesecret123')
+record('srt key is not encoded, a doubled slash collapses, and no key means the address alone', buildPushTarget('srt://h:9000/live/', 'a&b=c', 'srt') === 'srt://h:9000/live/a&b=c' && buildPushTarget('srt://h:9000/live/', '/key', 'srt') === 'srt://h:9000/live/key' && buildPushTarget('srt://h:9000', '', 'srt') === 'srt://h:9000')
 record('whip target keeps the address only (key travels separately)', buildPushTarget('https://h/whip', 'JWT.X.Y', 'whip') === 'https://h/whip')
 record('rtsp key appends to the path like rtmp', buildPushTarget('rtsp://h:8554/live', 'key', 'rtsp') === 'rtsp://h:8554/livekey')
 record('protocol key args: whip carries the key via -authorization', JSON.stringify(protocolKeyArgs('whip', 'tok')) === JSON.stringify(['-authorization', 'tok']), JSON.stringify(protocolKeyArgs('whip', 'tok')))
 record('protocol key args: address-carried protocols add none', protocolKeyArgs('rtmp', 'k').length === 0 && protocolKeyArgs('srt', 'k').length === 0 && protocolKeyArgs('rtsp', 'k').length === 0 && protocolKeyArgs('whip', '').length === 0)
 record('scheme validation matches its protocol only', addressMatchesProtocol('srt://h', 'srt') && !addressMatchesProtocol('rtmp://h', 'srt') && addressMatchesProtocol('rtmps://h', 'rtmp') && addressMatchesProtocol('http://h/x', 'whip'))
-record('network clamps to what the protocol runs over', networkForProtocol('rtmp', 'udp') === 'tcp' && networkForProtocol('srt', 'tcp') === 'udp' && networkForProtocol('whip', 'udp') === 'tcp' && networkForProtocol('rtsp', 'udp') === 'udp')
+record('network clamps to what the protocol runs over', networkForProtocol('rtmp', 'udp') === 'tcp' && networkForProtocol('srt', 'tcp') === 'udp' && networkForProtocol('whip', 'tcp') === 'udp' && networkForProtocol('whip', 'udp') === 'udp' && networkForProtocol('rtsp', 'udp') === 'udp')
 record('muxer/container derivation per protocol', muxerForProtocol('rtmp') === 'flv' && muxerForProtocol('srt') === 'mpegts' && muxerForProtocol('rtsp') === 'rtsp' && muxerForProtocol('whip') === 'whip' && containerForProtocol('rtmp') === 'flv' && containerForProtocol('srt') === 'mpegts' && containerForProtocol('rtsp') === null && containerForProtocol('whip') === null)
 record('derivation tolerates settings from older schemas (no protocol)', muxerForProtocol(undefined) === 'flv' && containerForProtocol(undefined) === 'flv')
 
 const protoOut = (patch) => ({ ...baseSession, output: { ...baseSession.output, ...patch } })
-const builtSrt = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: protoOut({ protocol: 'srt', network: 'udp', server: 'srt://a.example.com:9000', streamKey: 'pass12345' }), startPositionSec: 0 })
-record('srt stream: mpegts muxer + passphrase target + no flv flags', builtSrt.args.at(-1) === 'srt://a.example.com:9000?passphrase=pass12345' && builtSrt.args[builtSrt.args.indexOf('-f') + 1] === 'mpegts' && !builtSrt.args.includes('-flvflags') && !builtSrt.args.includes('-reconnect'), builtSrt.args.at(-1))
+const builtSrt = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: protoOut({ protocol: 'srt', network: 'udp', server: 'srt://a.example.com:9000/live/', streamKey: 'key12345' }), startPositionSec: 0 })
+record('srt stream: mpegts muxer + key appended to the address + no flv flags', builtSrt.args.at(-1) === 'srt://a.example.com:9000/live/key12345' && builtSrt.args[builtSrt.args.indexOf('-f') + 1] === 'mpegts' && !builtSrt.args.includes('-flvflags') && !builtSrt.args.includes('-reconnect'), builtSrt.args.at(-1))
 
 const builtRtspTcp = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: protoOut({ protocol: 'rtsp', network: 'tcp', server: 'rtsp://a.example.com:8554/push', streamKey: '' }), startPositionSec: 0 })
 const builtRtspUdp = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: protoOut({ protocol: 'rtsp', network: 'udp', server: 'rtsp://a.example.com:8554/push', streamKey: '' }), startPositionSec: 0 })
 record('rtsp stream: rtsp muxer + chosen transport', builtRtspTcp.args.at(-1) === 'rtsp://a.example.com:8554/push' && builtRtspTcp.args[builtRtspTcp.args.indexOf('-f') + 1] === 'rtsp' && builtRtspTcp.args.includes('-rtsp_transport') && builtRtspTcp.args[builtRtspTcp.args.indexOf('-rtsp_transport') + 1] === 'tcp' && builtRtspUdp.args[builtRtspUdp.args.indexOf('-rtsp_transport') + 1] === 'udp')
 
-const builtWhip = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: protoOut({ protocol: 'whip', network: 'tcp', server: 'https://a.example.com/whip/endpoint', streamKey: 'jwt-token' }), startPositionSec: 0 })
+const builtWhip = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: protoOut({ protocol: 'whip', network: 'udp', server: 'https://a.example.com/whip/endpoint', streamKey: 'jwt-token' }), startPositionSec: 0 })
 record('whip stream: whip muxer + bearer token via -authorization', builtWhip.args.at(-1) === 'https://a.example.com/whip/endpoint' && builtWhip.args[builtWhip.args.indexOf('-f') + 1] === 'whip' && builtWhip.args.includes('-authorization') && builtWhip.args[builtWhip.args.indexOf('-authorization') + 1] === 'jwt-token')
 // baseSession audio is AAC, which WHIP cannot carry: the requirement warning must fire.
 record('whip + AAC audio produces the Opus requirement warning', builtWhip.warnings.some((w) => w.includes('Opus')), builtWhip.warnings.join(' | '))
@@ -628,9 +628,9 @@ record('whip + AAC audio produces the Opus requirement warning', builtWhip.warni
 const whipWrongCodec = buildStreamCommand({ ffmpegPath: FFMPEG, media: infoB, item: { ...itemB, mode: 'off' }, settings: { ...protoOut({ protocol: 'whip', server: 'https://a.example.com/whip/endpoint', streamKey: 'jwt-token' }), video: { ...baseSession.video, codec: 'hevc' } }, startPositionSec: 0 })
 record('whip + HEVC produces the H.264 requirement warning', whipWrongCodec.warnings.some((w) => w.includes('H.264')), whipWrongCodec.warnings.join(' | '))
 
-const testSrt = buildTestCommand(protoOut({ protocol: 'srt', server: 'srt://127.0.0.1:9000', streamKey: 'pass12345' }), 'srt://127.0.0.1:9000', 'pass12345')
+const testSrt = buildTestCommand(protoOut({ protocol: 'srt', server: 'srt://127.0.0.1:9000/live/', streamKey: 'key12345' }), 'srt://127.0.0.1:9000/live/', 'key12345')
 const lastAfter = (args, flag) => args[args.lastIndexOf(flag) + 1]
-record('connection test follows the protocol (srt)', testSrt.args.at(-1) === 'srt://127.0.0.1:9000?passphrase=pass12345' && lastAfter(testSrt.args, '-f') === 'mpegts', testSrt.args.at(-1))
+record('connection test follows the protocol (srt)', testSrt.args.at(-1) === 'srt://127.0.0.1:9000/live/key12345' && lastAfter(testSrt.args, '-f') === 'mpegts', testSrt.args.at(-1))
 end2f()
 
 // 2e-bis. cover art must never be mapped instead of the real video
@@ -1120,8 +1120,8 @@ console.log('\n=== 7. connection test command (used by the UI button) ===')
   record('test applies the always-on FLV flag by default', testArgs.filter((a) => a === '-flvflags').length === 1, `-flvflags ${argAfter(testArgs, '-flvflags')}`)
 
   // The container is no longer a free choice: it follows the protocol.
-  const ts = buildTestCommand(testSession({ output: { protocol: 'srt', network: 'udp', server: 'srt://127.0.0.1:9000/live', extraOutputArgs: '' } }), 'srt://127.0.0.1:9000/live', 'key123').args
-  record('test follows the protocol-derived container', lastArgAfter(ts, '-f') === 'mpegts' && !ts.includes('-flvflags') && ts.at(-1) === 'srt://127.0.0.1:9000/live?passphrase=key123', lastArgAfter(ts, '-f'))
+  const ts = buildTestCommand(testSession({ output: { protocol: 'srt', network: 'udp', server: 'srt://127.0.0.1:9000/live/', extraOutputArgs: '' } }), 'srt://127.0.0.1:9000/live/', 'key123').args
+  record('test follows the protocol-derived container', lastArgAfter(ts, '-f') === 'mpegts' && !ts.includes('-flvflags') && ts.at(-1) === 'srt://127.0.0.1:9000/live/key123', lastArgAfter(ts, '-f'))
 
   /* --- what the result panel shows --- */
   const summary = testCmd({ audio: { bitrateKbps: 192 }, video: { bitrateKbps: 4500 } }).summary.join(' · ')

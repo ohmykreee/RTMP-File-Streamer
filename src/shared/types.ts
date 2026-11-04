@@ -242,8 +242,8 @@ export interface OutputSettings {
    */
   server: string
   /**
-   * Credential field; its meaning follows {@link protocol} — RTMP/RTSP stream key
-   * (appended to the address), SRT passphrase, WHIP Bearer token (JWT).
+   * Credential field; its meaning follows {@link protocol} — RTMP/SRT/RTSP stream
+   * key (appended directly to the address), WHIP Bearer token (JWT).
    */
   streamKey: string
   /** Push protocol (`rtmp` default). */

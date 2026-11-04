@@ -97,10 +97,11 @@ MSVC 与 Windows SDK 自带，不下载交叉工具链）；Linux 腿各跑自�
   「喂数据半路无条件暂停」** —— 数据收不回、`encodedSec - publishedSec` 不会自己变小，pump 会自锁（实测把
   35s 截成 16.9s）。`BUFFER_SEC_MIN/MAX = 12/300`，下限是实测值（换文件约 5.8–7.5s）
 - **协议决定容器与网络格式**：推流协议（rtmp/srt/rtsp/whip，`src/shared/protocol.ts`）唯一推导 ffmpeg
-  muxer 与容器（rtsp/whip 无容器），并钳制传输方式（只有 rtsp 能选 tcp/udp）；`OutputSettings.container`
-  是派生值，**不要再给容器做 UI 选择**。「串流密钥」一个字段按协议解释：rtmp/rtsp 追加进地址、srt 作
-  `passphrase` 参数、whip 走 `-authorization`（JWT）；协议下拉没有「自动检测」项——地址输入框失焦时
-  自动跳到检测出的协议，之后可手动改
+  muxer 与容器（rtsp/whip 无容器），并钳制传输方式（只有 rtsp 能选 tcp/udp；whip 固定 udp——TCP 只承载
+  它的 HTTP 握手，媒体是 ICE/DTLS/SRTP 报文，ffmpeg 的 whip muxer 也只认 UDP 候选）；`OutputSettings.container`
+  是派生值，**不要再给容器做 UI 选择**。「串流密钥」一个字段按协议解释：rtmp/srt/rtsp 一律直接追加进地址
+  （srt 不生成 `passphrase` 参数，口令由用户写进地址）、whip 走 `-authorization`（JWT）；协议下拉没有
+  「自动检测」项——地址输入框失焦时自动跳到检测出的协议，之后可手动改
 - **状态只在程序目录的 `Data/`**：`store/paths.ts` 重定向 Electron 的 userData/sessionData/cache，
   **绝不读写 `%APPDATA%`**（旧迁移代码已删，不要恢复）
 - **凭据只在日志出口脱敏**：`src/main/log-redact.ts` 在 `emitLog` 与测试结果返回处统一把密钥部分整体替换成
