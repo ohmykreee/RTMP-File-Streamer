@@ -89,7 +89,7 @@
 | 协议 | 地址示例 | 串流密钥的用途 |
 |---|---|---|
 | RTMP / RTMPS | `rtmp://live.example.com/app/` | 直接追加到地址末尾 |
-| SRT | `srt://live.example.com:9000` | 直接追加到地址末尾；加密口令写进地址，此时密钥留空 |
+| SRT | `srt://live.example.com:9000` | 直接追加到地址末尾；加密时把口令写进串流密钥框 |
 | RTSP | `rtsp://live.example.com:8554/live` | 直接追加到地址路径 |
 | WebRTC / WHIP | `https://live.example.com/whip/endpoint` | 作为 Bearer 令牌发送 |
 
@@ -113,7 +113,7 @@
 | YouTube Live（RTMP） | `rtmp://a.rtmp.youtube.com/live2/` + 串流密钥 |
 | Twitch（RTMP） | `rtmp://live.twitch.tv/app/` + 串流密钥 |
 | 哔哩哔哩（RTMP） | `rtmp://live-push.bilivideo.com/live-bvc/` + 串流密钥（含 `?` 参数，整段填入密钥框） |
-| SRT 接收端 | `srt://receiver.example.com:9000` + 口令 |
+| SRT 接收端 | `srt://receiver.example.com:9000` + 口令（写进密钥框） |
 | RTSP 服务器 | `rtsp://receiver.example.com:8554/live` + 密钥（按服务器要求） |
 | WHIP 端点 | `https://receiver.example.com/whip/endpoint` + 令牌 |
 
