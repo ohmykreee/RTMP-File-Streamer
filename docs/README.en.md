@@ -89,7 +89,7 @@ The protocol determines the address format, the container and how the stream key
 | Protocol | Address example | How the stream key is used |
 |---|---|---|
 | RTMP / RTMPS | `rtmp://live.example.com/app/` | Appended to the end of the address |
-| SRT | `srt://live.example.com:9000` | Appended to the end; put the encryption passphrase in the address and leave the key empty |
+| SRT | `srt://live.example.com:9000` | Appended to the end; for encryption, put the passphrase in the stream key field |
 | RTSP | `rtsp://live.example.com:8554/live` | Appended to the address path |
 | WebRTC / WHIP | `https://live.example.com/whip/endpoint` | Sent as a Bearer token |
 
@@ -113,7 +113,7 @@ The protocol determines the address format, the container and how the stream key
 | YouTube Live (RTMP) | `rtmp://a.rtmp.youtube.com/live2/` + stream key |
 | Twitch (RTMP) | `rtmp://live.twitch.tv/app/` + stream key |
 | Bilibili (RTMP) | `rtmp://live-push.bilivideo.com/live-bvc/` + stream key (including the `?` parameters; paste the whole thing into the key field) |
-| SRT receiver | `srt://receiver.example.com:9000` + passphrase |
+| SRT receiver | `srt://receiver.example.com:9000` + passphrase (in the key field) |
 | RTSP server | `rtsp://receiver.example.com:8554/live` + key (as required by the server) |
 | WHIP endpoint | `https://receiver.example.com/whip/endpoint` + token |
 

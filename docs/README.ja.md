@@ -89,7 +89,7 @@
 | プロトコル | アドレスの例 | ストリームキーの用途 |
 |---|---|---|
 | RTMP / RTMPS | `rtmp://live.example.com/app/` | アドレスの末尾にそのまま追加 |
-| SRT | `srt://live.example.com:9000` | アドレスの末尾にそのまま追加。暗号化する場合はパスフレーズをアドレスに書き、キーは空にします |
+| SRT | `srt://live.example.com:9000` | アドレスの末尾にそのまま追加。暗号化する場合はパスフレーズをストリームキー欄に入力 |
 | RTSP | `rtsp://live.example.com:8554/live` | アドレスのパスにそのまま追加 |
 | WebRTC / WHIP | `https://live.example.com/whip/endpoint` | Bearer トークンとして送信 |
 
@@ -113,7 +113,7 @@
 | YouTube Live（RTMP） | `rtmp://a.rtmp.youtube.com/live2/` + ストリームキー |
 | Twitch（RTMP） | `rtmp://live.twitch.tv/app/` + ストリームキー |
 | ビリビリ（RTMP） | `rtmp://live-push.bilivideo.com/live-bvc/` + ストリームキー（`?` パラメーターを含む。キー欄に全体を貼り付け） |
-| SRT 受信側 | `srt://receiver.example.com:9000` + パスフレーズ |
+| SRT 受信側 | `srt://receiver.example.com:9000` + パスフレーズ（キー欄に入力） |
 | RTSP サーバー | `rtsp://receiver.example.com:8554/live` + キー（サーバーの指定に従う） |
 | WHIP エンドポイント | `https://receiver.example.com/whip/endpoint` + トークン |
 
