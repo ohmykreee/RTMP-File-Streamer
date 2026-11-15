@@ -93,7 +93,7 @@ pnpm exec electron-builder --mac   --x64 --dir --config electron-builder.config.
 - **缺轨的文件要补轨**：源文件没有音频（音频编码不是 `copy` / `none`）→ `anullsrc` 生成静音；没有可用视频（视频编码不是 `copy`）→ `color=c=black` 生成黑场。两者都按对应那一路的编码设置编码，并加 `-shortest` —— 只推一路会被 ingest 直接拒绝。生成源**必须带 `d=`（剩余时长 +10s）**，否则会被全速读到底；源文件必须留在 input 0，生成输入排在它之后，双引擎经 `BuiltEncoderArgs.inputs` 交给 `Playout.startEncoder`。
 - **领先上限**：超限就 `pause` 编码 stdout，等推流吃到 `上限 - max(4, 上限*0.25)` 再恢复。**不要改回「喂数据半路无条件暂停」** —— 数据收不回、`encodedSec - publishedSec` 不会自己变小，pump 会自锁。`BUFFER_SEC_MIN/MAX = 12/300`，下限是换文件实测值。
 - **协议决定容器与网络格式**：协议（rtmp / srt / rtsp / whip，`src/shared/protocol.ts`）唯一推导 ffmpeg muxer 与容器（rtsp / whip 无容器），并钳制传输方式（只有 rtsp 能选 tcp / udp；whip 固定 udp —— TCP 只承载 HTTP 握手，媒体是 ICE / DTLS / SRTP 报文）。`OutputSettings.container` 是派生值，**不要再给容器做 UI 选择**。
-- **串流密钥按协议解释**：rtmp / srt / rtsp 一律直接追加进地址（srt 不生成 `passphrase` 参数，口令由用户写进地址），whip 走 `-authorization`（JWT）。协议下拉没有「自动检测」项：地址输入框失焦时自动跳到检测出的协议，之后可手动改。
+- **串流密钥按协议解释**：rtmp / srt / rtsp 的密钥都直接追加进地址（srt 不生成 `passphrase` 参数：加密口令由用户填进串流密钥字段），whip 走 `-authorization`（JWT）。协议下拉没有「自动检测」项：地址输入框失焦时自动跳到检测出的协议，之后可手动改。
 - **状态只在程序目录的 `Data/`**：`store/paths.ts` 重定向 Electron 的 userData / sessionData / cache，**绝不读写 `%APPDATA%`**（旧迁移代码已删，不要恢复）。
 - **凭据只在日志出口脱敏**：`src/main/log-redact.ts` 在 `emitLog` 与测试结果返回处把密钥部分整体替换成 `*****`。`maskTarget(server, key, protocol)` 用 `buildPushTarget` 重建显示形式，`redactText` 只做字面替换，**不要**用正则去猜目标串里哪一段是密钥。脱敏边界是「串流密钥」字段，地址在界面明文显示，写进地址里的凭据不在保护范围。命令构建器必须拿真实 target 去 spawn，新增会打印地址 / 密钥的日志必须经过 `emitLog`；用未保存的地址 / 密钥做测试连接时，先用本次测试的 `secrets` 脱敏。
 - **已移除的功能不要恢复**：文件内 seek、暂停、`%APPDATA%` 迁移。
