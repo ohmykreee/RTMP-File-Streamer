@@ -1,0 +1,25 @@
+{
+  "//": "Typecheck for the Tauri renderer tree (src/renderer-tauri). The Electron trees keep their own tsconfig projects; this one exists so merges from main never have to touch them.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@renderer/*": ["src/renderer-tauri/src/*"]
+    }
+  },
+  "include": ["src/renderer-tauri/**/*.ts", "src/renderer-tauri/**/*.tsx", "src/shared/**/*.ts", "vite.config.tauri.ts"]
+}

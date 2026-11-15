@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Renderer permissions for the main window. Without a capability every core-plugin command is denied by the ACL, which silently killed the app's whole event channel: the renderer's `listen()` calls (evt:status / evt:log / evt:playlist / evt:settings, and the webview drag-drop events) all go through `plugin:event|listen`, and `core:webview` carries the drag-drop listener. Application commands are not ACL-gated, which is why the app seemed to work while nothing live ever reached the UI.",
+  "windows": ["main"],
+  "permissions": ["core:default", "core:window:allow-close"]
+}

@@ -1,0 +1,1706 @@
+/*
+ * Design system entry point.
+ *
+ * Tailwind v4 + shadcn/ui (style "nova", base color "zinc", theme "blue",
+ * icon library "lucide"). The `@theme inline` block below is the whole visual
+ * vocabulary: components are styled with semantic utilities (`bg-card`,
+ * `text-muted-foreground`, `border-border`, …) and only reach for the custom
+ * classes at the bottom of this file where nothing else fits (the timeline, the
+ * playlist rows, the log rows — composites whose colours are driven by engine
+ * state).
+ *
+ * The app is dark only: the palette lives in `:root`, `<html>` carries `.dark`
+ * so the `dark:` variants inside the vendored shadcn components resolve.
+ */
+
+@import 'tailwindcss' source('../../');
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+@import '@fontsource-variable/geist';
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Number inputs keep their native spinners hidden: they fight the unit dropdowns
+ * (kbps / Mbps) that sit next to them.
+ *
+ * Deliberately NOT inside `@layer base`: the e2e suite verifies this by walking
+ * `document.styleSheets[...].cssRules` (Chromium cannot see a pseudo-element's
+ * computed style), and rules nested in a cascade layer are not on that list.
+ */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+@theme inline {
+  /* Nova pairs Geist with the system stack; CJK falls through to the platform
+     face, which is what a desktop tool should do. */
+  --font-sans: 'Geist Variable', 'Segoe UI', 'Microsoft YaHei', 'Yu Gothic UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'Menlo', monospace;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Status vocabulary. Kept as tokens because the engine state, the log levels
+     and the link verdict all colour themselves from the same three hues: green
+     for "running as it should", amber for "in between", red for "wrong". */
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-signal: var(--signal);
+  --color-encoded: var(--encoded);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* The level meter beside the live badge: the one animated flourish in the chrome,
+     and only while something is actually going out. */
+  --animate-meter: meter 1.1s ease-in-out infinite;
+  --animate-halo: halo 2.4s ease-in-out infinite;
+}
+
+/*
+ * Two palettes, one token set: `:root` is the light one and `.dark` overrides it.
+ * Which applies is decided by `settings.theme` (see `App.tsx`); `system` follows the
+ * operating system and is the default. Both use the same zinc neutrals and the same
+ * blue accent, so nothing but the values below differs between them.
+ */
+:root {
+  color-scheme: light;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.141 0.005 285.823);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.141 0.005 285.823);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.141 0.005 285.823);
+  --primary: oklch(0.546 0.245 262.881);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.967 0.001 286.375);
+  --secondary-foreground: oklch(0.21 0.006 285.885);
+  --muted: oklch(0.967 0.001 286.375);
+  --muted-foreground: oklch(0.552 0.016 285.938);
+  --accent: oklch(0.967 0.001 286.375);
+  --accent-foreground: oklch(0.21 0.006 285.885);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.92 0.004 286.32);
+  --input: oklch(0.92 0.004 286.32);
+  --ring: oklch(0.546 0.245 262.881);
+  --chart-1: oklch(0.809 0.105 251.813);
+  --chart-2: oklch(0.623 0.214 259.815);
+  --chart-3: oklch(0.546 0.245 262.881);
+  --chart-4: oklch(0.488 0.243 264.376);
+  --chart-5: oklch(0.424 0.199 265.638);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.141 0.005 285.823);
+  --sidebar-primary: oklch(0.546 0.245 262.881);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.967 0.001 286.375);
+  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
+  --sidebar-border: oklch(0.92 0.004 286.32);
+  --sidebar-ring: oklch(0.705 0.015 286.067);
+
+  /* The status hues are a shade darker than in the dark palette: green and amber on
+     white need the contrast a near-black background gave them for free. */
+  --ok: oklch(0.627 0.17 149.2);
+  --warn: oklch(0.666 0.157 58.318);
+  --signal: oklch(0.609 0.126 221.723);
+  --encoded: oklch(0.627 0.17 149.2);
+
+  /* Surface the playlist and log panes sit on: one step below a card, so the panel
+     reads as inset rather than as another card in the stack. */
+  --surface-sunken: oklch(0.967 0.001 286.375);
+}
+
+/* The dark palette: same tokens, the values the app shipped with. */
+.dark {
+  color-scheme: dark;
+
+  --background: oklch(0.141 0.005 285.823);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.21 0.006 285.885);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.21 0.006 285.885);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.546 0.245 262.881);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.274 0.006 286.033);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.274 0.006 286.033);
+  --muted-foreground: oklch(0.705 0.015 286.067);
+  --accent: oklch(0.274 0.006 286.033);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.623 0.214 259.815);
+  --sidebar: oklch(0.21 0.006 285.885);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.623 0.214 259.815);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.274 0.006 286.033);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.552 0.016 285.938);
+
+  --ok: oklch(0.723 0.192 149.579);
+  --warn: oklch(0.795 0.184 86.047);
+  --signal: oklch(0.789 0.154 211.53);
+  --encoded: oklch(0.627 0.17 149.2);
+
+  --surface-sunken: oklch(0.115 0.004 285.823);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  html {
+    @apply font-sans;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow: hidden;
+    /* Desktop chrome: text is not selectable except where it is data
+       (file names, log lines, command previews — see `.selectable`). */
+    user-select: none;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Number inputs keep their spinners hidden — see the unlayered rule at the top
+     of this file for why that one lives outside `@layer`. */
+
+  ::selection {
+    background: color-mix(in oklab, var(--primary) 40%, transparent);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklab, var(--foreground) 18%, transparent);
+    border-radius: 6px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklab, var(--foreground) 32%, transparent);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* ---------------------------------------------------------------- shell */
+
+  /*
+   * The window is a fixed console: header, workspace, transport, log drawer.
+   *
+   * A flex column rather than a grid: the banner rows come and go (FFmpeg
+   * missing, action errors), and a fixed `grid-template-rows` would hand the
+   * `1fr` track to whichever row happened to be second. Only the workspace
+   * grows, and `min-height: 0` is what lets the panes inside it scroll instead
+   * of pushing the transport off screen.
+   */
+  .app {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .boot {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    height: 100%;
+    color: var(--muted-foreground);
+  }
+
+  /* --------------------------------------------------------------- header */
+
+  .topbar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex: none;
+    padding: 9px 14px;
+    background: color-mix(in oklab, var(--card) 70%, var(--background));
+    border-bottom: 1px solid var(--border);
+  }
+
+  /*
+   * Signature: the level meter in the live badge — five bars that ride with the
+   * state chip while a session is on air. The chip says "streaming", the meter says
+   * "moving". It is decorative (aria-hidden) and CSS-driven; nothing here reports a
+   * measurement, so it must never be read as one.
+   */
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .brand h1 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
+  }
+
+  .brand p {
+    margin: 0;
+  }
+
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+  }
+
+  /* The app mark: same artwork as the shipped icon (see build/make-icon.py), flat
+     by design — the tile and the glyphs are inside the SVG and nothing has to be
+     lifted off the header. */
+  .brand-mark {
+    flex: none;
+  }
+
+  /* Banners are auto-height rows in the column; they must never be squeezed. */
+  .banner {
+    flex: none;
+  }
+
+  .topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: none;
+  }
+
+  /* Status / metadata chips. One class because the engine state, the FFmpeg
+     build and the control endpoint all render as the same shape. */
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    padding: 0 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: color-mix(in oklab, var(--card) 60%, transparent);
+    font-size: 11.5px;
+    color: var(--muted-foreground);
+    white-space: nowrap;
+  }
+
+  .pill.subtle {
+    background: transparent;
+    border-color: var(--border);
+  }
+
+  .pill.danger {
+    border-color: color-mix(in oklab, var(--destructive) 45%, transparent);
+    color: var(--destructive);
+  }
+
+  .pill.ok {
+    border-color: color-mix(in oklab, var(--ok) 45%, transparent);
+    color: var(--ok);
+  }
+
+  /*
+   * The engine state chip colours itself with utilities (see `STATE_CHIP` in
+   * App.tsx): the badge component ships `text-foreground` / `border-border`, which
+   * a rule down here cannot beat. Only the status dot — a plain span — is styled
+   * from CSS.
+   */
+  .state-dot {
+    /* `aspect-ratio` as well as the two sizes: as a flex item a plain width can be
+       squeezed when the chip runs out of room, which turns the dot into an oval. */
+    flex: none;
+    width: 7px;
+    height: 7px;
+    min-width: 7px;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: var(--muted-foreground);
+  }
+
+  .state-dot.state-live {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 22%, transparent);
+    animation: var(--animate-halo);
+  }
+
+  .state-dot.state-connecting,
+  .state-dot.state-preparing,
+  .state-dot.state-reconnecting,
+  .state-dot.state-stopping,
+  .state-dot.state-draining {
+    background: var(--warn);
+    animation: var(--animate-halo);
+  }
+
+  .state-dot.state-error {
+    background: var(--destructive);
+  }
+
+  /*
+   * Signature: the level meter in the live badge. Five bars that ride with the
+   * state chip while a session is on air — the chip says "streaming", the meter
+   * says "moving".
+   */
+  .meter {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 12px;
+  }
+
+  .meter span {
+    width: 2px;
+    border-radius: 1px;
+    background: currentColor;
+    opacity: 0.85;
+    transform-origin: center;
+    animation: var(--animate-meter);
+  }
+
+  .meter span:nth-child(1) {
+    height: 40%;
+    animation-delay: -0.9s;
+  }
+
+  .meter span:nth-child(2) {
+    height: 75%;
+    animation-delay: -0.55s;
+  }
+
+  .meter span:nth-child(3) {
+    height: 100%;
+    animation-delay: -1.15s;
+  }
+
+  .meter span:nth-child(4) {
+    height: 60%;
+    animation-delay: -0.35s;
+  }
+
+  .meter span:nth-child(5) {
+    height: 85%;
+    animation-delay: -0.75s;
+  }
+
+  @keyframes meter {
+    0%,
+    100% {
+      transform: scaleY(0.35);
+    }
+    50% {
+      transform: scaleY(1);
+    }
+  }
+
+  @keyframes halo {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  /* ------------------------------------------------------------- workspace */
+
+  /* The only growing row of the column: everything the panes do (scrolling,
+     dragging) happens below this line, and it must never feed its content height
+     back into the shell. */
+  .workspace {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /*
+   * The drag handle between the playlist and the settings pane is the registry one,
+   * untouched: a 1 px line (`bg-border`) with the component's own wider grab area.
+   * The grip pill that used to be drawn here read as a control of its own, so the
+   * only thing left is the cursor and the hover/drag tint from `App.tsx`.
+   */
+  .workspace-handle {
+    cursor: col-resize;
+    transition: background 0.15s;
+  }
+
+  /* -------------------------------------------------------- panel headers */
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .panel-head h2 {
+    margin: 0;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .panel-head p {
+    margin: 1px 0 0;
+  }
+
+  .panel-head-actions {
+    display: flex;
+    gap: 5px;
+    flex: none;
+  }
+
+  .playlist {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    background: var(--surface-sunken);
+    /*
+     * No border of its own — the resize handle between the panes is the divider.
+     * `container-type` because the queue is draggable: its own width is what the
+     * detail panel responds to (see `.pi-delay-grid`).
+     */
+    container-type: inline-size;
+  }
+
+  /*
+   * The queue scrolls inside the registry `ScrollArea`, so its own scrollbar is the
+   * component's (right-hand side, thin, styled by the theme); the list itself is
+   * just the content and must not scroll.
+   */
+  .playlist-scroll {
+    flex: 1;
+    min-height: 0;
+  }
+
+  .playlist-items {
+    list-style: none;
+    margin: 0;
+    padding: 6px;
+    overflow: visible;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  /*
+   * Queue rows. Density is the point: the row is one line of name + one line of
+   * facts, the actions only appear on hover or while the row is the live one.
+   */
+  .playlist-item {
+    position: relative;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    background: color-mix(in oklab, var(--card) 55%, transparent);
+    padding: 6px 8px 6px 7px;
+    cursor: grab;
+    transition: background 0.14s, border-color 0.14s;
+  }
+
+  .playlist-item:hover {
+    background: color-mix(in oklab, var(--card) 85%, transparent);
+    border-color: var(--border);
+  }
+
+  /* The row that is on air: a left rail in the live colour, so the eye finds it
+     in the list before it reads anything. */
+  .playlist-item.current {
+    background: linear-gradient(90deg, color-mix(in oklab, var(--primary) 20%, transparent), transparent 70%);
+    border-color: color-mix(in oklab, var(--primary) 45%, transparent);
+  }
+
+  .playlist-item.current::before {
+    content: '';
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    left: -1px;
+    width: 2px;
+    border-radius: 999px;
+    background: var(--primary);
+  }
+
+  .playlist-item.drop-target {
+    border-color: var(--primary);
+    border-style: dashed;
+  }
+
+  .playlist-item.st-done {
+    opacity: 0.55;
+  }
+
+  .playlist-item.st-error {
+    border-color: color-mix(in oklab, var(--destructive) 45%, transparent);
+  }
+
+  .pi-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .pi-index {
+    display: grid;
+    place-items: center;
+    flex: none;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 3px;
+    border-radius: 6px;
+    background: color-mix(in oklab, var(--muted) 70%, transparent);
+    color: var(--muted-foreground);
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .playlist-item.current .pi-index {
+    background: var(--primary);
+    color: var(--primary-foreground);
+  }
+
+  .pi-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .pi-name {
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1.35;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    user-select: text;
+  }
+
+  .pi-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 1px;
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+
+  .pi-error {
+    margin-top: 2px;
+    color: var(--destructive);
+    font-size: 11px;
+  }
+
+  .pi-actions {
+    display: flex;
+    gap: 3px;
+    margin-top: 5px;
+    opacity: 0.55;
+    transition: opacity 0.14s;
+  }
+
+  .playlist-item:hover .pi-actions,
+  .playlist-item.current .pi-actions {
+    opacity: 1;
+  }
+
+  .pi-detail {
+    margin-top: 7px;
+    padding-top: 7px;
+    border-top: 1px dashed var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .pi-detail-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+  }
+
+  /*
+   * The two delay boxes side by side only when the panel is wide enough to hold
+   * both labels on one line; below that they stack. Keyed on the panel's own width
+   * (a container query) because the queue is draggable — a viewport media query
+   * would know nothing about how narrow the user made it.
+   */
+  .pi-delay-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+
+  @container (min-width: 250px) {
+    .pi-delay-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+
+  /*
+   * The "release to add" hint. It covers the WHOLE window: the drop zone is the
+   * app, not one panel, so the hint is drawn where the drop lands. It must keep
+   * `pointer-events: none` — the drop has to reach the elements underneath and
+   * bubble up to the window handlers.
+   */
+  .drop-overlay {
+    position: fixed;
+    inset: 4px;
+    z-index: 50;
+    display: grid;
+    place-items: center;
+    border: 1px dashed var(--primary);
+    border-radius: var(--radius-lg);
+    background: color-mix(in oklab, var(--primary) 14%, transparent);
+    backdrop-filter: blur(2px);
+    color: var(--foreground);
+    font-size: 13px;
+    font-weight: 600;
+    pointer-events: none;
+  }
+
+  /* -------------------------------------------------------------- settings */
+
+  .settings {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  .settings-body {
+    flex: 1;
+    /* Without `min-height: 0` a flex item refuses to shrink below its content,
+       which would push the transport bar down on the tall tabs. */
+    min-height: 0;
+    overflow-y: auto;
+    padding: 14px 16px 26px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /*
+   * The content of a tab, wrapped so the lock can be applied to it (see
+   * `inert` in SettingsPanel) without freezing the scroll container itself.
+   */
+  .settings-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  /*
+   * A scrolling column must let its children keep their natural height. Any flex
+   * item that hides its overflow — every shadcn `Card` does — otherwise loses its
+   * automatic minimum size and is crushed to nothing when the tab is taller than
+   * the pane (the encoder list came out 0 px high that way).
+   */
+  .settings-body > *,
+  .settings-fields > * {
+    flex-shrink: 0;
+  }
+
+  .settings-body[inert],
+  .settings-fields[inert] {
+    opacity: 0.5;
+  }
+
+  /* Section heading inside a tab (a group of fields). */
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 2px 0 -2px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /*
+   * Field layout. `Field`/`FieldLabel`/`FieldDescription` from the registry
+   * supply the semantics (ids, aria wiring) and these classes supply the
+   * geometry the settings grid is built on: label, control, hint — always in
+   * that order, so a row of fields lines up on the control, not on the label.
+   */
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .field-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--foreground);
+    line-height: 1.3;
+  }
+
+  .field-hint {
+    font-style: normal;
+    font-weight: 400;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--muted-foreground);
+  }
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 10px 12px;
+    /* Rows stay top aligned so controls line up even when hints differ in
+       length. */
+    align-items: start;
+  }
+
+  /* "Buffered playout" switch and its delay, on one row. The switch is centred
+     against the taller field beside it, so the row reads as one setting. */
+  .stream-mode-grid {
+    grid-template-columns: minmax(160px, 1fr) minmax(190px, 2fr);
+    align-items: center;
+  }
+
+  .hint {
+    margin: 0;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--muted-foreground);
+  }
+
+  /* Control + its unit, in one box: typing 6000 and picking kbps is one
+     decision, so it is one control. */
+  .unit-input {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .unit-input > :first-child {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .unit-input > :last-child {
+    width: 82px;
+    flex: none;
+  }
+
+  .res-field {
+    grid-column: span 2;
+  }
+
+  @media (max-width: 900px) {
+    .res-field {
+      grid-column: span 1;
+    }
+  }
+
+  .res-enable {
+    margin: 0;
+  }
+
+  .res-inputs {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  /* The width × height pair is one control: the two boxes keep a fixed width and
+     the × sits between them, so there is no slack to mis-read. */
+  .res-pair {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .res-pair input {
+    width: 84px;
+    flex: none;
+    font-family: var(--font-mono);
+  }
+
+  .res-x {
+    padding: 0 1px;
+    color: var(--muted-foreground);
+    font-size: 12px;
+  }
+
+  .auto-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .auto-check.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .color-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  /* Stream address / secret rows: the input keeps the room, the companion
+     control keeps a fixed column. */
+  .addr-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .addr-row > :first-child {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .addr-row > :last-child {
+    width: 148px;
+    flex: none;
+  }
+
+  .secret-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+  }
+
+  .secret-row > :first-child {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    letter-spacing: 0.04em;
+  }
+
+  .secret-toggle {
+    flex: none;
+    min-width: 62px;
+  }
+
+  /* Boolean settings: the switch sits next to its label, never pushed to the far
+     edge of the pane — a control that far from its own text reads as belonging to
+     whatever is next to it. */
+  .toggle {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 24px;
+    padding: 2px 0;
+  }
+
+  .toggle-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    font-size: 12px;
+    min-width: 0;
+  }
+
+  /* Locked while a stream is live. */
+  .lock-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 12px;
+    font-size: 12px;
+    color: var(--warn);
+    background: color-mix(in oklab, var(--warn) 8%, transparent);
+    border-bottom: 1px solid color-mix(in oklab, var(--warn) 30%, transparent);
+  }
+
+  /* The preset row above the tabs. */
+  .preset-bar {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 12px;
+    background: color-mix(in oklab, var(--card) 40%, transparent);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+
+  .preset-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  .preset-select {
+    flex: 1;
+    min-width: 180px;
+    max-width: 460px;
+  }
+
+  .preset-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 12px;
+    z-index: 30;
+    width: min(520px, calc(100% - 24px));
+    padding: 12px;
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--border);
+    background: var(--popover);
+    color: var(--popover-foreground);
+    box-shadow: 0 18px 40px color-mix(in oklab, var(--foreground) 30%, transparent);
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+
+  .preset-menu-title {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  .preset-menu-row {
+    display: flex;
+    gap: 7px;
+    align-items: center;
+  }
+
+  .preset-menu-note {
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--muted-foreground);
+    word-break: break-all;
+  }
+
+  /* Key/value readouts (about panel, command preview head). */
+  .kv-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .kv {
+    display: grid;
+    grid-template-columns: 140px 1fr;
+    gap: 10px;
+    align-items: baseline;
+    font-size: 11.5px;
+  }
+
+  .kv > span {
+    color: var(--muted-foreground);
+  }
+
+  .kv code {
+    word-break: break-all;
+    user-select: text;
+  }
+
+  .command-preview,
+  .test-result {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: color-mix(in oklab, var(--card) 45%, transparent);
+    padding: 10px 11px;
+    font-size: 12px;
+  }
+
+  /* The result's warning notes share the result's text size instead of the
+     global 11px `.small` utility; the smaller run looked like a different kind
+     of message rather than a footnote of the same result. */
+  .test-result .hint {
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  .command-preview pre,
+  .test-result pre {
+    margin: 6px 0 0;
+    padding: 9px 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface-sunken);
+    color: color-mix(in oklab, var(--foreground) 78%, transparent);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.55;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    user-select: text;
+  }
+
+  .cp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+  }
+
+  .cp-head > div {
+    display: flex;
+    gap: 5px;
+  }
+
+  /* Encoder availability list (advanced tab). */
+  .encoder-table {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 4px;
+  }
+
+  .enc-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: color-mix(in oklab, var(--card) 40%, transparent);
+    font-size: 11.5px;
+  }
+
+  .enc-row.off {
+    opacity: 0.45;
+  }
+
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+  }
+
+  .dot.hw {
+    background: var(--ok);
+  }
+
+  .dot.sw {
+    background: var(--primary);
+  }
+
+  .dot.na {
+    background: var(--muted-foreground);
+  }
+
+  .enc-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .enc-kind {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--muted-foreground);
+  }
+
+  /* -------------------------------------------------- workspace / transport */
+
+  /*
+   * The transport: the timeline leads (full width, nothing in front of it), the
+   * buttons sit to its right, and one line of small figures runs underneath.
+   */
+  .player {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    flex: none;
+    padding: 8px 12px 9px;
+    background: color-mix(in oklab, var(--card) 55%, var(--background));
+    border-top: 1px solid var(--border);
+  }
+
+  .player-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    align-items: center;
+    gap: 5px 12px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+  }
+
+  /*
+   * The readout line under the bar: one row, small, and never allowed to wrap —
+   * a wrapping line would change the height of the transport as the engine
+   * reports more (dropped frames, reconnects). The file name is the only part
+   * allowed to shrink.
+   */
+  .player-info {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0 2px;
+    font-size: 11px;
+    color: var(--muted-foreground);
+    white-space: nowrap;
+  }
+
+  .now-playing {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+
+  .np-label {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+
+  .np-name {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--foreground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    user-select: text;
+  }
+
+  /* The figures keep their width; the name above gives up its room first. */
+  .np-stats {
+    display: flex;
+    gap: 10px;
+    flex: none;
+    font-size: 11px;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ------------------------------------------------------------------ timeline */
+
+  .timeline {
+    min-width: 0;
+    padding: 1px 0;
+  }
+
+  .timeline-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .timeline-time {
+    flex: none;
+    min-width: 46px;
+    text-align: center;
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+
+  .timeline-bar {
+    position: relative;
+    flex: 1;
+    height: 18px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--surface-sunken);
+    cursor: pointer;
+    touch-action: none;
+  }
+
+  .timeline-bar.disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .timeline-seg {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    border-radius: 4px;
+    background: color-mix(in oklab, var(--muted) 65%, transparent);
+  }
+
+  .timeline-seg.st-done {
+    background: color-mix(in oklab, var(--encoded) 35%, transparent);
+  }
+
+  .timeline-seg.st-live {
+    background: color-mix(in oklab, var(--primary) 35%, transparent);
+  }
+
+  .timeline-seg.st-preparing {
+    background: color-mix(in oklab, var(--warn) 30%, transparent);
+  }
+
+  .timeline-seg.st-error {
+    background: color-mix(in oklab, var(--destructive) 35%, transparent);
+  }
+
+  .timeline-seg.current {
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, transparent);
+  }
+
+  .timeline-fill {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    border-radius: 4px;
+    background: linear-gradient(90deg, var(--primary), color-mix(in oklab, var(--signal) 60%, var(--primary)));
+    pointer-events: none;
+    transition: width 0.25s linear;
+  }
+
+  .timeline-bar.dragging .timeline-fill {
+    transition: none;
+  }
+
+  /*
+   * The encoder's position, as a strip along the BOTTOM EDGE of the main bar.
+   *
+   * Inside the bar on purpose: it measures the same axis as the blue fill
+   * (position in the playlist), so it reads as "this timeline, further along"
+   * rather than as an unrelated meter. Only in buffered mode, where the encoder
+   * is genuinely ahead of what has been published.
+   */
+  .timeline-encoded {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    left: 2px;
+    height: 4px;
+    border-radius: 2px;
+    background: color-mix(in oklab, var(--background) 80%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--encoded) 20%, transparent);
+    pointer-events: none;
+    overflow: hidden;
+  }
+
+  .timeline-encoded-fill {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 2px;
+    /* A gradient, dark to light along the strip: material waiting to air, read as
+       one band rather than as a texture. */
+    background: linear-gradient(
+      90deg,
+      color-mix(in oklab, var(--encoded) 55%, var(--background)),
+      var(--encoded)
+    );
+    transition: width 0.25s linear;
+  }
+
+  .timeline-bar.dragging .timeline-encoded-fill {
+    transition: none;
+  }
+
+  .timeline-divider {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 1px;
+    background: color-mix(in oklab, var(--foreground) 22%, transparent);
+    pointer-events: none;
+  }
+
+  .timeline-handle {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 3px;
+    margin-left: -1.5px;
+    border-radius: 999px;
+    background: var(--foreground);
+    box-shadow: 0 0 8px color-mix(in oklab, var(--primary) 90%, transparent);
+    pointer-events: none;
+    transition: left 0.25s linear;
+  }
+
+  .timeline-bar.dragging .timeline-handle {
+    width: 4px;
+  }
+
+  .timeline-tooltip {
+    position: absolute;
+    bottom: calc(100% + 7px);
+    left: 0;
+    transform: translateX(-50%);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-width: 320px;
+    padding: 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--popover);
+    box-shadow: 0 10px 26px color-mix(in oklab, var(--foreground) 28%, transparent);
+    white-space: nowrap;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .timeline-tooltip.dragging {
+    border-color: var(--primary);
+  }
+
+  .tt-name {
+    font-size: 11.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .tt-time {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: color-mix(in oklab, var(--signal) 80%, var(--foreground));
+  }
+
+  /* -------------------------------------------------------------------- logs */
+
+  .logs {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    border-top: 1px solid var(--border);
+    background: var(--surface-sunken);
+  }
+
+  .logs.expanded {
+    height: 232px;
+  }
+
+  .logs-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 5px 12px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .logs-head:hover {
+    background: color-mix(in oklab, var(--card) 45%, transparent);
+  }
+
+  .logs-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+  }
+
+  .chevron {
+    display: inline-flex;
+    color: var(--muted-foreground);
+    transition: transform 0.15s;
+  }
+
+  .chevron.open {
+    transform: rotate(90deg);
+  }
+
+  .logs-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* The toolbar belongs to the log body: collapsed, the header is only the
+     affordance to open the panel, so it is hidden rather than unmounted (the
+     header keeps a stable row of children). */
+  .logs-actions.collapsed {
+    display: none;
+  }
+
+  .seg {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: color-mix(in oklab, var(--card) 45%, transparent);
+  }
+
+  .seg-btn {
+    height: 22px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted-foreground);
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.13s, color 0.13s;
+  }
+
+  .seg-btn:hover {
+    background: color-mix(in oklab, var(--muted) 70%, transparent);
+    color: var(--foreground);
+  }
+
+  .seg-btn.active {
+    background: var(--primary);
+    color: var(--primary-foreground);
+    font-weight: 500;
+  }
+
+  .seg-sep {
+    align-self: stretch;
+    width: 1px;
+    margin: 2px 3px;
+    background: var(--border);
+  }
+
+  .logs-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    user-select: text;
+  }
+
+  .log-line {
+    display: flex;
+    gap: 8px;
+    padding: 1px 12px;
+    line-height: 1.6;
+  }
+
+  .log-line:hover {
+    background: color-mix(in oklab, var(--card) 40%, transparent);
+  }
+
+  .log-time {
+    flex: none;
+    color: color-mix(in oklab, var(--muted-foreground) 75%, transparent);
+  }
+
+  .log-tag {
+    flex: none;
+    width: 26px;
+    color: color-mix(in oklab, var(--muted-foreground) 80%, transparent);
+  }
+
+  .log-msg {
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
+  .lv-info .log-msg {
+    color: color-mix(in oklab, var(--foreground) 85%, transparent);
+  }
+
+  .lv-debug .log-msg {
+    color: var(--muted-foreground);
+  }
+
+  .lv-warn .log-msg {
+    color: var(--warn);
+  }
+
+  .lv-error .log-msg {
+    color: var(--destructive);
+  }
+
+  .lv-ffmpeg .log-msg {
+    color: color-mix(in oklab, var(--muted-foreground) 85%, transparent);
+  }
+
+  .lv-ffmpeg .log-tag {
+    color: color-mix(in oklab, var(--ok) 80%, transparent);
+  }
+
+  /* --------------------------------------------------------------- language */
+
+  .lang-btn {
+    gap: 6px;
+  }
+
+  .lang-globe {
+    color: var(--primary);
+  }
+
+  .lang-badge {
+    min-width: 16px;
+    font-weight: 600;
+    text-align: center;
+  }
+
+  .lang-menu {
+    min-width: 170px;
+  }
+
+  .lang-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .lang-item-badge {
+    min-width: 16px;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    text-align: center;
+  }
+
+  .lang-item.active .lang-item-badge {
+    color: var(--primary);
+  }
+
+  .lang-item-check {
+    margin-left: auto;
+    color: var(--primary);
+  }
+
+  /* ------------------------------------------------------------- utilities */
+
+  /* Anything whose value the user may want to copy. */
+  .selectable,
+  code,
+  pre {
+    user-select: text;
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .muted {
+    color: var(--muted-foreground);
+  }
+
+  .small {
+    font-size: 11px;
+  }
+
+  .warn {
+    color: var(--warn);
+  }
+
+  .bad {
+    color: var(--destructive);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .meter span,
+  .state-dot {
+    animation: none;
+  }
+}

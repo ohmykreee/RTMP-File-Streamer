@@ -52,6 +52,9 @@ build/           图标 · data-placeholder（打包成程序目录的 Data/）
 .github/workflows/  checks.yml（门禁）· build.yml（产物）· release.yml（附 release）
 ```
 
+两套后端**共存**：Electron 侧原样保留（main 分支持续 merge 进来，其测试套件仍是行为契约），
+feat-tauri分支的Tauri 侧是新增文件；shared/ 与 Data/ 的文件格式两端通用。见 §11。
+
 ## 命令
 
 ```bash
