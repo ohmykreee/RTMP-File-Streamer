@@ -6,7 +6,8 @@
  * MEANING follows the protocol:
  *  - RTMP/RTMPS: appended directly to the address (see `rtmp.ts`)
  *  - SRT: appended directly to the address too — no `passphrase` parameter is
- *    built for it, so an encryption passphrase belongs in the address itself
+ *    built for it, so an encryption passphrase has to be written into the key
+ *    field as `?passphrase=…`
  *  - RTSP: appended directly to the address path; full user:pass authentication
  *    can be written into the address itself
  *  - WHIP: sent as the muxer's Bearer token (`-authorization`, a JWT)
@@ -124,8 +125,9 @@ export function containerForProtocol(protocol: StreamProtocol | undefined): Cont
  * RTMP/RTMPS, SRT and RTSP carry the key IN the address — appended directly, the
  * rule `buildRtmpTarget` implements, with no separator and no query parameter of
  * its own (an SRT passphrase, if one is needed, has to be written into the
- * address). WHIP does not carry it in the address at all: the key rides in the
- * muxer's own `-authorization` option (see `protocolKeyArgs`).
+ * key field as `?passphrase=…`). WHIP does not carry it in the address at
+ * all: the key rides in the muxer's own `-authorization` option (see
+ * `protocolKeyArgs`).
  */
 export function buildPushTarget(address: string, streamKey: string, protocol: StreamProtocol | undefined): string {
   const base = (address ?? '').trim()
